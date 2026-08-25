@@ -2,7 +2,9 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"strings"
@@ -116,6 +118,55 @@ func TestRunExecReadsCommandFromStdin(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "hi-from-stdin") {
 		t.Fatalf("exec stdout = %q, want it to contain the echoed command output", out)
+	}
+}
+
+// TestStartRegistersParentJobWithNamespaceAndNodePool is a regression test
+// for NRT-P2-05 drift row 3: GC_NOMAD_NAMESPACE and GC_NOMAD_NODE_POOL must
+// both reach the registered parent job, or every session silently lands in
+// default/default instead of a lab cluster's named namespace/pool.
+func TestStartRegistersParentJobWithNamespaceAndNodePool(t *testing.T) {
+	srv := fakenomad.NewServer()
+	t.Cleanup(srv.Close)
+
+	t.Setenv(envAddr, srv.URL())
+	t.Setenv(envToken, "")
+	t.Setenv(envNamespace, "gc-lab")
+	t.Setenv(envNodePool, "lab-session")
+	t.Setenv(envParentJob, "gc-sessions")
+	t.Setenv(envSidecarDir, t.TempDir())
+
+	const session = "sess-namespace-nodepool"
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := run([]string{"start", session}, strings.NewReader(""), w, w); got != exitOK {
+		w.Close()
+		out, _ := io.ReadAll(r)
+		t.Fatalf("start = %d, want %d (output: %s)", got, exitOK, out)
+	}
+	w.Close()
+	r.Close()
+
+	resp, err := http.Get(srv.URL() + "/v1/job/gc-sessions?namespace=gc-lab")
+	if err != nil {
+		t.Fatalf("reading registered parent job: %v", err)
+	}
+	defer resp.Body.Close()
+	var job struct {
+		Namespace string
+		NodePool  string
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&job); err != nil {
+		t.Fatalf("decoding parent job: %v", err)
+	}
+	if job.Namespace != "gc-lab" {
+		t.Fatalf("parent job Namespace = %q, want %q", job.Namespace, "gc-lab")
+	}
+	if job.NodePool != "lab-session" {
+		t.Fatalf("parent job NodePool = %q, want %q", job.NodePool, "lab-session")
 	}
 }
 

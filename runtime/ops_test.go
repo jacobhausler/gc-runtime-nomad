@@ -339,7 +339,7 @@ func TestOpStartFaultPropagates(t *testing.T) {
 
 	// The parent job must exist before the dispatch call this start makes,
 	// so fault-inject the dispatch endpoint specifically.
-	if err := l.client.registerJob(ctx, parentJobSpec("default", l.parentJobID)); err != nil {
+	if err := l.client.registerJob(ctx, parentJobSpec("default", l.nodePool, l.parentJobID)); err != nil {
 		t.Fatalf("registerJob: %v", err)
 	}
 	srv.FailNext("POST", "/v1/job/"+l.parentJobID+"/dispatch", 500, `{"error":"injected"}`)

@@ -47,7 +47,7 @@ func TestReconcilerSimOutageThenRecoveryDrill(t *testing.T) {
 	l, srv := newTestLifecycle(t)
 	const session = "sess-drill"
 
-	if err := l.client.registerJob(context.Background(), parentJobSpec("default", l.parentJobID)); err != nil {
+	if err := l.client.registerJob(context.Background(), parentJobSpec("default", l.nodePool, l.parentJobID)); err != nil {
 		t.Fatalf("registerJob: %v", err)
 	}
 
