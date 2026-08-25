@@ -15,10 +15,7 @@ permissions:
 jobs:
   receipt:
     name: Phase-1 conformance receipt (full offline ladder)
-    runs-on: ubuntu-latest
-    # A self-hosted runner is being set up separately. Once available,
-    # switch to:
-    # runs-on: [self-hosted, linux, haus-gpu]
+    runs-on: ${{ github.event_name == 'push' && fromJSON('["self-hosted","linux","haus-gpu"]') || 'ubuntu-latest' }}
     timeout-minutes: 20
 
     steps:
