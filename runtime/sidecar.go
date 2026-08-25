@@ -15,17 +15,21 @@ import (
 
 // binding is the sidecar's record of a session's current child job (04 §1
 // "sidecar state dir": provider-owned KV under the city's private dir,
-// stable handles — current-child job ID per session). This bead scopes the
-// sidecar to exactly what start/stop/is-running/list-running need; the
-// fuller record (launched marker, dispatch-attempt counter, disputed
-// ledger, staleness datum, ...) is out of scope here (provision split /
-// staging land it later).
+// stable handles — current-child job ID per session, plus the launched
+// marker (04 §1/§6: the provision-vs-launched disambiguator). The fuller
+// record (dispatch-attempt counter, disputed ledger, staleness datum, ...)
+// is still out of scope here (staging lands it later).
 type binding struct {
 	SessionName string    `json:"session_name"`
 	ChildJobID  string    `json:"child_job_id"`
 	Namespace   string    `json:"namespace"`
 	Nonce       string    `json:"nonce"`
 	CreatedAt   time.Time `json:"created_at"`
+	// Launched distinguishes "provisioned, agent never launched" (false)
+	// from "launched" (true) — the two states that are otherwise
+	// observationally identical from the Nomad alloc alone (04 §6:
+	// RPP-PROVISION-001).
+	Launched bool `json:"launched"`
 }
 
 // sidecar is a file-based KV under a directory: one JSON file per session,
