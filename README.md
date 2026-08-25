@@ -27,15 +27,16 @@ runtime-nomad/
 ├── fakenomad/      # nested Go module: in-memory fake of the Nomad API this pack calls
 │   ├── go.mod      # module github.com/gastownhall/gc-runtime-nomad/fakenomad
 │   └── cmd/fakenomad/ # standalone process wrapping the fake server, for conformance.sh + CI
-└── runtime/        # nested Go module (zero gascity imports, zero external deps in production code)
-    ├── go.mod      # module github.com/gastownhall/gc-runtime-nomad (test-only require on ../fakenomad)
-    ├── main.go     # RPP op dispatch + env config
-    ├── client.go   # Nomad API client (register/dispatch/deregister/blocking reads/alloc-exec WS)
-    ├── exec_ws.go  # client-side RFC 6455 frame codec for the alloc-exec WebSocket
-    ├── jobspec.go  # parent job spec builder (04 §4 job-template invariants)
-    ├── sidecar.go  # session -> child-job-ID binding store + launched marker (04 §1 sidecar state dir)
-    ├── staging.go  # wire start config, envArgvSafe classification, tar-over-exec-stdin builder (NRT-P1-06)
-    └── ops.go      # start/stop/is-running/list-running/provision/exec/relaunch/stage, stop-path fs egress (NRT-P1-07)
+├── runtime/        # nested Go module (zero gascity imports, zero external deps in production code)
+│   ├── go.mod      # module github.com/gastownhall/gc-runtime-nomad (test-only require on ../fakenomad)
+│   ├── main.go     # RPP op dispatch + env config
+│   ├── client.go   # Nomad API client (register/dispatch/deregister/blocking reads/alloc-exec WS)
+│   ├── exec_ws.go  # client-side RFC 6455 frame codec for the alloc-exec WebSocket
+│   ├── jobspec.go  # parent job spec builder (04 §4 job-template invariants)
+│   ├── sidecar.go  # session -> child-job-ID binding store + launched marker (04 §1 sidecar state dir)
+│   ├── staging.go  # wire start config, envArgvSafe classification, tar-over-exec-stdin builder (NRT-P1-06)
+│   └── ops.go      # start/stop/is-running/list-running/provision/exec/relaunch/stage, stop-path fs egress (NRT-P1-07)
+└── drills/         # nested Go module: L4 reconciler-sim harness (NRT-P2-06a, 08 §1.1) — see drills/README.md
 ```
 
 ## Use
