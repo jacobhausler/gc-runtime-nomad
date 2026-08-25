@@ -2,6 +2,7 @@ package fakenomad
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/sha1"
 	"encoding/base64"
 	"encoding/binary"
@@ -24,11 +25,13 @@ const (
 )
 
 // handleExecWS fakes `GET /v1/client/allocation/:alloc_id/exec`. After a
-// successful handshake it drains client frames until it sees a
-// stdin-close, then actually runs the command carried in the `command`
-// query param (runCommand) and replies with its real stdout+stderr and
-// exit code — RPP-CONN-001's exit-code fidelity requires a genuine
-// per-command result, not a canned reply.
+// successful handshake it collects every stdin data frame the client sends
+// (NRT-P1-06 staging: a tar-over-exec-stdin payload rides here) until it
+// sees a stdin-close, then actually runs the command carried in the
+// `command` query param (runCommand) with that collected stdin wired to the
+// real subprocess, and replies with its real stdout+stderr and exit code —
+// RPP-CONN-001's exit-code fidelity requires a genuine per-command result,
+// not a canned reply.
 func (s *Server) handleExecWS(w http.ResponseWriter, r *http.Request, allocID string) {
 	s.mu.Lock()
 	_, ok := s.allocs[allocID]
@@ -66,6 +69,7 @@ func (s *Server) handleExecWS(w http.ResponseWriter, r *http.Request, allocID st
 		"Connection: Upgrade\r\n"+
 		"Sec-WebSocket-Accept: "+accept+"\r\n\r\n")
 
+	var stdin bytes.Buffer
 	for {
 		opcode, payload, err := wsReadFrame(buf.Reader)
 		if err != nil {
@@ -80,14 +84,24 @@ func (s *Server) handleExecWS(w http.ResponseWriter, r *http.Request, allocID st
 		}
 		var frame struct {
 			Stdin *struct {
-				Close bool `json:"close"`
+				Data  string `json:"data"`
+				Close bool   `json:"close"`
 			} `json:"stdin"`
 		}
 		if err := json.Unmarshal(payload, &frame); err != nil {
 			continue
 		}
-		if frame.Stdin != nil && frame.Stdin.Close {
-			exitCode, output := s.runCommand(allocID, command)
+		if frame.Stdin == nil {
+			continue
+		}
+		if frame.Stdin.Data != "" {
+			if decoded, err := base64.StdEncoding.DecodeString(frame.Stdin.Data); err == nil {
+				stdin.Write(decoded)
+			}
+			continue
+		}
+		if frame.Stdin.Close {
+			exitCode, output := s.runCommand(allocID, command, stdin.Bytes())
 			stdout, _ := json.Marshal(map[string]any{
 				"stdout": map[string]string{"data": base64.StdEncoding.EncodeToString(output)},
 			})

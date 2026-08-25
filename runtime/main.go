@@ -5,11 +5,15 @@
 // warm relaunch from NRT-P1-08 (provision, exec, relaunch), and — from
 // fnrt-szx — the driving verbs (nudge, peek, interrupt, send-keys,
 // clear-scrollback) realized as tmux commands sent into the session's tmux
-// pane over the same exec mechanism. Everything runs over Nomad job
-// dispatch/deregister/blocking-reads and the alloc-exec WebSocket (04
-// §3/§4/§6/§7). Every other op exits 2, the RPP forward-compatibility
-// signal a caller treats as a no-op success; staging (workspace/secrets
-// data contracts) is still out of scope.
+// pane over the same exec mechanism, and — from NRT-P1-06 — workspace and
+// secret staging: `start`/`provision` read an optional stageConfig (JSON) on
+// stdin and materialize its workspace files and secret env vars into the
+// alloc over tar-over-exec-stdin, the latter routed by the envArgvSafe
+// classification into $NOMAD_SECRETS_DIR rather than argv or the job spec
+// (04 §5, E1a §4.5). Everything runs over Nomad job dispatch/deregister/
+// blocking-reads and the alloc-exec WebSocket (04 §3/§4/§6/§7). Every other
+// op exits 2, the RPP forward-compatibility signal a caller treats as a
+// no-op success.
 //
 // Calling convention (no shell wrapping — gc execs the binary directly):
 //
@@ -59,10 +63,11 @@ const (
 )
 
 // protocolHandshakeJSON is the response to the `protocol` op. proc.provision
-// and proc.exec are declared now that both are implemented (04 §3); the
-// remaining v0-target capabilities (env.workspace/env.tooling/env.identity/
-// env.transcripts) stay undeclared until staging lands.
-const protocolHandshakeJSON = `{"version":0,"capabilities":["proc.provision","proc.exec"]}`
+// and proc.exec are declared now that both are implemented (04 §3);
+// env.workspace joins them as of NRT-P1-06 (workspace/secret staging over
+// exec-stdin). The remaining v0-target capabilities (env.tooling/
+// env.identity/env.transcripts) stay undeclared — out of scope here.
+const protocolHandshakeJSON = `{"version":0,"capabilities":["proc.provision","proc.exec","env.workspace"]}`
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
@@ -130,7 +135,14 @@ func run(args []string, stdin io.Reader, stdout, stderr *os.File) int {
 		if !ok {
 			return exitError
 		}
-		if err := l.opStart(ctx, name); err != nil {
+		// The wire start config rides on stdin (staging.go's stageConfig,
+		// NRT-P1-06) — empty stdin decodes to the zero value, so a caller
+		// that never sends one gets exactly the pre-staging behavior.
+		cfg, err := readStageConfig(stdin)
+		if err != nil {
+			return fail(err)
+		}
+		if err := l.opStartWithConfig(ctx, name, cfg); err != nil {
 			return fail(err)
 		}
 		return exitOK
@@ -176,7 +188,11 @@ func run(args []string, stdin io.Reader, stdout, stderr *os.File) int {
 		if !ok {
 			return exitError
 		}
-		if err := l.opProvision(ctx, name); err != nil {
+		cfg, err := readStageConfig(stdin)
+		if err != nil {
+			return fail(err)
+		}
+		if err := l.opProvisionWithConfig(ctx, name, cfg); err != nil {
 			return fail(err)
 		}
 		return exitOK

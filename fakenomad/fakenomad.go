@@ -191,7 +191,7 @@ func (s *Server) Close() {
 	s.httpSrv.Close()
 	for _, d := range dirs {
 		cmd := exec.Command("tmux", "kill-server")
-		cmd.Env = isolatedTmuxEnv(d)
+		cmd.Env = isolatedTmuxEnv(d, "")
 		_ = cmd.Run() // best-effort: no server running is not an error worth surfacing
 	}
 	_ = os.RemoveAll(s.execRoot)
@@ -732,6 +732,19 @@ func (s *Server) allocScratchDir(allocID string) string {
 	return dir
 }
 
+// allocSecretsDir lazily creates and returns allocID's own secrets
+// directory (NRT-P1-06 data contract: exec-stdin delivery into the task's
+// secrets dir, never job env/meta/argv — E1a §4.5). Real Nomad exposes this
+// as NOMAD_SECRETS_DIR pointing at a tmpfs unreadable via the client fs API;
+// this fake settles for an isolated on-disk directory under the alloc's own
+// scratch dir, which is enough to prove the provider writes secret files to
+// the right place rather than the workspace or job spec.
+func (s *Server) allocSecretsDir(allocID string) string {
+	dir := filepath.Join(s.allocScratchDir(allocID), "secrets")
+	_ = os.MkdirAll(dir, 0o700)
+	return dir
+}
+
 // runCommand actually executes command as a real subprocess and returns its
 // exit code plus combined stdout+stderr (e2a-exec-protocol: the fake proves
 // wire-level exit-code/output fidelity, not a canned reply). Each alloc gets
@@ -740,15 +753,21 @@ func (s *Server) allocScratchDir(allocID string) string {
 // fixed wire-contract constant, not something this fake can rename — never
 // collides across allocs sharing this one test machine's default tmux
 // server. An empty command (no caller sends one; kept for robustness)
-// preserves the pre-NRT-P1-05 scripted reply.
-func (s *Server) runCommand(allocID string, command []string) (int, []byte) {
+// preserves the pre-NRT-P1-05 scripted reply. stdin is wired to the real
+// subprocess (NRT-P1-06): staging's tar-over-exec-stdin workspace/secrets
+// payloads need a genuine pipe, not a canned reply, for the M3 receipt's
+// env.workspace probe to mean anything.
+func (s *Server) runCommand(allocID string, command []string, stdin []byte) (int, []byte) {
 	if len(command) == 0 {
 		return 0, []byte("ok\n")
 	}
 	dir := s.allocScratchDir(allocID)
 	cmd := exec.Command(command[0], command[1:]...)
 	cmd.Dir = dir
-	cmd.Env = isolatedTmuxEnv(dir)
+	cmd.Env = isolatedTmuxEnv(dir, s.allocSecretsDir(allocID))
+	if len(stdin) > 0 {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
@@ -791,13 +810,20 @@ func splitPath(p string) []string {
 // client can never resolve the caller's ambient server (a gc worker runs
 // inside tmux; an inherited $TMUX made kill-server take down the whole
 // host server and every sibling worker), then pins the socket dir.
-func isolatedTmuxEnv(dir string) []string {
-	env := make([]string, 0, len(os.Environ())+1)
+// secretsDir, if non-empty, is also exported as NOMAD_SECRETS_DIR (NRT-P1-06)
+// so a command run inside this env sees the same variable the real Nomad
+// exec driver sets.
+func isolatedTmuxEnv(dir, secretsDir string) []string {
+	env := make([]string, 0, len(os.Environ())+2)
 	for _, kv := range os.Environ() {
-		if strings.HasPrefix(kv, "TMUX=") || strings.HasPrefix(kv, "TMUX_TMPDIR=") {
+		if strings.HasPrefix(kv, "TMUX=") || strings.HasPrefix(kv, "TMUX_TMPDIR=") || strings.HasPrefix(kv, "NOMAD_SECRETS_DIR=") {
 			continue
 		}
 		env = append(env, kv)
 	}
-	return append(env, "TMUX_TMPDIR="+dir)
+	env = append(env, "TMUX_TMPDIR="+dir)
+	if secretsDir != "" {
+		env = append(env, "NOMAD_SECRETS_DIR="+secretsDir)
+	}
+	return env
 }

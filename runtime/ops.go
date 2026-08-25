@@ -22,11 +22,11 @@ const sessionLockPollInterval = 20 * time.Millisecond
 
 // lifecycle implements the RPP ops this pack scopes so far: the four
 // dispatch/deregister/blocking-read lifecycle ops (start, stop, is-running,
-// list-running, NRT-P1-03), plus the provision/launch split and warm
-// relaunch (provision, exec, relaunch, NRT-P1-08) — using the sidecar for
-// the session_name -> child-job-ID binding (04 §2.1: "sidecar binding is
-// primary") and its launched marker (04 §1/§6). Staging (workspace/secrets
-// data contracts, 04 §5) is still out of scope.
+// list-running, NRT-P1-03), the provision/launch split and warm relaunch
+// (provision, exec, relaunch, NRT-P1-08), and workspace/secret staging
+// (stage, NRT-P1-06, 04 §5) — using the sidecar for the session_name ->
+// child-job-ID binding (04 §2.1: "sidecar binding is primary") and its
+// launched marker (04 §1/§6).
 type lifecycle struct {
 	client      *client
 	sidecar     *sidecar
@@ -139,14 +139,37 @@ const execTaskName = "agent"
 // exactly this session.
 const tmuxSessionName = "main"
 
-// launchCommand is the detached tmux-client command that turns a
+// buildLaunchCommand is the detached tmux-client command that turns a
 // provisioned (tmux-only) box into a launched one (04 §3 provision row +
 // R1c-04 launch invariant): it returns immediately, and the agent it starts
 // is parented to the tmux server inside the task cgroup, never to the exec
-// session that issued it. Building the real agent bootstrap command that
-// replaces the placeholder session below is staging work, out of scope
-// here.
-var launchCommand = []string{"tmux", "new-session", "-d", "-s", tmuxSessionName}
+// session that issued it. The command itself is still a placeholder tmux
+// session, not a real agent bootstrap command line — replacing it is out of
+// scope here (jobspec.go's sessionTask has the same caveat).
+//
+// env's argvSafe-classified entries (envArgvSafe, NRT-P1-06) ride as `-e
+// KEY=VALUE` on this argv — safe by construction, since envArgvSafe's whole
+// job is excluding anything credential-shaped from ever reaching argv
+// (E1a §4.5). Everything else in env was already routed to the secrets dir
+// by stage before launch runs; it never appears here. Keys are sorted so
+// the command is deterministic across calls with the same env.
+func buildLaunchCommand(env map[string]string) []string {
+	cmd := []string{"tmux", "new-session", "-d", "-s", tmuxSessionName}
+	if len(env) == 0 {
+		return cmd
+	}
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		if envArgvSafe(k) {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		cmd = append(cmd, "-e", k+"="+env[k])
+	}
+	return cmd
+}
 
 // isTerminalStatus reports whether a Nomad alloc ClientStatus is terminal.
 func isTerminalStatus(status string) bool {
@@ -168,12 +191,25 @@ func isTerminalStatus(status string) bool {
 // constant, R1a-02: gc's exec proxy infers ErrSessionExists from that exact
 // phrase).
 func (l *lifecycle) opProvision(ctx context.Context, sessionName string) error {
+	return l.opProvisionWithConfig(ctx, sessionName, stageConfig{})
+}
+
+// opProvisionWithConfig is opProvision plus NRT-P1-06 staging: once the box
+// is dispatched (and therefore exec-able, RPP-PROVISION-001), cfg's
+// workspace files and secret env vars are materialized into it before this
+// returns — staging does not wait for launch, since a provisioned-but-not-
+// launched box already answers exec and the agent bootstrap command started
+// at launch time expects its workspace and secrets to already be in place.
+func (l *lifecycle) opProvisionWithConfig(ctx context.Context, sessionName string, cfg stageConfig) error {
 	unlock, err := l.lockSession(ctx, sessionName)
 	if err != nil {
 		return err
 	}
 	defer unlock()
-	return l.dispatch(ctx, sessionName)
+	if err := l.dispatch(ctx, sessionName); err != nil {
+		return err
+	}
+	return l.stage(ctx, sessionName, cfg)
 }
 
 // opStart is provision + launch (04 §3 start row): dispatch a fresh child,
@@ -190,6 +226,16 @@ func (l *lifecycle) opProvision(ctx context.Context, sessionName string) error {
 // retry resumes straight to launch instead of dispatching a second child or
 // being rejected by dispatch's already-exists check.
 func (l *lifecycle) opStart(ctx context.Context, sessionName string) error {
+	return l.opStartWithConfig(ctx, sessionName, stageConfig{})
+}
+
+// opStartWithConfig is opStart plus NRT-P1-06 staging: cfg's workspace
+// files and secret env vars are materialized (l.stage) after the box is
+// dispatched (or adopted via resumeUnlaunched) and before launch, so the
+// agent bootstrap command that launch execs finds its workspace and secrets
+// already in place. cfg.Env's argvSafe subset also rides launch's tmux
+// argv (buildLaunchCommand) — never the secrets dir.
+func (l *lifecycle) opStartWithConfig(ctx context.Context, sessionName string, cfg stageConfig) error {
 	unlock, err := l.lockSession(ctx, sessionName)
 	if err != nil {
 		return err
@@ -199,13 +245,19 @@ func (l *lifecycle) opStart(ctx context.Context, sessionName string) error {
 	if resume, err := l.resumeUnlaunched(ctx, sessionName); err != nil {
 		return err
 	} else if resume {
-		return l.markLaunched(ctx, sessionName)
+		if err := l.stage(ctx, sessionName, cfg); err != nil {
+			return err
+		}
+		return l.markLaunched(ctx, sessionName, cfg.Env)
 	}
 
 	if err := l.dispatch(ctx, sessionName); err != nil {
 		return err
 	}
-	return l.markLaunched(ctx, sessionName)
+	if err := l.stage(ctx, sessionName, cfg); err != nil {
+		return err
+	}
+	return l.markLaunched(ctx, sessionName, cfg.Env)
 }
 
 // resumeUnlaunched reports whether sessionName has a binding whose child
@@ -242,7 +294,10 @@ func (l *lifecycle) opRelaunch(ctx context.Context, sessionName string) error {
 	if _, err := l.currentAlloc(ctx, sessionName); err != nil {
 		return fmt.Errorf("relaunching session %q: %w", sessionName, err)
 	}
-	return l.markLaunched(ctx, sessionName)
+	// No fresh env rides a relaunch (04 §7: it re-execs into the SAME alloc
+	// with no fresh dispatch) — the box's workspace/secrets were already
+	// staged at start/provision time and are still there.
+	return l.markLaunched(ctx, sessionName, nil)
 }
 
 // opExec runs command inside sessionName's current alloc over the Nomad
@@ -440,15 +495,15 @@ func (l *lifecycle) findOrphanByNonce(ctx context.Context, sessionName, nonce st
 	return "", false, nil
 }
 
-// launch execs launchCommand into sessionName's current alloc — the
-// detached tmux-client call that starts the agent (04 §3 provision row
+// launch execs buildLaunchCommand(env) into sessionName's current alloc —
+// the detached tmux-client call that starts the agent (04 §3 provision row
 // launch invariant).
-func (l *lifecycle) launch(ctx context.Context, sessionName string) error {
+func (l *lifecycle) launch(ctx context.Context, sessionName string, env map[string]string) error {
 	allocID, err := l.currentAlloc(ctx, sessionName)
 	if err != nil {
 		return err
 	}
-	exitCode, dbgOut, err := l.client.execAlloc(ctx, allocID, execTaskName, launchCommand)
+	exitCode, dbgOut, err := l.client.execAlloc(ctx, allocID, execTaskName, buildLaunchCommand(env))
 	if err != nil {
 		return fmt.Errorf("launching session %q: %w", sessionName, err)
 	}
@@ -461,8 +516,10 @@ func (l *lifecycle) launch(ctx context.Context, sessionName string) error {
 // markLaunched launches sessionName's agent and, only once that succeeds,
 // records the launched marker in the sidecar binding — shared by opStart
 // (provision then launch) and opRelaunch (launch only, no re-dispatch).
-func (l *lifecycle) markLaunched(ctx context.Context, sessionName string) error {
-	if err := l.launch(ctx, sessionName); err != nil {
+// env's argvSafe subset rides the launch command (buildLaunchCommand);
+// opRelaunch passes nil since no fresh env accompanies a relaunch.
+func (l *lifecycle) markLaunched(ctx context.Context, sessionName string, env map[string]string) error {
+	if err := l.launch(ctx, sessionName, env); err != nil {
 		return err
 	}
 	b, ok, err := l.sidecar.load(sessionName)
@@ -474,6 +531,81 @@ func (l *lifecycle) markLaunched(ctx context.Context, sessionName string) error 
 	}
 	b.Launched = true
 	return l.sidecar.save(*b)
+}
+
+// stage materializes cfg's workspace files and secret env vars into
+// sessionName's current alloc (NRT-P1-06, 04 §5 data contract) over two
+// tar-over-exec-stdin calls: cfg.Files (the CopyFiles/workspace-in analog)
+// extracted under cfg.WorkDir, and cfg.Env's non-argvSafe entries (the
+// secret ones — envArgvSafe's whole point, E1a §4.5) extracted as individual
+// files under $NOMAD_SECRETS_DIR. Neither channel ever touches the job spec,
+// argv, or the sidecar — the only place secret BYTES appear is the
+// alloc-exec WebSocket stream itself (accepted residual, 05 §7 R9). A
+// zero-value cfg is a no-op, so start/provision behave exactly as before
+// staging landed when a caller sends no config.
+func (l *lifecycle) stage(ctx context.Context, sessionName string, cfg stageConfig) error {
+	if len(cfg.Files) > 0 {
+		data, err := buildTar(cfg.Files)
+		if err != nil {
+			return fmt.Errorf("staging workspace for %q: %w", sessionName, err)
+		}
+		workDir := cfg.WorkDir
+		if workDir == "" {
+			workDir = "."
+		}
+		command := []string{
+			"/bin/sh", "-c",
+			`mkdir -p "$1" && tar -x -f - -C "$1"`,
+			"stage-workspace", workDir,
+		}
+		if err := l.execStage(ctx, sessionName, command, data); err != nil {
+			return fmt.Errorf("staging workspace for %q: %w", sessionName, err)
+		}
+	}
+
+	var secretFiles []stageFile
+	for k, v := range cfg.Env {
+		if envArgvSafe(k) {
+			continue
+		}
+		secretFiles = append(secretFiles, stageFile{Path: k, Content: []byte(v), Mode: 0o600})
+	}
+	if len(secretFiles) > 0 {
+		data, err := buildTar(secretFiles)
+		if err != nil {
+			return fmt.Errorf("staging secrets for %q: %w", sessionName, err)
+		}
+		command := []string{
+			"/bin/sh", "-c",
+			`mkdir -p "$NOMAD_SECRETS_DIR" && tar -x -f - -C "$NOMAD_SECRETS_DIR"`,
+			"stage-secrets",
+		}
+		if err := l.execStage(ctx, sessionName, command, data); err != nil {
+			return fmt.Errorf("staging secrets for %q: %w", sessionName, err)
+		}
+	}
+	return nil
+}
+
+// execStage runs command inside sessionName's current alloc with stdin
+// attached (execAllocStdin) and turns a nonzero exit into an error — the
+// shared tail stage's two tar-extraction calls need. Deliberately does not
+// echo stdin (the tar bytes) into any error message: a failing tar's own
+// stderr/stdout (out) is safe to surface, but stdin here may carry secret
+// content the error path must never leak.
+func (l *lifecycle) execStage(ctx context.Context, sessionName string, command []string, stdin []byte) error {
+	allocID, err := l.currentAlloc(ctx, sessionName)
+	if err != nil {
+		return err
+	}
+	exitCode, out, err := l.client.execAllocStdin(ctx, allocID, execTaskName, command, stdin)
+	if err != nil {
+		return err
+	}
+	if exitCode != 0 {
+		return fmt.Errorf("tar exited %d: %s", exitCode, out)
+	}
+	return nil
 }
 
 // errSessionNotFound marks a currentAlloc failure caused by the session

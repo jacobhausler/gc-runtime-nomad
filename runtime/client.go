@@ -259,6 +259,19 @@ type execFrame struct {
 // enough to make both fakenomad and real Nomad run the command and report
 // its result.
 func (c *client) execAlloc(ctx context.Context, allocID, task string, command []string) (int, []byte, error) {
+	return c.execAllocStdin(ctx, allocID, task, command, nil)
+}
+
+// execStdinChunkSize bounds each stdin data frame so a large workspace/
+// secrets tar (NRT-P1-06) is streamed rather than built as one oversized
+// WebSocket frame.
+const execStdinChunkSize = 32 * 1024
+
+// execAllocStdin is execAlloc's stdin-carrying twin: it writes stdin (if
+// any) as one or more base64 data frames before the stdin-close frame that
+// makes both fakenomad and real Nomad actually run the command — the
+// tar-over-exec-stdin channel NRT-P1-06's workspace/secrets staging rides.
+func (c *client) execAllocStdin(ctx context.Context, allocID, task string, command []string, stdin []byte) (int, []byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -278,6 +291,21 @@ func (c *client) execAlloc(ctx context.Context, allocID, task string, command []
 		case <-done:
 		}
 	}()
+
+	for len(stdin) > 0 {
+		chunk := stdin
+		if len(chunk) > execStdinChunkSize {
+			chunk = chunk[:execStdinChunkSize]
+		}
+		dataFrame, err := json.Marshal(map[string]any{"stdin": map[string]any{"data": base64.StdEncoding.EncodeToString(chunk)}})
+		if err != nil {
+			return 0, nil, fmt.Errorf("encoding exec stdin-data frame: %w", err)
+		}
+		if err := wsWriteMaskedFrame(conn, wsOpText, dataFrame); err != nil {
+			return 0, nil, fmt.Errorf("writing exec stdin-data frame: %w", err)
+		}
+		stdin = stdin[len(chunk):]
+	}
 
 	closeFrame, err := json.Marshal(map[string]any{"stdin": map[string]any{"close": true}})
 	if err != nil {
