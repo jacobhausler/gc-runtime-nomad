@@ -115,7 +115,7 @@ func TestOpListRunning(t *testing.T) {
 		t.Fatalf("stop bravo: %v", err)
 	}
 
-	names, err := l.opListRunning(ctx)
+	names, err := l.opListRunning(ctx, "")
 	if err != nil {
 		t.Fatalf("list-running: %v", err)
 	}
@@ -134,12 +134,79 @@ func TestOpListRunning(t *testing.T) {
 // ever started) yields an empty, non-error list.
 func TestOpListRunningEmpty(t *testing.T) {
 	l, _ := newTestLifecycle(t)
-	names, err := l.opListRunning(context.Background())
+	names, err := l.opListRunning(context.Background(), "")
 	if err != nil {
 		t.Fatalf("list-running: %v", err)
 	}
 	if len(names) != 0 {
 		t.Fatalf("list-running = %v, want empty", names)
+	}
+}
+
+// TestOpListRunningFiltersByPrefix confirms ListRunning(prefix) (04 §2.1
+// rule 3) filters the DECODED session names to the given prefix rather than
+// over-reporting every launched session regardless of what was asked for.
+func TestOpListRunningFiltersByPrefix(t *testing.T) {
+	l, _ := newTestLifecycle(t)
+	ctx := context.Background()
+
+	for _, s := range []string{"city-a-sess1", "city-a-sess2", "city-b-sess1"} {
+		if err := l.opStart(ctx, s); err != nil {
+			t.Fatalf("start %q: %v", s, err)
+		}
+	}
+
+	names, err := l.opListRunning(ctx, "city-a-")
+	if err != nil {
+		t.Fatalf("list-running: %v", err)
+	}
+	want := []string{"city-a-sess1", "city-a-sess2"}
+	if len(names) != len(want) {
+		t.Fatalf("list-running(prefix) = %v, want %v", names, want)
+	}
+	for i, n := range want {
+		if names[i] != n {
+			t.Fatalf("list-running(prefix) = %v, want %v", names, want)
+		}
+	}
+
+	if names, err := l.opListRunning(ctx, "no-such-prefix-"); err != nil || len(names) != 0 {
+		t.Fatalf("list-running(no-such-prefix) = (%v, %v), want (empty, nil)", names, err)
+	}
+}
+
+// TestOpListRunningUsesChildrenOfParentNotStaleSidecar confirms list-running
+// enumerates the children-of-parent jobs list (04 §2.1 rule 2/3) rather than
+// trusting the sidecar as the existence source: a binding whose child job
+// was deregistered out-of-band (never going through opStop, so the sidecar
+// binding itself is untouched) must NOT be reported as running — the
+// children list, not the sidecar, is what says the child went terminal.
+func TestOpListRunningUsesChildrenOfParentNotStaleSidecar(t *testing.T) {
+	l, _ := newTestLifecycle(t)
+	ctx := context.Background()
+	const session = "sess-stale-binding"
+
+	if err := l.opStart(ctx, session); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	b, ok, err := l.sidecar.load(session)
+	if err != nil || !ok {
+		t.Fatalf("load binding: (%v, %v, %v)", b, ok, err)
+	}
+
+	// Deregister the child job directly against the fake, out-of-band from
+	// opStop, leaving the sidecar binding (Launched=true) untouched — the
+	// exact drift the children-of-parent list must not over-report through.
+	if _, err := l.client.deregisterJob(ctx, b.ChildJobID, false); err != nil {
+		t.Fatalf("deregisterJob: %v", err)
+	}
+
+	names, err := l.opListRunning(ctx, "")
+	if err != nil {
+		t.Fatalf("list-running: %v", err)
+	}
+	if len(names) != 0 {
+		t.Fatalf("list-running after out-of-band deregister = %v, want empty (stale sidecar binding must not over-report)", names)
 	}
 }
 
@@ -160,7 +227,7 @@ func TestOpProvisionThenExecWithoutLaunch(t *testing.T) {
 	if running, err := l.opIsRunning(ctx, session); err != nil || running {
 		t.Fatalf("is-running after provision = (%v, %v), want (false, nil)", running, err)
 	}
-	names, err := l.opListRunning(ctx)
+	names, err := l.opListRunning(ctx, "")
 	if err != nil {
 		t.Fatalf("list-running: %v", err)
 	}

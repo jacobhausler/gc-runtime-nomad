@@ -149,7 +149,11 @@ func run(args []string, stdout, stderr *os.File) int {
 		return exitOK
 
 	case "list-running":
-		names, err := l.opListRunning(ctx)
+		prefix := ""
+		if len(rest) > 0 {
+			prefix = rest[0]
+		}
+		names, err := l.opListRunning(ctx, prefix)
 		if err != nil {
 			return fail(err)
 		}

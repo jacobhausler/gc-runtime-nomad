@@ -451,6 +451,93 @@ func TestClientFSCat(t *testing.T) {
 	}
 }
 
+// TestListJobsChildrenOfParent drives the `GET /v1/jobs` children-of-parent
+// enumeration a list-running cluster-recovery path reads (04 §2.1 rule
+// 2/3): Meta is present only with `?meta=true`, ParentID identifies the
+// dispatching parent, and Status reflects whether the child's allocation is
+// still non-terminal ("running") or driven terminal by a non-purge
+// deregister ("dead").
+func TestListJobsChildrenOfParent(t *testing.T) {
+	srv := NewServer()
+	defer srv.Close()
+
+	httpJSON(t, http.MethodPost, srv.URL()+"/v1/jobs", map[string]any{"Job": map[string]any{"ID": "parent-a"}}, &map[string]any{})
+	httpJSON(t, http.MethodPost, srv.URL()+"/v1/jobs", map[string]any{"Job": map[string]any{"ID": "parent-b"}}, &map[string]any{})
+
+	var dispatchOut map[string]any
+	httpJSON(t, http.MethodPost, srv.URL()+"/v1/job/parent-a/dispatch",
+		map[string]any{"Meta": map[string]string{"gc_session": "sess-1"}}, &dispatchOut)
+	childID, _ := dispatchOut["DispatchedJobID"].(string)
+
+	httpJSON(t, http.MethodPost, srv.URL()+"/v1/job/parent-b/dispatch",
+		map[string]any{"Meta": map[string]string{"gc_session": "other-city-sess"}}, &map[string]any{})
+
+	// Without meta=true, Meta is omitted (bandwidth-saving default a real
+	// Nomad jobs-list honors).
+	var noMeta []map[string]any
+	status, _ := httpJSON(t, http.MethodGet, srv.URL()+"/v1/jobs", nil, &noMeta)
+	if status != http.StatusOK {
+		t.Fatalf("list jobs: status = %d, want 200", status)
+	}
+	for _, j := range noMeta {
+		if _, ok := j["Meta"]; ok {
+			t.Fatalf("list jobs without meta=true: entry %v carries Meta, want omitted", j)
+		}
+	}
+
+	var withMeta []map[string]any
+	status, _ = httpJSON(t, http.MethodGet, srv.URL()+"/v1/jobs?meta=true", nil, &withMeta)
+	if status != http.StatusOK {
+		t.Fatalf("list jobs (meta=true): status = %d, want 200", status)
+	}
+	var childA map[string]any
+	for _, j := range withMeta {
+		if j["ID"] == childID {
+			childA = j
+		}
+	}
+	if childA == nil {
+		t.Fatalf("list jobs (meta=true) = %v, missing child %q", withMeta, childID)
+	}
+	if childA["ParentID"] != "parent-a" {
+		t.Fatalf("child ParentID = %v, want %q", childA["ParentID"], "parent-a")
+	}
+	if childA["Status"] != "running" {
+		t.Fatalf("child Status = %v, want %q (fresh dispatch has a non-terminal alloc)", childA["Status"], "running")
+	}
+	meta, _ := childA["Meta"].(map[string]any)
+	if meta["gc_session"] != "sess-1" {
+		t.Fatalf("child Meta[gc_session] = %v, want %q", meta["gc_session"], "sess-1")
+	}
+
+	// Deregister (without purge) drives the child's allocation terminal, so
+	// the job record survives (still listed) but Status flips to "dead".
+	req, err := http.NewRequest(http.MethodDelete, srv.URL()+"/v1/job/"+childID, nil)
+	if err != nil {
+		t.Fatalf("build deregister request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("deregister: %v", err)
+	}
+	resp.Body.Close()
+
+	var afterStop []map[string]any
+	httpJSON(t, http.MethodGet, srv.URL()+"/v1/jobs?meta=true", nil, &afterStop)
+	var childAfterStop map[string]any
+	for _, j := range afterStop {
+		if j["ID"] == childID {
+			childAfterStop = j
+		}
+	}
+	if childAfterStop == nil {
+		t.Fatalf("list jobs after deregister = %v, missing child %q (non-purge deregister must not remove the job record)", afterStop, childID)
+	}
+	if childAfterStop["Status"] != "dead" {
+		t.Fatalf("child Status after deregister = %v, want %q", childAfterStop["Status"], "dead")
+	}
+}
+
 // TestTraceRecordsRequestOrder confirms Trace() reflects requests in
 // arrival order — the ordering guarantee a stop-path egress test relies on
 // to assert fs reads precede deregister.

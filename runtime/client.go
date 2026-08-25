@@ -98,6 +98,43 @@ func (c *client) dispatchChild(ctx context.Context, parentID, sessionName, nonce
 	return out.DispatchedJobID, nil
 }
 
+// childJob is one entry of a children-of-parent jobs list (04 §2.1 rule
+// 2/3): the subset opListRunning needs to decode identity and filter
+// non-terminal children — never the job ID itself, which is not invertible
+// back to a session name (e2a-job-id-charset-gap).
+type childJob struct {
+	ID       string
+	Meta     map[string]string
+	Terminal bool
+}
+
+// listChildJobs lists every job dispatched from parentID via the Nomad jobs
+// endpoint with `meta=true` (e2a-amend-jobs-list-params), filtering
+// client-side on ParentID — real Nomad's jobs-list has no parent-filter
+// param of its own. This is the children-of-parent mechanism list-running's
+// ListRunning(prefix) reads (04 §2.1 rule 2/3): meta decode, never ID-string
+// parsing.
+func (c *client) listChildJobs(ctx context.Context, parentID string) ([]childJob, error) {
+	q := url.Values{"meta": []string{"true"}}
+	var out []struct {
+		ID       string
+		ParentID string
+		Status   string
+		Meta     map[string]string
+	}
+	if _, err := c.doIndexed(ctx, defaultTimeout, http.MethodGet, []string{"v1", "jobs"}, q, nil, &out); err != nil {
+		return nil, fmt.Errorf("listing nomad jobs: %w", err)
+	}
+	var children []childJob
+	for _, j := range out {
+		if j.ParentID != parentID {
+			continue
+		}
+		children = append(children, childJob{ID: j.ID, Meta: j.Meta, Terminal: j.Status != "running"})
+	}
+	return children, nil
+}
+
 // allocRecord is the subset of a Nomad allocation the lifecycle ops need.
 type allocRecord struct {
 	ID            string

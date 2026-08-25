@@ -104,11 +104,10 @@ func (s *sidecar) remove(sessionName string) error {
 	return nil
 }
 
-// list returns every current binding — the basis for list-running's
-// sidecar-primary enumeration (04 §2.1 rule 1: "sidecar binding is
-// primary"). Cluster-side recovery (rule 2, listing the parent's children
-// when the sidecar is missing/cold) needs a children-list endpoint fakenomad
-// does not implement, so it is out of scope for this bead.
+// list returns every current binding. opListRunning uses it only for the
+// launched marker (04 §6 RPP-PROVISION-001) — existence and non-terminal
+// status now come from the children-of-parent jobs list (04 §2.1 rule 2/3),
+// not this sidecar scan.
 func (s *sidecar) list() ([]binding, error) {
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {

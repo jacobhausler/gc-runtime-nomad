@@ -89,7 +89,7 @@ them.
 | `relaunch` | Re-execs the launch command into the SAME alloc — no fresh dispatch — then sets the launched marker (04 §7 warm relaunch, launch-only fingerprint drift). Fails if the session has no live alloc to relaunch into. |
 | `stop` | If `GC_NOMAD_EGRESS_DIR` is set, first copies the session's transcript/evidence files (via the Nomad client fs API) into it and receipts completion in the sidecar. Then deregisters the session's child job without purge, confirms terminal via a blocking read, and tombstones the sidecar binding. Idempotent — a session with no binding is a no-op success, and a stop that fails after egress but before deregister does not re-copy files on retry. |
 | `is-running` | Prints `true`/`false`. False whenever the launched marker is unset, even if the alloc is running (RPP-PROVISION-001: "provisioned, agent never launched" reads as not-running). Once launched, the honesty split (04 §6) applies — Nomad API unavailability never flips this to `false`, it answers last-known-good instead. |
-| `list-running` | Prints one running session name per line — launched sessions only, sidecar-primary (04 §2.1). Exits 1 on any lookup error rather than returning a partial list. |
+| `list-running [prefix]` | Prints one running session name per line — launched sessions only. Enumerates the children-of-parent jobs list (`GET /v1/jobs?meta=true`, 04 §2.1 rule 2/3) rather than trusting the sidecar as the existence source, decodes each non-terminal child's `gc_session` Meta key, and — when a prefix argument is given — filters the decoded names to it (`ListRunning(prefix)`, E2a amendment A-1). The sidecar is still consulted for the launched marker, which the children list alone cannot answer. Exits 1 on any lookup error rather than returning a partial list. |
 
 Every other operation exits 2 — the RPP forward-compatibility signal the
 caller treats as a no-op success. The remaining driving verbs (`nudge`,
@@ -107,10 +107,6 @@ scope for this phase — they land in later phases (see `fnrt-szx`).
   structurally-valid tmux-only placeholder (`jobspec.go`), not a real
   agent-bootstrap supervisor binary, and the launch command is a bare
   `tmux new-session`, not a real agent command line.
-- Cluster-side recovery for `list-running` (04 §2.1 rule 2: listing the
-  parent's children when the sidecar is missing/cold) — `fakenomad`
-  implements no children-list endpoint, and this pack's `list-running` is
-  sidecar-only.
 - The fuller sidecar record (dispatch-attempt counter, disputed-children
   ledger, staleness datum, single-flight lock) — this pack's sidecar
   binding is scoped to exactly what start/stop/is-running/list-running/

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -349,33 +350,43 @@ func (l *lifecycle) opIsRunning(ctx context.Context, sessionName string) (bool, 
 	return false, nil
 }
 
-// opListRunning enumerates every session with a non-terminal child alloc
-// AND the launched marker set (a provisioned-but-not-launched box is not
-// "running" — same gate as opIsRunning), sidecar-primary per 04 §2.1 rule
-// 1/3 (cluster-side recovery via a children-of-parent list is out of scope:
-// fakenomad implements no such endpoint). On ANY lookup error it returns an
-// error rather than a partial list — matching the "list-based reap arms
-// defer on ANY error" contract (04 §6).
-func (l *lifecycle) opListRunning(ctx context.Context) ([]string, error) {
+// opListRunning enumerates every launched, non-terminal session, per 04
+// §2.1 rule 2/3: the children-of-parent jobs list (meta=true) is the source
+// of existence — never the sidecar, which can drift stale — filtered to
+// non-terminal children, decoded via each child's `gc_session` Meta key
+// (never ID-string parsing, e2a-job-id-charset-gap), and then to prefix, if
+// one was given (ListRunning(prefix), E2a amendment A-1). The sidecar is
+// still consulted for exactly one thing the children list cannot answer:
+// the launched marker (04 §6 RPP-PROVISION-001) — a provisioned-but-not-
+// launched box is not "running", same gate as opIsRunning. On ANY lookup
+// error it returns an error rather than a partial list — matching the
+// "list-based reap arms defer on ANY error" contract (04 §6).
+func (l *lifecycle) opListRunning(ctx context.Context, prefix string) ([]string, error) {
+	children, err := l.client.listChildJobs(ctx, l.parentJobID)
+	if err != nil {
+		return nil, fmt.Errorf("list-running: listing children of %q: %w", l.parentJobID, err)
+	}
 	bindings, err := l.sidecar.list()
 	if err != nil {
 		return nil, err
 	}
-	var names []string
+	launched := make(map[string]bool, len(bindings))
 	for _, b := range bindings {
-		if b.ChildJobID == "" || !b.Launched {
+		if b.ChildJobID != "" && b.Launched {
+			launched[b.ChildJobID] = true
+		}
+	}
+
+	var names []string
+	for _, c := range children {
+		if c.Terminal || !launched[c.ID] {
 			continue
 		}
-		allocs, _, err := l.client.listAllocsForJob(ctx, b.ChildJobID, 0, 0)
-		if err != nil {
-			return nil, fmt.Errorf("list-running: checking session %q: %w", b.SessionName, err)
+		name := c.Meta["gc_session"]
+		if name == "" || (prefix != "" && !strings.HasPrefix(name, prefix)) {
+			continue
 		}
-		for _, a := range allocs {
-			if !isTerminalStatus(a.ClientStatus) {
-				names = append(names, b.SessionName)
-				break
-			}
-		}
+		names = append(names, name)
 	}
 	sort.Strings(names)
 	return names, nil

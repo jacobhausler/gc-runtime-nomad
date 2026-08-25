@@ -240,6 +240,8 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodPost && len(parts) == 2 && parts[0] == "v1" && parts[1] == "jobs":
 		s.registerJob(w, r, "")
+	case r.Method == http.MethodGet && len(parts) == 2 && parts[0] == "v1" && parts[1] == "jobs":
+		s.listJobs(w, r)
 	case r.Method == http.MethodGet && len(parts) == 2 && parts[0] == "v1" && parts[1] == "allocations":
 		s.listAllocs(w, r)
 	case r.Method == http.MethodGet && len(parts) == 3 && parts[0] == "v1" && parts[1] == "allocation":
@@ -290,6 +292,67 @@ func (s *Server) registerJob(w http.ResponseWriter, r *http.Request, pathID stri
 		"KnownLeader":    true,
 		"LastContact":    0,
 	})
+}
+
+// jobListEntry is one row of the `GET /v1/jobs` response: the subset of a
+// Nomad job summary a children-of-parent list needs (04 §2.1 rule 2/3).
+// Meta is included only when the request carries `?meta=true` (real Nomad
+// omits it from the list endpoint by default to save bandwidth — the
+// children-of-parent recovery path relies on that param, e2a-amend-jobs-
+// list-params) and Status reflects whether the job currently has any
+// non-terminal allocation ("running") or not ("dead"), the job-level
+// non-terminal signal `list-running`'s children-of-parent enumeration
+// filters on.
+type jobListEntry struct {
+	ID        string
+	ParentID  string
+	Namespace string
+	Status    string
+	Meta      map[string]string `json:"Meta,omitempty"`
+}
+
+// listJobs answers `GET /v1/jobs` (optionally `?meta=true`) — the
+// children-of-parent enumeration a list-running cluster-recovery path reads
+// (04 §2.1 rule 2/3): every job filters client-side on ParentID, since this
+// fake mirrors real Nomad's jobs-list endpoint, which has no parent filter
+// param of its own.
+func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
+	includeMeta := r.URL.Query().Get("meta") == "true"
+
+	s.mu.Lock()
+	idx := s.index
+	out := make([]jobListEntry, 0, len(s.jobs))
+	for _, j := range s.jobs {
+		status := "dead"
+		for _, a := range s.allocs {
+			if a.JobID == j.ID && !terminalAllocStatus(a.ClientStatus) {
+				status = "running"
+				break
+			}
+		}
+		entry := jobListEntry{ID: j.ID, ParentID: j.ParentID, Namespace: j.Namespace, Status: status}
+		if includeMeta {
+			entry.Meta = j.Meta
+		}
+		out = append(out, entry)
+	}
+	s.mu.Unlock()
+
+	w.Header().Set("X-Nomad-Index", strconv.FormatUint(idx, 10))
+	writeJSON(w, http.StatusOK, out)
+}
+
+// terminalAllocStatus reports whether a Nomad alloc ClientStatus is
+// terminal — mirrors the provider's own isTerminalStatus (runtime/ops.go);
+// duplicated here since fakenomad is a standalone module with zero deps on
+// the runtime package.
+func terminalAllocStatus(status string) bool {
+	switch status {
+	case "complete", "failed", "lost":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Server) dispatchJob(w http.ResponseWriter, r *http.Request, parentID string) {
