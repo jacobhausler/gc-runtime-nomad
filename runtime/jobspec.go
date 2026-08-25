@@ -74,7 +74,7 @@ func sessionTaskGroup() nomadTaskGroup {
 		Disconnect: &nomadDisconnect{
 			Replace:   boolPtr(false),
 			Reconcile: "keep_original",
-			LostAfter: lostAfter.String(),
+			LostAfter: lostAfter.Nanoseconds(),
 		},
 		// bridge networking so the host-network fatal-rule constraint above
 		// has a placement to fail closed against (04 §4, R2a-05).
@@ -101,7 +101,7 @@ func sessionTask() nomadTask {
 			CPU:      sessionCPU,
 			MemoryMB: sessionMemoryMB,
 		},
-		KillTimeout: killTimeout.String(),
+		KillTimeout: killTimeout.Nanoseconds(),
 		// No identity{env|file}, Vault, Consul, or template blocks: Nomad's
 		// default workload identity is fail-closed already, and this design
 		// keeps it that way as a named control (04 §4, R2a-05) — so nothing
@@ -158,7 +158,12 @@ type nomadReschedulePolicy struct {
 type nomadDisconnect struct {
 	Replace   *bool  `json:"Replace,omitempty"`
 	Reconcile string `json:"Reconcile,omitempty"`
-	LostAfter string `json:"LostAfter,omitempty"`
+	// Nomad's API marshals time.Duration fields as int64 nanoseconds, not
+	// a Go duration string (empirically confirmed against real Nomad
+	// v2.0.5 — NRT-P2-05; fakenomad never validated this, so the drift
+	// was invisible to the offline L1 suite until run against a real
+	// cluster).
+	LostAfter int64 `json:"LostAfter,omitempty"`
 }
 
 type nomadNetwork struct {
@@ -170,7 +175,7 @@ type nomadTask struct {
 	Driver      string         `json:"Driver"`
 	Config      map[string]any `json:"Config,omitempty"`
 	Resources   nomadResources `json:"Resources"`
-	KillTimeout string         `json:"KillTimeout,omitempty"`
+	KillTimeout int64          `json:"KillTimeout,omitempty"`
 }
 
 type nomadResources struct {

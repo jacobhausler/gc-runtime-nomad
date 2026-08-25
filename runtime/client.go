@@ -72,13 +72,25 @@ func newClient(addr, token, namespace string) (*client, error) {
 }
 
 // registerJob upserts a job spec. Nomad's job register is idempotent, so
-// callers can call this on every start without a check-then-act race.
+// callers can call this on every start without a check-then-act race. The
+// namespace rides the Job body itself (Nomad honors Job.Namespace on this
+// route), matching every other route's explicit ?namespace= query param.
 func (c *client) registerJob(ctx context.Context, job nomadJob) error {
 	return c.do(ctx, defaultTimeout, http.MethodPost, []string{"v1", "jobs"}, map[string]any{"Job": job}, nil)
 }
 
 type dispatchResult struct {
 	DispatchedJobID string
+}
+
+// nsQuery returns the ?namespace= query value every non-default-namespace
+// route needs (NRT-P2-05: confirmed empirically against a real cluster —
+// Nomad's dispatch/list/deregister/fs/exec routes resolve against namespace
+// "default" unless a query param names the target namespace; there is no
+// header fallback. fakenomad's single global job map never enforced
+// namespace scoping, so this gap was invisible to the offline L1/L2 suites).
+func (c *client) nsQuery() url.Values {
+	return url.Values{"namespace": []string{c.namespace}}
 }
 
 // dispatchChild dispatches a child of parentID, carrying only non-secret
@@ -89,7 +101,7 @@ func (c *client) dispatchChild(ctx context.Context, parentID, sessionName, nonce
 		"Meta": map[string]string{"gc_session": sessionName, "gc_nonce": nonce},
 	}
 	var out dispatchResult
-	if err := c.do(ctx, defaultTimeout, http.MethodPost, []string{"v1", "job", parentID, "dispatch"}, body, &out); err != nil {
+	if _, err := c.doIndexed(ctx, defaultTimeout, http.MethodPost, []string{"v1", "job", parentID, "dispatch"}, c.nsQuery(), body, &out); err != nil {
 		return "", err
 	}
 	if out.DispatchedJobID == "" {
@@ -117,7 +129,8 @@ type childJob struct {
 // orphan-adoption lookup (rule 6) read: meta decode, never ID-string
 // parsing.
 func (c *client) listChildJobs(ctx context.Context, parentID string) ([]childJob, error) {
-	q := url.Values{"meta": []string{"true"}}
+	q := c.nsQuery()
+	q.Set("meta", "true")
 	var out []struct {
 		ID       string
 		ParentID string
@@ -151,7 +164,7 @@ type allocRecord struct {
 // and duplicate-start detection.
 func (c *client) listAllocsForJob(ctx context.Context, jobID string, sinceIndex uint64, wait time.Duration) ([]allocRecord, uint64, error) {
 	parts := []string{"v1", "job", jobID, "allocations"}
-	q := url.Values{}
+	q := c.nsQuery()
 	if sinceIndex > 0 && wait > 0 {
 		q.Set("index", strconv.FormatUint(sinceIndex, 10))
 		q.Set("wait", wait.String())
@@ -170,7 +183,7 @@ func (c *client) listAllocsForJob(ctx context.Context, jobID string, sinceIndex 
 // folded to success so stop stays idempotent.
 func (c *client) deregisterJob(ctx context.Context, jobID string, purge bool) (uint64, error) {
 	parts := []string{"v1", "job", jobID}
-	q := url.Values{}
+	q := c.nsQuery()
 	if purge {
 		q.Set("purge", "true")
 	}
@@ -199,7 +212,8 @@ func (c *client) readAllocFile(ctx context.Context, allocID, path string) ([]byt
 	ctx, cancel := context.WithTimeout(ctx, defaultTimeout)
 	defer cancel()
 
-	q := url.Values{"path": []string{path}}
+	q := c.nsQuery()
+	q.Set("path", path)
 	target := c.urlFor([]string{"v1", "client", "fs", "cat", allocID}, q)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
 	if err != nil {
@@ -366,7 +380,7 @@ func (c *client) dialExecWS(ctx context.Context, allocID, task string, command [
 	if err != nil {
 		return nil, fmt.Errorf("encoding exec command: %w", err)
 	}
-	q := url.Values{}
+	q := c.nsQuery()
 	q.Set("command", string(cmdJSON))
 	q.Set("task", task)
 	q.Set("tty", "false")
