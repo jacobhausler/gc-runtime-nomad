@@ -143,6 +143,125 @@ func TestOpListRunningEmpty(t *testing.T) {
 	}
 }
 
+// TestOpProvisionThenExecWithoutLaunch is the RPP-PROVISION-001 acceptance
+// check: after provision (no launch), is-running is false, list-running
+// omits the session, YET the box already answers exec — proving the
+// launched marker, not mere alloc existence, is what is-running keys off
+// (04 §6 decision table).
+func TestOpProvisionThenExecWithoutLaunch(t *testing.T) {
+	l, _ := newTestLifecycle(t)
+	ctx := context.Background()
+	const session = "sess-provisioned"
+
+	if err := l.opProvision(ctx, session); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+
+	if running, err := l.opIsRunning(ctx, session); err != nil || running {
+		t.Fatalf("is-running after provision = (%v, %v), want (false, nil)", running, err)
+	}
+	names, err := l.opListRunning(ctx)
+	if err != nil {
+		t.Fatalf("list-running: %v", err)
+	}
+	if len(names) != 0 {
+		t.Fatalf("list-running after provision = %v, want empty", names)
+	}
+
+	exitCode, out, err := l.opExec(ctx, session, []string{"echo", "hi"})
+	if err != nil {
+		t.Fatalf("exec on provisioned-not-launched session: %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("exec exit code = %d, want 0", exitCode)
+	}
+	if len(out) == 0 {
+		t.Fatalf("exec stdout = empty, want fakenomad's scripted reply")
+	}
+
+	// provision is idempotent-rejecting exactly like start: a second
+	// provision on the same live (non-terminal, unlaunched) box is a
+	// duplicate.
+	if err := l.opProvision(ctx, session); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("duplicate provision error = %v, want an \"already exists\" error", err)
+	}
+}
+
+// TestOpStartLaunchesOverExec confirms opStart's launch half actually goes
+// over the alloc-exec WebSocket (is-running only flips true once that
+// succeeds — TestLifecycleRoundTrip covers the is-running assertion; this
+// test additionally confirms exec still answers post-launch).
+func TestOpStartLaunchesOverExec(t *testing.T) {
+	l, _ := newTestLifecycle(t)
+	ctx := context.Background()
+	const session = "sess-launched"
+
+	if err := l.opStart(ctx, session); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if running, err := l.opIsRunning(ctx, session); err != nil || !running {
+		t.Fatalf("is-running after start = (%v, %v), want (true, nil)", running, err)
+	}
+	if _, _, err := l.opExec(ctx, session, []string{"true"}); err != nil {
+		t.Fatalf("exec after start: %v", err)
+	}
+}
+
+// TestOpRelaunchReusesTheSameAlloc drives the warm-relaunch path (04 §7):
+// provision, relaunch (no prior opStart), and confirm the child job ID is
+// unchanged — i.e. relaunch never re-dispatches — while is-running flips
+// true exactly like a full start would.
+func TestOpRelaunchReusesTheSameAlloc(t *testing.T) {
+	l, _ := newTestLifecycle(t)
+	ctx := context.Background()
+	const session = "sess-relaunch"
+
+	if err := l.opProvision(ctx, session); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	before, ok, err := l.sidecar.load(session)
+	if err != nil || !ok {
+		t.Fatalf("sidecar.load before relaunch = (%v, %v, %v)", before, ok, err)
+	}
+
+	if err := l.opRelaunch(ctx, session); err != nil {
+		t.Fatalf("relaunch: %v", err)
+	}
+
+	after, ok, err := l.sidecar.load(session)
+	if err != nil || !ok {
+		t.Fatalf("sidecar.load after relaunch = (%v, %v, %v)", after, ok, err)
+	}
+	if after.ChildJobID != before.ChildJobID {
+		t.Fatalf("relaunch child job ID = %q, want unchanged %q (no re-dispatch)", after.ChildJobID, before.ChildJobID)
+	}
+	if !after.Launched {
+		t.Fatalf("relaunch did not set the launched marker")
+	}
+	if running, err := l.opIsRunning(ctx, session); err != nil || !running {
+		t.Fatalf("is-running after relaunch = (%v, %v), want (true, nil)", running, err)
+	}
+}
+
+// TestOpRelaunchWithoutABoxFails confirms relaunch on a session with no
+// provisioned box (never started/provisioned) fails rather than silently
+// dispatching one — relaunch never re-dispatches (04 §7).
+func TestOpRelaunchWithoutABoxFails(t *testing.T) {
+	l, _ := newTestLifecycle(t)
+	if err := l.opRelaunch(context.Background(), "never-provisioned"); err == nil {
+		t.Fatalf("relaunch on never-provisioned session: got nil error, want failure")
+	}
+}
+
+// TestOpExecOnUnprovisionedSessionFails confirms exec on a session with no
+// binding at all fails cleanly rather than panicking or dialing nothing.
+func TestOpExecOnUnprovisionedSessionFails(t *testing.T) {
+	l, _ := newTestLifecycle(t)
+	if _, _, err := l.opExec(context.Background(), "never-provisioned", []string{"echo", "hi"}); err == nil {
+		t.Fatalf("exec on never-provisioned session: got nil error, want failure")
+	}
+}
+
 // TestOpStartFaultPropagates confirms a scripted dispatch fault surfaces as
 // an error rather than a silently-successful start (fakenomad's L2 fault
 // injection, driven through the ops layer).

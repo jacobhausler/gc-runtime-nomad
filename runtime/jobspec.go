@@ -86,9 +86,14 @@ func sessionTaskGroup() nomadTaskGroup {
 func sessionTask() nomadTask {
 	return nomadTask{
 		Name: "agent",
-		// Real driver/config (the tmux+agent supervisor) is provision/
-		// staging work — out of scope for this bead (NRT-P1-03 out_of_scope:
-		// "driving verbs; staging; provision split"). This placeholder
+		// Provision dispatches a tmux-ONLY task (04 §3 provision row): the
+		// task's own command is a bare supervisor that starts the tmux
+		// server and exits when it dies, carrying no agent. The agent is
+		// launched afterward as a separate detached tmux-client command
+		// over alloc-exec (ops.go's launch/launchCommand) — never baked
+		// into this task's command. Wiring a real tmux-server supervisor
+		// binary into Config is staging work (untestable against
+		// fakenomad, which never executes task commands); this placeholder
 		// keeps the job spec structurally valid for dispatch.
 		Driver: "exec",
 		Config: map[string]any{"command": "/bin/true"},

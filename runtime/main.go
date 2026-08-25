@@ -1,11 +1,13 @@
 // Command gc-runtime-nomad is a Runtime Provider Protocol (RPP) v0
 // executable that runs Gas City sessions as dispatched Nomad jobs. It
-// answers the `protocol` handshake and the four lifecycle ops this phase
-// scopes — start, stop, is-running, list-running — over Nomad job
-// dispatch/deregister/blocking reads (NRT-P1-03: 04 §3/§4/§6). Every other
-// op exits 2, the RPP forward-compatibility signal a caller treats as a
-// no-op success; driving verbs (exec/nudge/peek/...), staging, and the
-// provision/launch split are out of scope for this phase.
+// answers the `protocol` handshake, the four lifecycle ops from NRT-P1-03
+// (start, stop, is-running, list-running), and the provision/launch split
+// plus warm relaunch from NRT-P1-08 (provision, exec, relaunch) — all over
+// Nomad job dispatch/deregister/blocking-reads and the alloc-exec WebSocket
+// (04 §3/§4/§6/§7). Every other op exits 2, the RPP forward-compatibility
+// signal a caller treats as a no-op success; the remaining driving verbs
+// (nudge/peek/...) and staging (workspace/secrets data contracts) are still
+// out of scope.
 //
 // Calling convention (no shell wrapping — gc execs the binary directly):
 //
@@ -16,6 +18,10 @@
 //	0  success
 //	1  failure (message on stderr)
 //	2  unknown / unimplemented op (forward-compatible no-op for the caller)
+//
+// exec is the one exception: its own exit code IS the remote command's exit
+// code (04 §3 exec row, RPP-CONN-001), not this 0/1/2 convention — a
+// transport-level exec failure (can't reach the alloc at all) still exits 1.
 //
 // Configuration comes from the environment:
 //
@@ -48,8 +54,11 @@ const (
 	exitUnknown = 2
 )
 
-// protocolHandshakeJSON is the response to the `protocol` op.
-const protocolHandshakeJSON = `{"version":0,"capabilities":[]}`
+// protocolHandshakeJSON is the response to the `protocol` op. proc.provision
+// and proc.exec are declared now that both are implemented (04 §3); the
+// remaining v0-target capabilities (env.workspace/env.tooling/env.identity/
+// env.transcripts) stay undeclared until staging lands.
+const protocolHandshakeJSON = `{"version":0,"capabilities":["proc.provision","proc.exec"]}`
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -64,6 +73,9 @@ var lifecycleOps = map[string]bool{
 	"stop":         true,
 	"is-running":   true,
 	"list-running": true,
+	"provision":    true,
+	"relaunch":     true,
+	"exec":         true,
 }
 
 // run dispatches one RPP operation. It is separated from main so tests can
@@ -145,6 +157,48 @@ func run(args []string, stdout, stderr *os.File) int {
 			fmt.Fprintln(stdout, n)
 		}
 		return exitOK
+
+	case "provision":
+		name, ok := needName()
+		if !ok {
+			return exitError
+		}
+		if err := l.opProvision(ctx, name); err != nil {
+			return fail(err)
+		}
+		return exitOK
+
+	case "relaunch":
+		name, ok := needName()
+		if !ok {
+			return exitError
+		}
+		if err := l.opRelaunch(ctx, name); err != nil {
+			return fail(err)
+		}
+		return exitOK
+
+	case "exec":
+		name, ok := needName()
+		if !ok {
+			return exitError
+		}
+		if len(rest) < 2 {
+			fmt.Fprintf(stderr, "gc-runtime-nomad %s: missing command\n", op)
+			return exitError
+		}
+		exitCode, out, err := l.opExec(ctx, name, rest[1:])
+		if err != nil {
+			return fail(err)
+		}
+		if _, err := stdout.Write(out); err != nil {
+			fmt.Fprintf(stderr, "gc-runtime-nomad %s: writing stdout: %v\n", op, err)
+			return exitError
+		}
+		// Unlike the other lifecycle ops, exec's own exit code IS the
+		// remote command's exit code (04 §3 exec row: "op exit = command
+		// exit", RPP-CONN-001) — not the 0/1/2 lifecycle-op convention.
+		return exitCode
 
 	default:
 		// Unreachable: lifecycleOps gates entry to this switch. Kept as a

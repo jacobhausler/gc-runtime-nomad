@@ -1,12 +1,17 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -17,6 +22,7 @@ import (
 const (
 	defaultTimeout  = 10 * time.Second
 	blockingWait    = 5 * time.Second
+	execTimeout     = 30 * time.Second
 	maxResponseByte = 1 << 20
 )
 
@@ -191,6 +197,183 @@ func blockingTimeout(wait time.Duration) time.Duration {
 		return defaultTimeout
 	}
 	return wait + defaultTimeout
+}
+
+// execFrame decodes the two alloc-exec WebSocket frame shapes this client
+// reads: a stdout data chunk and the terminal exited/exit_code frame
+// (e2a-exec-protocol).
+type execFrame struct {
+	Stdout *struct {
+		Data string `json:"data"`
+	} `json:"stdout,omitempty"`
+	Exited bool `json:"exited,omitempty"`
+	Result struct {
+		ExitCode int `json:"exit_code"`
+	} `json:"result,omitempty"`
+}
+
+// execAlloc runs command inside task of allocID over the Nomad alloc-exec
+// WebSocket (GET /v1/client/allocation/:alloc_id/exec, e2a-exec-protocol)
+// and returns the remote command's exit code plus its collected stdout. No
+// stdin is sent — every caller (launch/relaunch's tmux command, driving-verb
+// probes) needs none — so the stdin channel is closed immediately, which is
+// enough to make both fakenomad and real Nomad run the command and report
+// its result.
+func (c *client) execAlloc(ctx context.Context, allocID, task string, command []string) (int, []byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	conn, err := c.dialExecWS(ctx, allocID, task, command)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(execTimeout))
+
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.SetDeadline(time.Now())
+		case <-done:
+		}
+	}()
+
+	closeFrame, err := json.Marshal(map[string]any{"stdin": map[string]any{"close": true}})
+	if err != nil {
+		return 0, nil, fmt.Errorf("encoding exec stdin-close frame: %w", err)
+	}
+	if err := wsWriteMaskedFrame(conn, wsOpText, closeFrame); err != nil {
+		return 0, nil, fmt.Errorf("writing exec stdin-close frame: %w", err)
+	}
+
+	var stdout bytes.Buffer
+	for {
+		opcode, payload, err := wsReadFrame(conn)
+		if err != nil {
+			return 0, nil, fmt.Errorf("reading exec frame: %w", err)
+		}
+		if opcode != wsOpText {
+			continue
+		}
+		var msg execFrame
+		if err := json.Unmarshal(payload, &msg); err != nil {
+			return 0, nil, fmt.Errorf("decoding exec frame: %w", err)
+		}
+		if msg.Stdout != nil && msg.Stdout.Data != "" {
+			decoded, err := base64.StdEncoding.DecodeString(msg.Stdout.Data)
+			if err != nil {
+				return 0, nil, fmt.Errorf("decoding exec stdout: %w", err)
+			}
+			stdout.Write(decoded)
+		}
+		if msg.Exited {
+			return msg.Result.ExitCode, stdout.Bytes(), nil
+		}
+	}
+}
+
+// wsConn is the subset of net.Conn the exec frame codec needs, satisfied by
+// the raw connection returned from dialExecWS after its handshake.
+type wsConn interface {
+	io.ReadWriteCloser
+	SetDeadline(t time.Time) error
+}
+
+// bufferedConn wraps a net.Conn whose handshake was read through a
+// *bufio.Reader, so any bytes the reader buffered past the handshake
+// headers (frame data arriving in the same TCP segment) are not lost.
+type bufferedConn struct {
+	net.Conn
+	r *bufio.Reader
+}
+
+func (b *bufferedConn) Read(p []byte) (int, error) { return b.r.Read(p) }
+
+// dialExecWS dials allocID's exec endpoint and performs the client side of
+// the RFC 6455 handshake, returning a connection positioned to read/write
+// exec frames.
+func (c *client) dialExecWS(ctx context.Context, allocID, task string, command []string) (wsConn, error) {
+	cmdJSON, err := json.Marshal(command)
+	if err != nil {
+		return nil, fmt.Errorf("encoding exec command: %w", err)
+	}
+	q := url.Values{}
+	q.Set("command", string(cmdJSON))
+	q.Set("task", task)
+	q.Set("tty", "false")
+
+	host := c.addr.Host
+	var d net.Dialer
+	var conn net.Conn
+	if c.addr.Scheme == "https" {
+		conn, err = (&tls.Dialer{NetDialer: &d}).DialContext(ctx, "tcp", host)
+	} else {
+		conn, err = d.DialContext(ctx, "tcp", host)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("dialing nomad exec websocket: %w", err)
+	}
+
+	keyBuf := make([]byte, 16)
+	if _, err := rand.Read(keyBuf); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("generating websocket key: %w", err)
+	}
+	key := base64.StdEncoding.EncodeToString(keyBuf)
+
+	base := strings.TrimRight(c.addr.Path, "/")
+	path := base + "/v1/client/allocation/" + allocID + "/exec?" + q.Encode()
+
+	var req bytes.Buffer
+	fmt.Fprintf(&req, "GET %s HTTP/1.1\r\n", path)
+	fmt.Fprintf(&req, "Host: %s\r\n", host)
+	req.WriteString("Upgrade: websocket\r\n")
+	req.WriteString("Connection: Upgrade\r\n")
+	fmt.Fprintf(&req, "Sec-WebSocket-Key: %s\r\n", key)
+	req.WriteString("Sec-WebSocket-Version: 13\r\n")
+	if c.token != "" {
+		fmt.Fprintf(&req, "X-Nomad-Token: %s\r\n", c.token)
+	}
+	req.WriteString("\r\n")
+
+	if _, err := conn.Write(req.Bytes()); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("writing websocket handshake: %w", err)
+	}
+
+	br := bufio.NewReader(conn)
+	statusLine, err := br.ReadString('\n')
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("reading websocket handshake status: %w", err)
+	}
+	if !strings.Contains(statusLine, "101") {
+		conn.Close()
+		return nil, fmt.Errorf("nomad exec websocket handshake failed: %s", strings.TrimSpace(statusLine))
+	}
+
+	var acceptKey string
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("reading websocket handshake headers: %w", err)
+		}
+		if line == "\r\n" || line == "\n" {
+			break
+		}
+		if k, v, ok := strings.Cut(strings.TrimRight(line, "\r\n"), ":"); ok && strings.EqualFold(strings.TrimSpace(k), "Sec-WebSocket-Accept") {
+			acceptKey = strings.TrimSpace(v)
+		}
+	}
+	if acceptKey != wsAcceptKey(key) {
+		conn.Close()
+		return nil, fmt.Errorf("nomad exec websocket handshake: Sec-WebSocket-Accept mismatch")
+	}
+
+	return &bufferedConn{Conn: conn, r: br}, nil
 }
 
 func (c *client) do(ctx context.Context, timeout time.Duration, method string, parts []string, body, out any) error {
