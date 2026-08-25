@@ -52,6 +52,7 @@ const (
 type Job struct {
 	ID          string
 	Namespace   string
+	NodePool    string
 	ParentID    string
 	Dispatched  bool
 	Meta        map[string]string
@@ -407,6 +408,7 @@ func (s *Server) registerJob(w http.ResponseWriter, r *http.Request, pathID stri
 		Job struct {
 			ID        string            `json:"ID"`
 			Namespace string            `json:"Namespace"`
+			NodePool  string            `json:"NodePool"`
 			Meta      map[string]string `json:"Meta"`
 		} `json:"Job"`
 	}
@@ -426,7 +428,7 @@ func (s *Server) registerJob(w http.ResponseWriter, r *http.Request, pathID stri
 
 	s.mu.Lock()
 	idx := s.bumpIndexLocked()
-	s.jobs[id] = &Job{ID: id, Namespace: ns, Meta: req.Job.Meta, ModifyIndex: idx}
+	s.jobs[id] = &Job{ID: id, Namespace: ns, NodePool: req.Job.NodePool, Meta: req.Job.Meta, ModifyIndex: idx}
 	s.mu.Unlock()
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -452,6 +454,7 @@ type jobListEntry struct {
 	ID        string
 	ParentID  string
 	Namespace string
+	NodePool  string
 	Status    string
 	Meta      map[string]string `json:"Meta,omitempty"`
 }
@@ -475,7 +478,7 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 		}
-		entry := jobListEntry{ID: j.ID, ParentID: j.ParentID, Namespace: j.Namespace, Status: status}
+		entry := jobListEntry{ID: j.ID, ParentID: j.ParentID, Namespace: j.Namespace, NodePool: j.NodePool, Status: status}
 		if includeMeta {
 			entry.Meta = j.Meta
 		}
@@ -518,7 +521,7 @@ func (s *Server) dispatchJob(w http.ResponseWriter, r *http.Request, parentID st
 	s.dispSeq++
 	childID := fmt.Sprintf("%s/dispatch-%d-%06x", parentID, time.Now().UTC().Unix(), s.dispSeq)
 	idx := s.bumpIndexLocked()
-	s.jobs[childID] = &Job{ID: childID, Namespace: parent.Namespace, ParentID: parentID, Dispatched: true, Meta: req.Meta, ModifyIndex: idx}
+	s.jobs[childID] = &Job{ID: childID, Namespace: parent.Namespace, NodePool: parent.NodePool, ParentID: parentID, Dispatched: true, Meta: req.Meta, ModifyIndex: idx}
 
 	allocID := fmt.Sprintf("alloc-%06x", s.dispSeq)
 	allocIdx := s.bumpIndexLocked()
@@ -582,6 +585,7 @@ func (s *Server) readJob(w http.ResponseWriter, r *http.Request, id string) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ID":          job.ID,
 		"Namespace":   job.Namespace,
+		"NodePool":    job.NodePool,
 		"ParentID":    job.ParentID,
 		"Dispatched":  job.Dispatched,
 		"Meta":        job.Meta,

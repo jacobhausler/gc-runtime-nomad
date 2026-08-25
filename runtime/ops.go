@@ -32,6 +32,13 @@ type lifecycle struct {
 	sidecar     *sidecar
 	parentJobID string
 
+	// nodePool is the Nomad node pool the parent job registers into (empty
+	// keeps Nomad's own "default" pool). Unlike namespace it carries no
+	// per-request query param (04 §2.1's nsQuery has no node-pool analog on
+	// any route this pack calls) — it only ever rides the parent job body
+	// parentJobSpec builds, so it lives here rather than on client.
+	nodePool string
+
 	// egressDir is the local sink directory for the stop-path transcript/
 	// evidence egress (NRT-P1-07). Empty disables egress entirely — a
 	// deployment that never sets GC_NOMAD_EGRESS_DIR gets the pre-egress
@@ -432,7 +439,7 @@ func (l *lifecycle) dispatch(ctx context.Context, sessionName string) error {
 		// out of scope (provision split).
 	}
 
-	if err := l.client.registerJob(ctx, parentJobSpec(l.client.namespace, l.parentJobID)); err != nil {
+	if err := l.client.registerJob(ctx, parentJobSpec(l.client.namespace, l.nodePool, l.parentJobID)); err != nil {
 		return fmt.Errorf("registering parent job: %w", err)
 	}
 

@@ -637,6 +637,65 @@ func TestListJobsChildrenOfParent(t *testing.T) {
 	}
 }
 
+// TestRegisterJobCarriesNamespaceAndNodePool is a regression test for
+// NRT-P2-05 drift row 3: a registered job's Namespace and NodePool must
+// round-trip through both a direct job read and the dispatched-child record
+// a parameterized parent hands off, since a caller that never sets NodePool
+// must default to "" (Nomad's own "default" pool) rather than dropping it
+// silently.
+func TestRegisterJobCarriesNamespaceAndNodePool(t *testing.T) {
+	srv := NewServer()
+	defer srv.Close()
+
+	httpJSON(t, http.MethodPost, srv.URL()+"/v1/jobs",
+		map[string]any{"Job": map[string]any{"ID": "gc-sessions", "Namespace": "gc-lab", "NodePool": "lab-session"}},
+		&map[string]any{})
+
+	var parent map[string]any
+	status, _ := httpJSON(t, http.MethodGet, srv.URL()+"/v1/job/gc-sessions", nil, &parent)
+	if status != http.StatusOK {
+		t.Fatalf("job read: status = %d, want 200", status)
+	}
+	if parent["Namespace"] != "gc-lab" {
+		t.Fatalf("parent Namespace = %v, want %q", parent["Namespace"], "gc-lab")
+	}
+	if parent["NodePool"] != "lab-session" {
+		t.Fatalf("parent NodePool = %v, want %q", parent["NodePool"], "lab-session")
+	}
+
+	var dispatchOut map[string]any
+	httpJSON(t, http.MethodPost, srv.URL()+"/v1/job/gc-sessions/dispatch",
+		map[string]any{"Meta": map[string]string{"gc_session": "sess-1"}}, &dispatchOut)
+	childID, _ := dispatchOut["DispatchedJobID"].(string)
+
+	var child map[string]any
+	status, _ = httpJSON(t, http.MethodGet, srv.URL()+"/v1/job/"+childID, nil, &child)
+	if status != http.StatusOK {
+		t.Fatalf("child job read: status = %d, want 200", status)
+	}
+	if child["Namespace"] != "gc-lab" {
+		t.Fatalf("dispatched child Namespace = %v, want %q (inherited from parent)", child["Namespace"], "gc-lab")
+	}
+	if child["NodePool"] != "lab-session" {
+		t.Fatalf("dispatched child NodePool = %v, want %q (inherited from parent)", child["NodePool"], "lab-session")
+	}
+
+	var withMeta []map[string]any
+	httpJSON(t, http.MethodGet, srv.URL()+"/v1/jobs?meta=true", nil, &withMeta)
+	var childEntry map[string]any
+	for _, j := range withMeta {
+		if j["ID"] == childID {
+			childEntry = j
+		}
+	}
+	if childEntry == nil {
+		t.Fatalf("list jobs (meta=true) = %v, missing child %q", withMeta, childID)
+	}
+	if childEntry["NodePool"] != "lab-session" {
+		t.Fatalf("listed child NodePool = %v, want %q", childEntry["NodePool"], "lab-session")
+	}
+}
+
 // TestTraceRecordsRequestOrder confirms Trace() reflects requests in
 // arrival order — the ordering guarantee a stop-path egress test relies on
 // to assert fs reads precede deregister.

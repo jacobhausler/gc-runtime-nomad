@@ -26,10 +26,17 @@ const (
 // meant to be the ONLY self-healer for session jobs, so every knob that
 // would let Nomad replace or restart a dispatched child on its own is
 // zeroed or disabled here.
-func parentJobSpec(namespace, parentID string) nomadJob {
+//
+// nodePool is left empty by default (Nomad's own "default" node pool);
+// NRT-P2-05 drift row 3 found that without an explicit value here, every
+// registered parent/dispatch job lands in the default pool and never places
+// on a lab cluster's named pool (e.g. lab-session) — so a deployment that
+// needs non-default placement must set GC_NOMAD_NODE_POOL.
+func parentJobSpec(namespace, nodePool, parentID string) nomadJob {
 	return nomadJob{
 		ID:        parentID,
 		Namespace: namespace,
+		NodePool:  nodePool,
 		Type:      "batch",
 		// Priority stays below every cluster system job by the invariant's
 		// margin (04 §4 priority/preemption invariant); the lab/offline
@@ -117,6 +124,7 @@ func boolPtr(b bool) *bool { return &b }
 type nomadJob struct {
 	ID               string                 `json:"ID"`
 	Namespace        string                 `json:"Namespace"`
+	NodePool         string                 `json:"NodePool,omitempty"`
 	Type             string                 `json:"Type"`
 	Priority         int                    `json:"Priority"`
 	Constraints      []nomadConstraint      `json:"Constraints,omitempty"`

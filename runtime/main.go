@@ -34,6 +34,7 @@
 //	GC_NOMAD_ADDR         required for lifecycle ops: absolute base URL of the Nomad API (e.g. http://127.0.0.1:4646)
 //	GC_NOMAD_TOKEN        optional: ACL token sent as X-Nomad-Token
 //	GC_NOMAD_NAMESPACE    optional: Nomad namespace (default "default")
+//	GC_NOMAD_NODE_POOL    optional: Nomad node pool for the parent job (default "" — Nomad's own "default" pool)
 //	GC_NOMAD_PARENT_JOB   optional: the city's parameterized parent job ID (default "gc-sessions")
 //	GC_NOMAD_SIDECAR_DIR  required for lifecycle ops: directory for the sidecar session->job-ID bindings (04 §1)
 //	GC_NOMAD_EGRESS_DIR   optional: local directory for stop-path transcript/evidence egress (NRT-P1-07); unset disables egress
@@ -51,6 +52,7 @@ const (
 	envAddr       = "GC_NOMAD_ADDR"
 	envToken      = "GC_NOMAD_TOKEN"
 	envNamespace  = "GC_NOMAD_NAMESPACE"
+	envNodePool   = "GC_NOMAD_NODE_POOL"
 	envParentJob  = "GC_NOMAD_PARENT_JOB"
 	envSidecarDir = "GC_NOMAD_SIDECAR_DIR"
 	envEgressDir  = "GC_NOMAD_EGRESS_DIR"
@@ -332,7 +334,7 @@ func newLifecycle() (*lifecycle, error) {
 	if parentJob == "" {
 		parentJob = defaultParentJob
 	}
-	return &lifecycle{client: c, sidecar: sc, parentJobID: parentJob, egressDir: os.Getenv(envEgressDir)}, nil
+	return &lifecycle{client: c, sidecar: sc, parentJobID: parentJob, nodePool: os.Getenv(envNodePool), egressDir: os.Getenv(envEgressDir)}, nil
 }
 
 func boolText(b bool) string {
