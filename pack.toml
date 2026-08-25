@@ -1,0 +1,13 @@
+[pack]
+name = "runtime-nomad"
+version = "0.1.0"
+schema = 2
+
+# Pack-declared runtime (Gas City RUNTIME-SEL-011). gc resolves
+# session = "nomad" to this executable through the per-city runtime
+# registry, so the Nomad runtime ships and versions independently of the gc
+# binary. The command is a bare name resolved on PATH at session start;
+# `./install.sh` puts gc-runtime-nomad there via the Go toolchain.
+[runtimes.nomad]
+command = "gc-runtime-nomad"
+protocol = 0
