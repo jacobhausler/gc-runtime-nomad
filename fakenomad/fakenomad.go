@@ -70,12 +70,20 @@ func defaultAllocFiles(allocID string) map[string]string {
 	}
 }
 
-// fault is a one-shot scripted failure matched by exact method+path.
+// fault is a scripted failure or delay matched by exact method+path. By
+// default it is one-shot (consumed on first match) and answers status/body
+// instead of routing normally; sticky keeps it queued across matches
+// (persistent failure modes, e.g. permanent-auth) and passthrough applies
+// only the delay before falling through to the normal handler (latency
+// scenarios that still succeed, e.g. slow-server).
 type fault struct {
-	method string
-	path   string
-	status int
-	body   string
+	method      string
+	path        string
+	status      int
+	body        string
+	delay       time.Duration
+	sticky      bool
+	passthrough bool
 }
 
 // Server is a fake Nomad API server. Zero value is not usable; construct
@@ -97,14 +105,28 @@ type Server struct {
 // NewServer starts a fake Nomad server on a loopback listener and returns
 // it. Call Close when done.
 func NewServer() *Server {
-	s := &Server{
+	s := newServer()
+	s.httpSrv = httptest.NewServer(http.HandlerFunc(s.serveHTTP))
+	return s
+}
+
+// NewTLSServer is NewServer's TLS-terminated twin: same handler, served over
+// a self-signed TLS listener. It exists for the TLS-fail fault row — a
+// client that doesn't trust the self-signed cert gets a real TLS handshake
+// failure rather than a scripted stand-in.
+func NewTLSServer() *Server {
+	s := newServer()
+	s.httpSrv = httptest.NewTLSServer(http.HandlerFunc(s.serveHTTP))
+	return s
+}
+
+func newServer() *Server {
+	return &Server{
 		waitCh:     make(chan struct{}),
 		jobs:       map[string]*Job{},
 		allocs:     map[string]*Allocation{},
 		allocFiles: map[string]map[string]string{},
 	}
-	s.httpSrv = httptest.NewServer(http.HandlerFunc(s.serveHTTP))
-	return s
 }
 
 // URL returns the fake server's base URL (scheme+host).
@@ -117,9 +139,43 @@ func (s *Server) Close() { s.httpSrv.Close() }
 // exact path is answered with status and body instead of being routed to
 // the normal handler. Matches are consumed in FIFO order.
 func (s *Server) FailNext(method, path string, status int, body string) {
+	s.queueFault(fault{method: method, path: path, status: status, body: body})
+}
+
+// FailSticky queues a fault that answers status/body to every request
+// matching method and path, not just the first — for persistent failure
+// modes (e.g. permanent-auth) as opposed to a single transient blip. Clear
+// it with ClearFault.
+func (s *Server) FailSticky(method, path string, status int, body string) {
+	s.queueFault(fault{method: method, path: path, status: status, body: body, sticky: true})
+}
+
+// ClearFault removes any scripted fault (one-shot or sticky) matching
+// method and path.
+func (s *Server) ClearFault(method, path string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.faults = append(s.faults, fault{method: method, path: path, status: status, body: body})
+	for i, f := range s.faults {
+		if f.method == method && f.path == path {
+			s.faults = append(s.faults[:i], s.faults[i+1:]...)
+			return
+		}
+	}
+}
+
+// DelayNext queues a one-shot response delay: the next request matching
+// method and path sleeps for delay, then is served normally. It exists for
+// latency scenarios that still eventually succeed (slow-server) or that
+// outlast a caller's own deadline (timeout-mid-dispatch), as opposed to
+// FailNext's scripted failure response.
+func (s *Server) DelayNext(method, path string, delay time.Duration) {
+	s.queueFault(fault{method: method, path: path, delay: delay, passthrough: true})
+}
+
+func (s *Server) queueFault(f fault) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.faults = append(s.faults, f)
 }
 
 // Trace returns the method+path of every request served so far, in
@@ -148,6 +204,26 @@ func (s *Server) SetAllocStatus(allocID, clientStatus string) bool {
 	a.ClientStatus = clientStatus
 	a.ModifyIndex = s.bumpIndexLocked()
 	return true
+}
+
+// PlaceAlloc adds a new allocation for jobID with the given ClientStatus and
+// returns its ID. It exists so tests can simulate a Nomad reschedule placing
+// a replacement allocation under the same job (the "replacement alloc"
+// fault row) without a full scheduler.
+func (s *Server) PlaceAlloc(jobID, clientStatus string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.dispSeq++
+	allocID := fmt.Sprintf("alloc-%06x", s.dispSeq)
+	idx := s.bumpIndexLocked()
+	s.allocs[allocID] = &Allocation{
+		ID:            allocID,
+		JobID:         jobID,
+		DesiredStatus: "run",
+		ClientStatus:  clientStatus,
+		ModifyIndex:   idx,
+	}
+	return allocID
 }
 
 // bumpIndexLocked increments the index and wakes any blocked readers. Must
@@ -189,7 +265,9 @@ func (s *Server) takeFault(method, path string) (fault, bool) {
 	defer s.mu.Unlock()
 	for i, f := range s.faults {
 		if f.method == method && f.path == path {
-			s.faults = append(s.faults[:i], s.faults[i+1:]...)
+			if !f.sticky {
+				s.faults = append(s.faults[:i], s.faults[i+1:]...)
+			}
 			return f, true
 		}
 	}
@@ -202,12 +280,17 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	if f, ok := s.takeFault(r.Method, r.URL.Path); ok {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(f.status)
-		if f.body != "" {
-			_, _ = w.Write([]byte(f.body))
+		if f.delay > 0 {
+			time.Sleep(f.delay)
 		}
-		return
+		if !f.passthrough {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(f.status)
+			if f.body != "" {
+				_, _ = w.Write([]byte(f.body))
+			}
+			return
+		}
 	}
 
 	parts := splitPath(r.URL.Path)
