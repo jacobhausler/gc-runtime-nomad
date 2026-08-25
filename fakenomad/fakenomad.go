@@ -111,6 +111,7 @@ type Server struct {
 
 	execRoot string // parent of every per-alloc exec scratch dir
 	httpSrv  *httptest.Server
+	closed   bool // guards Close against running its teardown twice
 }
 
 // NewServer starts a fake Nomad server on a loopback listener and returns
@@ -165,14 +166,29 @@ func (s *Server) URL() string { return s.httpSrv.URL }
 // (runCommand), so a caller driving the launch command
 // (`tmux new-session -d -s main`) over exec leaves a real background tmux
 // server behind unless something reaps it.
+//
+// Close is idempotent: it is common (and legitimate — an explicit Close
+// plus a belt-and-suspenders t.Cleanup(srv.Close)) for a caller to invoke
+// it more than once. A second run must be a no-op rather than re-running
+// the tmux teardown: by then execRoot is already removed, so the per-alloc
+// dir kill-server would target no longer exists, isolatedTmuxEnv's
+// TMUX_TMPDIR resolves to nothing, and tmux silently falls back to the
+// caller's own default socket — killing the real host tmux server (and any
+// sibling session, e.g. a worker's) instead of the fake's isolated one.
 func (s *Server) Close() {
-	s.httpSrv.Close()
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	s.closed = true
 	dirs := make([]string, 0, len(s.execDirs))
 	for _, d := range s.execDirs {
 		dirs = append(dirs, d)
 	}
 	s.mu.Unlock()
+
+	s.httpSrv.Close()
 	for _, d := range dirs {
 		cmd := exec.Command("tmux", "kill-server")
 		cmd.Env = isolatedTmuxEnv(d)
