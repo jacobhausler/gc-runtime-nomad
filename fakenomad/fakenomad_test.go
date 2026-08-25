@@ -398,6 +398,81 @@ func TestAllocExecWS(t *testing.T) {
 	}
 }
 
+// TestClientFSCat drives the client fs "cat" endpoint a stop-path egress
+// reads: a freshly dispatched allocation has both seeded files readable,
+// an unknown path 404s, and an unknown allocation 404s.
+func TestClientFSCat(t *testing.T) {
+	srv := NewServer()
+	defer srv.Close()
+
+	httpJSON(t, http.MethodPost, srv.URL()+"/v1/jobs", map[string]any{"Job": map[string]any{"ID": "fs-job"}}, &map[string]any{})
+	var dispatchOut map[string]any
+	httpJSON(t, http.MethodPost, srv.URL()+"/v1/job/fs-job/dispatch", map[string]any{}, &dispatchOut)
+	childID, _ := dispatchOut["DispatchedJobID"].(string)
+
+	var allocs []map[string]any
+	httpJSON(t, http.MethodGet, srv.URL()+"/v1/job/"+childID+"/allocations", nil, &allocs)
+	if len(allocs) != 1 {
+		t.Fatalf("expected exactly one allocation, got %d", len(allocs))
+	}
+	allocID, _ := allocs[0]["ID"].(string)
+
+	for _, path := range []string{"alloc/logs/transcript.log", "alloc/data/evidence.json"} {
+		resp, err := http.Get(fmt.Sprintf("%s/v1/client/fs/cat/%s?path=%s", srv.URL(), allocID, path))
+		if err != nil {
+			t.Fatalf("cat %q: %v", path, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("cat %q: status = %d, want 200 (body %q)", path, resp.StatusCode, body)
+		}
+		if len(body) == 0 {
+			t.Fatalf("cat %q: empty body, want seeded content", path)
+		}
+	}
+
+	resp, err := http.Get(fmt.Sprintf("%s/v1/client/fs/cat/%s?path=nope", srv.URL(), allocID))
+	if err != nil {
+		t.Fatalf("cat unknown path: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("cat unknown path: status = %d, want 404", resp.StatusCode)
+	}
+
+	resp, err = http.Get(srv.URL() + "/v1/client/fs/cat/no-such-alloc?path=alloc/logs/transcript.log")
+	if err != nil {
+		t.Fatalf("cat unknown alloc: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("cat unknown alloc: status = %d, want 404", resp.StatusCode)
+	}
+}
+
+// TestTraceRecordsRequestOrder confirms Trace() reflects requests in
+// arrival order — the ordering guarantee a stop-path egress test relies on
+// to assert fs reads precede deregister.
+func TestTraceRecordsRequestOrder(t *testing.T) {
+	srv := NewServer()
+	defer srv.Close()
+
+	httpJSON(t, http.MethodPost, srv.URL()+"/v1/jobs", map[string]any{"Job": map[string]any{"ID": "trace-job"}}, &map[string]any{})
+	httpJSON(t, http.MethodPut, srv.URL()+"/v1/system/gc", nil, nil)
+
+	trace := srv.Trace()
+	want := []string{"POST /v1/jobs", "PUT /v1/system/gc"}
+	if len(trace) != len(want) {
+		t.Fatalf("trace = %v, want %v", trace, want)
+	}
+	for i, w := range want {
+		if trace[i] != w {
+			t.Fatalf("trace[%d] = %q, want %q (full trace %v)", i, trace[i], w, trace)
+		}
+	}
+}
+
 // writeMaskedFrame writes one client-to-server text frame; RFC 6455
 // requires client frames to be masked.
 func writeMaskedFrame(w io.Writer, opcode byte, payload []byte) error {

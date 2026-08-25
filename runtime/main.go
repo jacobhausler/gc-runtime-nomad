@@ -24,6 +24,7 @@
 //	GC_NOMAD_NAMESPACE    optional: Nomad namespace (default "default")
 //	GC_NOMAD_PARENT_JOB   optional: the city's parameterized parent job ID (default "gc-sessions")
 //	GC_NOMAD_SIDECAR_DIR  required for lifecycle ops: directory for the sidecar session->job-ID bindings (04 §1)
+//	GC_NOMAD_EGRESS_DIR   optional: local directory for stop-path transcript/evidence egress (NRT-P1-07); unset disables egress
 package main
 
 import (
@@ -38,6 +39,7 @@ const (
 	envNamespace  = "GC_NOMAD_NAMESPACE"
 	envParentJob  = "GC_NOMAD_PARENT_JOB"
 	envSidecarDir = "GC_NOMAD_SIDECAR_DIR"
+	envEgressDir  = "GC_NOMAD_EGRESS_DIR"
 
 	defaultParentJob = "gc-sessions"
 
@@ -167,7 +169,7 @@ func newLifecycle() (*lifecycle, error) {
 	if parentJob == "" {
 		parentJob = defaultParentJob
 	}
-	return &lifecycle{client: c, sidecar: sc, parentJobID: parentJob}, nil
+	return &lifecycle{client: c, sidecar: sc, parentJobID: parentJob, egressDir: os.Getenv(envEgressDir)}, nil
 }
 
 func boolText(b bool) string {

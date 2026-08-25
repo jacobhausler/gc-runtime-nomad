@@ -2,7 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"time"
 )
@@ -16,6 +20,64 @@ type lifecycle struct {
 	client      *client
 	sidecar     *sidecar
 	parentJobID string
+
+	// egressDir is the local sink directory for the stop-path transcript/
+	// evidence egress (NRT-P1-07). Empty disables egress entirely — a
+	// deployment that never sets GC_NOMAD_EGRESS_DIR gets the pre-egress
+	// stop behavior unchanged. Sinks beyond a local directory (remote
+	// upload, etc.) are out of scope for this bead.
+	egressDir string
+}
+
+// egressFile is one well-known file a stop-path egress reads out of every
+// allocation before its job is deregistered. Discovery beyond this fixed
+// pair (e.g. a directory listing) is out of scope for this bead.
+var egressFiles = []struct {
+	allocPath string
+	destName  string
+}{
+	{"alloc/logs/transcript.log", "transcript.log"},
+	{"alloc/data/evidence.json", "evidence.json"},
+}
+
+// egressAllocFiles copies childJobID's per-allocation transcript/evidence
+// files into l.egressDir/<session>/ via the client fs API. It runs before
+// opStop's deregister call, since deregister is what makes those files
+// unreachable. A no-op when egress is disabled (l.egressDir == "").
+func (l *lifecycle) egressAllocFiles(ctx context.Context, sessionName, childJobID string) error {
+	if l.egressDir == "" {
+		return nil
+	}
+	allocs, _, err := l.client.listAllocsForJob(ctx, childJobID, 0, 0)
+	if err != nil {
+		return fmt.Errorf("egress: listing allocations for %q: %w", childJobID, err)
+	}
+
+	destDir := filepath.Join(l.egressDir, base64.RawURLEncoding.EncodeToString([]byte(sessionName)))
+	if err := os.MkdirAll(destDir, 0o700); err != nil {
+		return fmt.Errorf("egress: creating sink directory: %w", err)
+	}
+
+	for _, a := range allocs {
+		for _, f := range egressFiles {
+			data, err := l.client.readAllocFile(ctx, a.ID, f.allocPath)
+			if errors.Is(err, errAllocFileGone) {
+				continue
+			}
+			if err != nil {
+				return fmt.Errorf("egress: reading %s for alloc %q: %w", f.allocPath, a.ID, err)
+			}
+			dest := filepath.Join(destDir, a.ID+"-"+f.destName)
+			tmp := dest + ".tmp"
+			if err := os.WriteFile(tmp, data, 0o600); err != nil {
+				return fmt.Errorf("egress: writing %s: %w", dest, err)
+			}
+			if err := os.Rename(tmp, dest); err != nil {
+				return fmt.Errorf("egress: committing %s: %w", dest, err)
+			}
+		}
+	}
+	return nil
 }
 
 // isTerminalStatus reports whether a Nomad alloc ClientStatus is terminal.
@@ -79,7 +141,8 @@ func (l *lifecycle) opStart(ctx context.Context, sessionName string) error {
 	return l.sidecar.save(final)
 }
 
-// opStop deregisters sessionName's child job without purge, confirms
+// opStop egresses sessionName's transcript/evidence files (if egress is
+// configured, NRT-P1-07), deregisters its child job without purge, confirms
 // terminal via a blocking read, and tombstones the sidecar binding. Stop on
 // a session with no binding (never started, or already stopped) is a
 // success no-op — Stop stays idempotent (04 §6, E1a §6.1).
@@ -95,6 +158,20 @@ func (l *lifecycle) opStop(ctx context.Context, sessionName string) error {
 		// Crashed between the pre-dispatch intent write and the dispatch
 		// call: nothing was ever created cluster-side.
 		return l.sidecar.remove(sessionName)
+	}
+
+	// Egress transcript/evidence before deregister makes them unreachable,
+	// then receipt completion in the sidecar (still resident) so a stop
+	// that crashes after egress but before deregister does not re-copy on
+	// retry (NRT-P1-07).
+	if !b.EgressComplete {
+		if err := l.egressAllocFiles(ctx, sessionName, b.ChildJobID); err != nil {
+			return err
+		}
+		b.EgressComplete = true
+		if err := l.sidecar.save(*b); err != nil {
+			return err
+		}
 	}
 
 	idx, err := l.client.deregisterJob(ctx, b.ChildJobID, false)

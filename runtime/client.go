@@ -25,6 +25,12 @@ const (
 // direct job GET, or (for deregister/dispatch) the job never having existed.
 var errJobGone = errors.New("nomad: job gone")
 
+// errAllocFileGone marks a 404 from the client fs "cat" endpoint — either
+// the allocation or the requested path is gone/never existed. The
+// stop-path egress treats this as "nothing to copy" rather than a failure:
+// not every allocation produces every file.
+var errAllocFileGone = errors.New("nomad: alloc file gone")
+
 // client speaks the subset of the Nomad HTTP API the lifecycle ops need:
 // job register (parent), dispatch, deregister, and blocking-capable job/
 // allocation reads. Stdlib-only, matching the pack's zero-gascity-imports
@@ -134,6 +140,50 @@ func (c *client) deregisterJob(ctx context.Context, jobID string, purge bool) (u
 		return 0, err
 	}
 	return out.JobModifyIndex, nil
+}
+
+// readAllocFile reads one file out of allocID's filesystem via Nomad's
+// client fs "cat" endpoint (GET /v1/client/fs/cat/:allocID?path=...) — the
+// stop-path egress read that must complete before a session's job is
+// deregistered, since deregister is what makes the allocation's files
+// unreachable. Returns errAllocFileGone on a 404 (alloc or path absent).
+func (c *client) readAllocFile(ctx context.Context, allocID, path string) ([]byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, defaultTimeout)
+	defer cancel()
+
+	q := url.Values{"path": []string{path}}
+	target := c.urlFor([]string{"v1", "client", "fs", "cat", allocID}, q)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("building nomad fs-cat request: %w", err)
+	}
+	req.Header.Set("Accept", "application/octet-stream")
+	if c.token != "" {
+		req.Header.Set("X-Nomad-Token", c.token)
+	}
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("nomad fs-cat request: %w", err)
+	}
+	data, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseByte))
+	closeErr := resp.Body.Close()
+	if readErr != nil {
+		return nil, fmt.Errorf("reading nomad fs-cat response: %w", readErr)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("closing nomad fs-cat response: %w", closeErr)
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, errAllocFileGone
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("nomad %s: status %d: %s", target.String(), resp.StatusCode, statusText(resp.StatusCode, data))
+	}
+	return data, nil
 }
 
 func blockingTimeout(wait time.Duration) time.Duration {
