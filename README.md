@@ -13,17 +13,19 @@ provision/launch split are out of scope for this phase and exit 2.
 
 ```
 runtime-nomad/
-├── pack.toml       # declares [runtimes.nomad] -> gc-runtime-nomad
-├── install.sh      # installs the executable onto PATH
-├── fakenomad/      # nested Go module: in-memory fake of the Nomad API this pack calls
-│   └── go.mod      # module github.com/gastownhall/gc-runtime-nomad/fakenomad
-└── runtime/        # nested Go module (zero gascity imports, zero external deps in production code)
-    ├── go.mod      # module github.com/gastownhall/gc-runtime-nomad (test-only require on ../fakenomad)
-    ├── main.go     # RPP op dispatch + env config
-    ├── client.go   # Nomad API client (register/dispatch/deregister/blocking reads)
-    ├── jobspec.go  # parent job spec builder (04 §4 job-template invariants)
-    ├── sidecar.go  # session -> child-job-ID binding store (04 §1 sidecar state dir)
-    └── ops.go      # start/stop/is-running/list-running
+├── pack.toml         # declares [runtimes.nomad] -> gc-runtime-nomad
+├── install.sh        # installs the executable onto PATH
+├── conformance.sh    # gc runtime check + gc runtime conformance against an in-memory fake Nomad API
+├── fakenomad/        # nested Go module: in-memory fake of the Nomad API this pack calls
+│   ├── go.mod        # module github.com/gastownhall/gc-runtime-nomad/fakenomad
+│   └── cmd/fakenomad/ # standalone process wrapping the fake server, for conformance.sh + CI
+└── runtime/          # nested Go module (zero gascity imports, zero external deps in production code)
+    ├── go.mod        # module github.com/gastownhall/gc-runtime-nomad (test-only require on ../fakenomad)
+    ├── main.go       # RPP op dispatch + env config
+    ├── client.go     # Nomad API client (register/dispatch/deregister/blocking reads)
+    ├── jobspec.go    # parent job spec builder (04 §4 job-template invariants)
+    ├── sidecar.go    # session -> child-job-ID binding store (04 §1 sidecar state dir)
+    └── ops.go        # start/stop/is-running/list-running
 ```
 
 ## Use
@@ -51,6 +53,23 @@ Lifecycle ops need Nomad API configuration on the environment:
 | `GC_NOMAD_TOKEN` | no | ACL token, sent as `X-Nomad-Token` |
 | `GC_NOMAD_NAMESPACE` | no | Nomad namespace (default `default`) |
 | `GC_NOMAD_PARENT_JOB` | no | The city's parameterized parent job ID (default `gc-sessions`) |
+
+## Conformance
+
+```bash
+GC_BIN=$(command -v gc) ./conformance.sh
+```
+
+`conformance.sh` builds the executable and an in-memory fake Nomad API
+server (`fakenomad`), then runs `gc runtime check` and `gc runtime
+conformance` through the full RPP lifecycle round-trip — no live Nomad
+cluster or network required. This is the pack's CI gate (NRT-P1-04); `gc`
+itself is a tool dependency installed with a pinned
+`go install github.com/gastownhall/gascity/cmd/gc@<pin>`, never imported, so
+the pack keeps zero gascity Go dependencies. Optional-op requirements
+(`exec`, `provision`, ...) report SKIP since this phase only implements the
+four lifecycle ops — later beads make them pass; this harness only runs
+them.
 
 ## RPP operations
 
