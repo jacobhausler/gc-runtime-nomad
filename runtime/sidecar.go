@@ -26,6 +26,13 @@ type binding struct {
 	Namespace   string    `json:"namespace"`
 	Nonce       string    `json:"nonce"`
 	CreatedAt   time.Time `json:"created_at"`
+
+	// EgressComplete receipts that the stop-path transcript/evidence fs
+	// egress (NRT-P1-07) finished for this binding's current child job
+	// before deregister was called. Written to the sidecar (still resident
+	// at that point) so a stop that crashes after egress but before
+	// deregister does not re-copy files on retry.
+	EgressComplete bool `json:"egress_complete,omitempty"`
 }
 
 // sidecar is a file-based KV under a directory: one JSON file per session,

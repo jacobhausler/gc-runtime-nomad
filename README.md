@@ -6,8 +6,11 @@ The executable `gc-runtime-nomad` speaks the Runtime Provider Protocol
 four session lifecycle ops `start`/`stop`/`is-running`/`list-running` —
 implemented over Nomad job dispatch/deregister/blocking reads against a
 parameterized parent job, per `research/outputs/04-proposed-architecture.md`
-§3/§4/§6. Driving verbs (`exec`, `nudge`, `peek`, ...), staging, and the
-provision/launch split are out of scope for this phase and exit 2.
+§3/§4/§6. As of `NRT-P1-07`, `stop` also egresses each session's
+transcript/evidence files via the Nomad client fs API before deregister,
+when egress is configured. Driving verbs (`exec`, `nudge`, `peek`, ...),
+staging, and the provision/launch split are out of scope for this phase and
+exit 2.
 
 ## Layout
 
@@ -25,7 +28,7 @@ runtime-nomad/
     ├── client.go     # Nomad API client (register/dispatch/deregister/blocking reads)
     ├── jobspec.go    # parent job spec builder (04 §4 job-template invariants)
     ├── sidecar.go    # session -> child-job-ID binding store (04 §1 sidecar state dir)
-    └── ops.go        # start/stop/is-running/list-running
+    └── ops.go        # start/stop/is-running/list-running, stop-path fs egress (NRT-P1-07)
 ```
 
 ## Use
@@ -53,6 +56,7 @@ Lifecycle ops need Nomad API configuration on the environment:
 | `GC_NOMAD_TOKEN` | no | ACL token, sent as `X-Nomad-Token` |
 | `GC_NOMAD_NAMESPACE` | no | Nomad namespace (default `default`) |
 | `GC_NOMAD_PARENT_JOB` | no | The city's parameterized parent job ID (default `gc-sessions`) |
+| `GC_NOMAD_EGRESS_DIR` | no | Local directory for stop-path transcript/evidence egress (`NRT-P1-07`); unset disables egress |
 
 ## Conformance
 
@@ -77,7 +81,7 @@ them.
 |----|-------|
 | `protocol` | `{"version":0,"capabilities":[]}` |
 | `start` | Registers the parent job (idempotent upsert) if needed, then dispatches a child for the session. Rejects a session with a live child with an "already exists" error (04 §6 wire-contract constant). |
-| `stop` | Deregisters the session's child job without purge, confirms terminal via a blocking read, tombstones the sidecar binding. Idempotent — a session with no binding is a no-op success. |
+| `stop` | If `GC_NOMAD_EGRESS_DIR` is set, first copies the session's transcript/evidence files (via the Nomad client fs API) into it and receipts completion in the sidecar. Then deregisters the session's child job without purge, confirms terminal via a blocking read, and tombstones the sidecar binding. Idempotent — a session with no binding is a no-op success, and a stop that fails after egress but before deregister does not re-copy files on retry. |
 | `is-running` | Prints `true`/`false`. Per the honesty split (04 §6), Nomad API unavailability never flips this to `false` — it answers last-known-good instead. |
 | `list-running` | Prints one running session name per line, sidecar-primary (04 §2.1). Exits 1 on any lookup error rather than returning a partial list. |
 
@@ -88,6 +92,10 @@ out-of-scope note) — they land in later phases (see `fnrt-szx`, `fnrt-8yh`).
 
 ## Out of scope
 
+- Retention policy for egressed transcript/evidence files (owner decision)
+  and any egress sink beyond a local directory (`NRT-P1-07`) — no
+  directory listing/discovery either, just the two well-known files
+  (`ops.go`'s `egressFiles`).
 - Driving verbs (`exec`, `nudge`, `peek`, `interrupt`, `send-keys`,
   `clear-scrollback`), staging, and the provision/launch split — the parent
   job's task is a structurally-valid placeholder (`jobspec.go`), not a real

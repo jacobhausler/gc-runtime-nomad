@@ -7,10 +7,13 @@
 // conformance` (and this pack's own tests) can exercise the full wire
 // contract without a live Nomad cluster. It implements exactly the endpoint
 // families the provider calls: jobs, dispatch, deregister, job-read,
-// allocations, alloc-exec-WS, system — and fault hooks (FailNext) for
-// scripted failure injection (L2 in the test pyramid). Job deregister
-// (NRT-P1-03) was added once the lifecycle ops needed it; register/dispatch/
-// job-read/allocations/alloc-exec-WS/system are the original NRT-P1-02 scope.
+// allocations, alloc-exec-WS, client-fs-cat, system — and fault hooks
+// (FailNext) for scripted failure injection (L2 in the test pyramid), plus a
+// request Trace() for asserting call order. Job deregister (NRT-P1-03) was
+// added once the lifecycle ops needed it; client-fs-cat (NRT-P1-07) was
+// added for the stop-path transcript/evidence egress read; register/
+// dispatch/job-read/allocations/alloc-exec-WS/system are the original
+// NRT-P1-02 scope.
 //
 // Out of scope (by design): fidelity beyond the endpoints a provider calls,
 // and real WS TLS.
@@ -56,6 +59,17 @@ type Allocation struct {
 	ModifyIndex   uint64
 }
 
+// defaultAllocFiles seeds every dispatched allocation with the two files a
+// stop-path egress reads (transcript/evidence) via the client fs "cat"
+// endpoint, so a provider driving a fake run always has something real to
+// copy without a separate seeding API.
+func defaultAllocFiles(allocID string) map[string]string {
+	return map[string]string{
+		"alloc/logs/transcript.log": fmt.Sprintf("fakenomad transcript for %s\n", allocID),
+		"alloc/data/evidence.json":  fmt.Sprintf(`{"alloc_id":%q}`+"\n", allocID),
+	}
+}
+
 // fault is a one-shot scripted failure matched by exact method+path.
 type fault struct {
 	method string
@@ -67,13 +81,15 @@ type fault struct {
 // Server is a fake Nomad API server. Zero value is not usable; construct
 // with NewServer. Safe for concurrent use.
 type Server struct {
-	mu      sync.Mutex
-	index   uint64
-	waitCh  chan struct{}
-	jobs    map[string]*Job
-	allocs  map[string]*Allocation
-	faults  []fault
-	dispSeq uint64
+	mu         sync.Mutex
+	index      uint64
+	waitCh     chan struct{}
+	jobs       map[string]*Job
+	allocs     map[string]*Allocation
+	allocFiles map[string]map[string]string // allocID -> path -> content
+	faults     []fault
+	dispSeq    uint64
+	trace      []string
 
 	httpSrv *httptest.Server
 }
@@ -82,9 +98,10 @@ type Server struct {
 // it. Call Close when done.
 func NewServer() *Server {
 	s := &Server{
-		waitCh: make(chan struct{}),
-		jobs:   map[string]*Job{},
-		allocs: map[string]*Allocation{},
+		waitCh:     make(chan struct{}),
+		jobs:       map[string]*Job{},
+		allocs:     map[string]*Allocation{},
+		allocFiles: map[string]map[string]string{},
 	}
 	s.httpSrv = httptest.NewServer(http.HandlerFunc(s.serveHTTP))
 	return s
@@ -103,6 +120,18 @@ func (s *Server) FailNext(method, path string, status int, body string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.faults = append(s.faults, fault{method: method, path: path, status: status, body: body})
+}
+
+// Trace returns the method+path of every request served so far, in
+// arrival order — the basis for asserting call ordering (e.g. that a
+// stop-path fs egress read completes before the deregister call it must
+// precede).
+func (s *Server) Trace() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, len(s.trace))
+	copy(out, s.trace)
+	return out
 }
 
 // SetAllocStatus updates an allocation's client status and advances the
@@ -168,6 +197,10 @@ func (s *Server) takeFault(method, path string) (fault, bool) {
 }
 
 func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	s.trace = append(s.trace, r.Method+" "+r.URL.Path)
+	s.mu.Unlock()
+
 	if f, ok := s.takeFault(r.Method, r.URL.Path); ok {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(f.status)
@@ -213,6 +246,8 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		s.readAlloc(w, r, parts[2])
 	case r.Method == http.MethodGet && len(parts) == 5 && parts[0] == "v1" && parts[1] == "client" && parts[2] == "allocation" && parts[4] == "exec":
 		s.handleExecWS(w, r, parts[3])
+	case r.Method == http.MethodGet && len(parts) == 5 && parts[0] == "v1" && parts[1] == "client" && parts[2] == "fs" && parts[3] == "cat":
+		s.catAllocFile(w, r, parts[4])
 	case r.Method == http.MethodPut && len(parts) == 3 && parts[0] == "v1" && parts[1] == "system" && parts[2] == "gc":
 		s.systemGC(w, r)
 	default:
@@ -287,6 +322,7 @@ func (s *Server) dispatchJob(w http.ResponseWriter, r *http.Request, parentID st
 		ClientStatus:  "pending",
 		ModifyIndex:   allocIdx,
 	}
+	s.allocFiles[allocID] = defaultAllocFiles(allocID)
 	s.mu.Unlock()
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -439,6 +475,33 @@ func (s *Server) deregisterJob(w http.ResponseWriter, r *http.Request, id string
 		"JobModifyIndex":  idx,
 		"Index":           idx,
 	})
+}
+
+// catAllocFile answers `GET /v1/client/fs/cat/:allocID?path=...` — the
+// client fs "cat" endpoint a stop-path egress reads transcript/evidence
+// files through before the job is deregistered. A missing alloc or path is
+// a 404, matching real Nomad's fs-cat behavior for an unknown target.
+func (s *Server) catAllocFile(w http.ResponseWriter, r *http.Request, allocID string) {
+	path := r.URL.Query().Get("path")
+	s.mu.Lock()
+	_, ok := s.allocs[allocID]
+	var content string
+	var fileOK bool
+	if ok {
+		content, fileOK = s.allocFiles[allocID][path]
+	}
+	s.mu.Unlock()
+	if !ok {
+		writeJSONError(w, http.StatusNotFound, "alloc not found")
+		return
+	}
+	if !fileOK {
+		writeJSONError(w, http.StatusNotFound, "file not found")
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(content))
 }
 
 func (s *Server) systemGC(w http.ResponseWriter, r *http.Request) {

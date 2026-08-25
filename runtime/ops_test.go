@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -162,5 +164,129 @@ func TestOpStartFaultPropagates(t *testing.T) {
 
 	if running, err := l.opIsRunning(ctx, session); err != nil || running {
 		t.Fatalf("is-running after failed start = (%v, %v), want (false, nil)", running, err)
+	}
+}
+
+// countFSCat counts client fs-cat requests in a fakenomad trace.
+func countFSCat(trace []string) int {
+	n := 0
+	for _, req := range trace {
+		if strings.HasPrefix(req, "GET /v1/client/fs/cat/") {
+			n++
+		}
+	}
+	return n
+}
+
+// TestOpStopEgressesBeforeDeregister drives the NRT-P1-07 acceptance: with
+// egress configured, stop reads every allocation's transcript/evidence
+// files via the fs API, lands them under the sink directory, and the fake's
+// request trace shows the fs-cat read(s) completing strictly before the
+// deregister call.
+func TestOpStopEgressesBeforeDeregister(t *testing.T) {
+	l, srv := newTestLifecycle(t)
+	l.egressDir = t.TempDir()
+	ctx := context.Background()
+	const session = "sess-egress"
+
+	if err := l.opStart(ctx, session); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	b, ok, err := l.sidecar.load(session)
+	if err != nil || !ok {
+		t.Fatalf("load binding after start: (%v, %v, %v)", b, ok, err)
+	}
+	childJobID := b.ChildJobID
+
+	if err := l.opStop(ctx, session); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+
+	trace := srv.Trace()
+	catIdx, deregIdx := -1, -1
+	for i, req := range trace {
+		if catIdx == -1 && strings.HasPrefix(req, "GET /v1/client/fs/cat/") {
+			catIdx = i
+		}
+		if req == "DELETE /v1/job/"+childJobID {
+			deregIdx = i
+		}
+	}
+	if catIdx == -1 {
+		t.Fatalf("trace has no fs-cat request: %v", trace)
+	}
+	if deregIdx == -1 {
+		t.Fatalf("trace has no deregister request for %q: %v", childJobID, trace)
+	}
+	if catIdx >= deregIdx {
+		t.Fatalf("fs-cat request (trace index %d) did not precede deregister (index %d): %v", catIdx, deregIdx, trace)
+	}
+
+	sinkDir := filepath.Join(l.egressDir, base64.RawURLEncoding.EncodeToString([]byte(session)))
+	entries, err := os.ReadDir(sinkDir)
+	if err != nil {
+		t.Fatalf("reading egress sink dir: %v", err)
+	}
+	if len(entries) != len(egressFiles) {
+		t.Fatalf("egress sink dir has %d entries, want %d: %v", len(entries), len(egressFiles), entries)
+	}
+}
+
+// TestOpStopSkipsEgressWhenDisabled confirms a lifecycle with no egress
+// directory configured (the zero value, matching every pre-NRT-P1-07
+// deployment) never issues an fs-cat request on stop.
+func TestOpStopSkipsEgressWhenDisabled(t *testing.T) {
+	l, srv := newTestLifecycle(t)
+	ctx := context.Background()
+	const session = "sess-no-egress"
+
+	if err := l.opStart(ctx, session); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if err := l.opStop(ctx, session); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if n := countFSCat(srv.Trace()); n != 0 {
+		t.Fatalf("fs-cat requests with egress disabled = %d, want 0: %v", n, srv.Trace())
+	}
+}
+
+// TestOpStopRetryAfterDeregisterFaultSkipsReEgress confirms the sidecar
+// egress receipt makes a stop retry idempotent on the egress side: once
+// egress has been receipted, a stop that failed later (at deregister) does
+// not re-copy files when retried.
+func TestOpStopRetryAfterDeregisterFaultSkipsReEgress(t *testing.T) {
+	l, srv := newTestLifecycle(t)
+	l.egressDir = t.TempDir()
+	ctx := context.Background()
+	const session = "sess-egress-retry"
+
+	if err := l.opStart(ctx, session); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	b, ok, err := l.sidecar.load(session)
+	if err != nil || !ok {
+		t.Fatalf("load binding after start: (%v, %v, %v)", b, ok, err)
+	}
+	srv.FailNext("DELETE", "/v1/job/"+b.ChildJobID, 500, `{"error":"injected"}`)
+
+	if err := l.opStop(ctx, session); err == nil {
+		t.Fatalf("stop with faulted deregister: got nil error, want failure")
+	}
+
+	afterFail, ok, err := l.sidecar.load(session)
+	if err != nil || !ok {
+		t.Fatalf("load binding after failed stop: (%v, %v, %v)", afterFail, ok, err)
+	}
+	if !afterFail.EgressComplete {
+		t.Fatalf("binding after failed stop: EgressComplete = false, want true (receipted before the deregister attempt)")
+	}
+	catCount := countFSCat(srv.Trace())
+
+	if err := l.opStop(ctx, session); err != nil {
+		t.Fatalf("retried stop: %v", err)
+	}
+	if got := countFSCat(srv.Trace()); got != catCount {
+		t.Fatalf("fs-cat count after retry = %d, want unchanged %d (egress must not re-run)", got, catCount)
 	}
 }
