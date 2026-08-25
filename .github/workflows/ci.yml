@@ -1,0 +1,37 @@
+name: Runtime Nomad Conformance
+
+on:
+  push:
+    branches:
+      - main
+      - "fable-nomad/**"
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  receipt:
+    name: Phase-1 conformance receipt (full offline ladder)
+    runs-on: ubuntu-latest
+    # A self-hosted runner is being set up separately. Once available,
+    # switch to:
+    # runs-on: [self-hosted, linux, haus-gpu]
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version-file: runtime/go.mod
+
+      - name: Install Gas City
+        run: go install github.com/gastownhall/gascity/cmd/gc@latest
+
+      - name: Run the phase-1 conformance suite
+        run: GC_BIN="$(go env GOPATH)/bin/gc" ./conformance.sh

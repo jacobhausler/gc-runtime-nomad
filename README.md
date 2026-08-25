@@ -1,5 +1,9 @@
 # runtime-nomad
 
+> Extracted from jacobhausler/gascity-packs fork with history on 2026-08-26;
+> registry name jacobhausler/runtime-nomad; co-maintainers @jacobhausler
+> @atbrace.
+
 A Gas City **runtime pack**: it ships a runtime *executable*, not a service.
 The executable `gc-runtime-nomad` speaks the Runtime Provider Protocol
 (RPP v0). It answers the `protocol` handshake, the four session lifecycle
