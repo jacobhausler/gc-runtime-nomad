@@ -353,6 +353,116 @@ func TestOpStartFaultPropagates(t *testing.T) {
 	}
 }
 
+// countRegisterCalls counts parent-job register requests (POST /v1/jobs) in
+// a fakenomad trace — the assertion a dispatch-only-token scenario needs: no
+// register call at all when the parent already matches.
+func countRegisterCalls(trace []string) int {
+	n := 0
+	for _, req := range trace {
+		if req == "POST /v1/jobs" {
+			n++
+		}
+	}
+	return n
+}
+
+// TestOpStartSucceedsWhenParentExistsAndRegisterIsForbidden models the
+// NRT-P2-06.1 lab ACL scenario: a token that 403s on register but 200s on
+// dispatch (04 §4 — register is a one-time management-token setup step, not
+// a per-Start action). With the parent already registered and matching this
+// build's node pool, Start must succeed WITHOUT ever calling register.
+func TestOpStartSucceedsWhenParentExistsAndRegisterIsForbidden(t *testing.T) {
+	l, srv := newTestLifecycle(t)
+	ctx := context.Background()
+	const session = "sess-dispatch-only-token"
+
+	// Simulate the one-time management-token registration step.
+	if err := l.client.registerJob(ctx, parentJobSpec("default", l.nodePool, l.parentJobID)); err != nil {
+		t.Fatalf("registerJob (management token): %v", err)
+	}
+
+	// From here on, the token this lifecycle uses 403s on register.
+	srv.FailSticky("POST", "/v1/jobs", 403, `{"error":"Permission denied: missing submit-job capability"}`)
+
+	if err := l.opStart(ctx, session); err != nil {
+		t.Fatalf("start with parent already registered and register forbidden: %v", err)
+	}
+	if running, err := l.opIsRunning(ctx, session); err != nil || !running {
+		t.Fatalf("is-running after start = (%v, %v), want (true, nil)", running, err)
+	}
+	if n := countRegisterCalls(srv.Trace()); n != 1 {
+		t.Fatalf("register calls after start = %d, want 1 (only the pre-seeded management-token call)", n)
+	}
+}
+
+// TestOpStartFailsClearlyWhenParentAbsentAndRegisterForbidden confirms a
+// 403 on register (parent missing, no prior management-token setup) surfaces
+// as an error naming the missing capability rather than an opaque status
+// code or a silent failure.
+func TestOpStartFailsClearlyWhenParentAbsentAndRegisterForbidden(t *testing.T) {
+	l, srv := newTestLifecycle(t)
+	ctx := context.Background()
+
+	srv.FailSticky("POST", "/v1/jobs", 403, `{"error":"Permission denied: missing submit-job capability"}`)
+
+	err := l.opStart(ctx, "sess-no-parent")
+	if err == nil {
+		t.Fatalf("start with absent parent and register forbidden: got nil error, want failure")
+	}
+	if !strings.Contains(err.Error(), "submit-job") {
+		t.Fatalf("start error = %v, want it to name the submit-job capability", err)
+	}
+}
+
+// TestOpStartRegistersWhenNodePoolDrifted confirms a parent that already
+// exists but whose node pool no longer matches this build's config still
+// gets re-registered (the idempotent-upsert path) rather than being treated
+// as a match.
+func TestOpStartRegistersWhenNodePoolDrifted(t *testing.T) {
+	l, srv := newTestLifecycle(t)
+	l.nodePool = "lab-a"
+	ctx := context.Background()
+
+	// Parent registered under the OLD (empty) node pool.
+	if err := l.client.registerJob(ctx, parentJobSpec("default", "", l.parentJobID)); err != nil {
+		t.Fatalf("registerJob (stale node pool): %v", err)
+	}
+
+	if err := l.opStart(ctx, "sess-drifted"); err != nil {
+		t.Fatalf("start with drifted node pool: %v", err)
+	}
+	if n := countRegisterCalls(srv.Trace()); n != 2 {
+		t.Fatalf("register calls after start = %d, want 2 (the stale seed plus the drift-triggered re-register)", n)
+	}
+	nodePool, ok, err := l.client.getJob(ctx, l.parentJobID)
+	if err != nil || !ok {
+		t.Fatalf("getJob after re-register = (%q, %v, %v), want (_, true, nil)", nodePool, ok, err)
+	}
+	if nodePool != "lab-a" {
+		t.Fatalf("parent node pool after re-register = %q, want %q", nodePool, "lab-a")
+	}
+}
+
+// TestOpStartForbidRegistrationConfigFailsClosed confirms
+// lifecycle.forbidRegistration skips the register attempt entirely — no
+// POST /v1/jobs at all — rather than ever probing the capability boundary.
+func TestOpStartForbidRegistrationConfigFailsClosed(t *testing.T) {
+	l, srv := newTestLifecycle(t)
+	l.forbidRegistration = true
+	ctx := context.Background()
+
+	err := l.opStart(ctx, "sess-forbid-register")
+	if err == nil {
+		t.Fatalf("start with forbidRegistration and absent parent: got nil error, want failure")
+	}
+	if !strings.Contains(err.Error(), "GC_NOMAD_FORBID_REGISTER") {
+		t.Fatalf("start error = %v, want it to name GC_NOMAD_FORBID_REGISTER", err)
+	}
+	if n := countRegisterCalls(srv.Trace()); n != 0 {
+		t.Fatalf("register calls after start = %d, want 0 (forbidRegistration must never attempt register)", n)
+	}
+}
+
 // countFSCat counts client fs-cat requests in a fakenomad trace.
 func countFSCat(trace []string) int {
 	n := 0

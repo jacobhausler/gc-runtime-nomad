@@ -45,6 +45,15 @@ type lifecycle struct {
 	// stop behavior unchanged. Sinks beyond a local directory (remote
 	// upload, etc.) are out of scope for this bead.
 	egressDir string
+
+	// forbidRegistration, when true, makes ensureParentRegistered fail
+	// closed instead of ever attempting to register the parent job — for a
+	// deployment whose runtime token deliberately lacks the submit-job
+	// capability (04 §4 lab ACL model, NRT-P2-06.1) and wants a clear
+	// config-time guarantee that dispatch never even probes that capability
+	// boundary, trading a start failure with a precise cause for the
+	// default behavior of attempting register and surfacing its 403.
+	forbidRegistration bool
 }
 
 // lockSession acquires an exclusive, cross-process advisory file lock for
@@ -439,8 +448,8 @@ func (l *lifecycle) dispatch(ctx context.Context, sessionName string) error {
 		// out of scope (provision split).
 	}
 
-	if err := l.client.registerJob(ctx, parentJobSpec(l.client.namespace, l.nodePool, l.parentJobID)); err != nil {
-		return fmt.Errorf("registering parent job: %w", err)
+	if err := l.ensureParentRegistered(ctx); err != nil {
+		return err
 	}
 
 	// Positive-attribution adoption (04 §2.1 rule 6): a prior attempt may
@@ -481,6 +490,48 @@ func (l *lifecycle) dispatch(ctx context.Context, sessionName string) error {
 	final := intent
 	final.ChildJobID = childID
 	return l.sidecar.save(final)
+}
+
+// ensureParentRegistered makes sure the parent job dispatch's children come
+// from exists, in the current namespace, with the node pool this build is
+// configured for — the NRT-P2-06.1 fix for the lab ACL model (04 §4): the
+// runtime token dispatch normally runs under may hold read-job and
+// dispatch-job but deliberately NOT submit-job, since registering the
+// parent is a one-time management-token setup step, not a per-Start action.
+// Previously dispatch called registerJob unconditionally on every Start,
+// which a narrowed dispatch-only token could never satisfy.
+//
+// It looks the parent up first via a GET (dispatch-scoped tokens can always
+// read-job) and only calls register when the parent is missing or its node
+// pool has drifted from this build's config — the one parentJobSpec field
+// beyond namespace that varies at runtime (NRT-P2-05). A token that is
+// genuinely dispatch-only, against a parent that already matches, never
+// calls register at all. l.forbidRegistration skips the register attempt
+// entirely for a deployment that wants a config-time guarantee of that,
+// rather than discovering it from a 403 at the first drifted Start.
+func (l *lifecycle) ensureParentRegistered(ctx context.Context) error {
+	nodePool, ok, err := l.client.getJob(ctx, l.parentJobID)
+	if err != nil {
+		return fmt.Errorf("looking up parent job %q: %w", l.parentJobID, err)
+	}
+	if ok && nodePool == l.nodePool {
+		return nil
+	}
+
+	if l.forbidRegistration {
+		if ok {
+			return fmt.Errorf("parent job %q exists but its node pool has drifted (want %q, have %q), and GC_NOMAD_FORBID_REGISTER forbids registering to fix it: register it out-of-band with a token holding the submit-job capability", l.parentJobID, l.nodePool, nodePool)
+		}
+		return fmt.Errorf("parent job %q does not exist in namespace %q, and GC_NOMAD_FORBID_REGISTER forbids registering it: register it out-of-band with a token holding the submit-job capability", l.parentJobID, l.client.namespace)
+	}
+
+	if err := l.client.registerJob(ctx, parentJobSpec(l.client.namespace, l.nodePool, l.parentJobID)); err != nil {
+		if errors.Is(err, errJobForbidden) {
+			return fmt.Errorf("registering parent job %q: token lacks the submit-job capability required to register jobs in namespace %q — register it once with a management token (04 §4 lab ACL model), or set GC_NOMAD_FORBID_REGISTER and do so out-of-band: %w", l.parentJobID, l.client.namespace, err)
+		}
+		return fmt.Errorf("registering parent job %q: %w", l.parentJobID, err)
+	}
+	return nil
 }
 
 // findOrphanByNonce looks up the parent job's dispatched children (04 §2.1

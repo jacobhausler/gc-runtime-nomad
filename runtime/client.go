@@ -31,6 +31,14 @@ const (
 // direct job GET, or (for deregister/dispatch) the job never having existed.
 var errJobGone = errors.New("nomad: job gone")
 
+// errJobForbidden marks a 403 from the Nomad API against a job route — the
+// lab ACL model's (04 §4) signal that the calling token lacks a capability
+// it needs for the attempted call, most notably submit-job on a register
+// call from a token scoped to dispatch/read/deregister only
+// (NRT-P2-06.1). registerJob's caller uses this to turn a bare 403 into an
+// error that names the missing capability instead of an opaque status code.
+var errJobForbidden = errors.New("nomad: forbidden")
+
 // errAllocFileGone marks a 404 from the client fs "cat" endpoint — either
 // the allocation or the requested path is gone/never existed. The
 // stop-path egress treats this as "nothing to copy" rather than a failure:
@@ -77,6 +85,30 @@ func newClient(addr, token, namespace string) (*client, error) {
 // route), matching every other route's explicit ?namespace= query param.
 func (c *client) registerJob(ctx context.Context, job nomadJob) error {
 	return c.do(ctx, defaultTimeout, http.MethodPost, []string{"v1", "jobs"}, map[string]any{"Job": job}, nil)
+}
+
+// getJob reads jobID via GET /v1/job/:id (namespace-aware via nsQuery) and
+// reports ok=false, err=nil only on a confirmed absence (404) — mirroring
+// errJobGone's meaning elsewhere in this client; any other failure is
+// returned as an error since a lookup failure is not proof of absence. It
+// decodes only NodePool: the one parentJobSpec field beyond namespace that
+// varies at runtime (NRT-P2-05), and so the only field
+// lifecycle.ensureParentRegistered needs to compare against this build's
+// config to decide whether an already-registered parent still matches. A
+// namespace-scoped GET against real Nomad already proves the namespace half
+// of that identity on its own — Nomad 404s a job that exists only in a
+// different namespace rather than returning it.
+func (c *client) getJob(ctx context.Context, jobID string) (nodePool string, ok bool, err error) {
+	var out struct {
+		NodePool string
+	}
+	if _, err := c.doIndexed(ctx, defaultTimeout, http.MethodGet, []string{"v1", "job", jobID}, c.nsQuery(), nil, &out); err != nil {
+		if errors.Is(err, errJobGone) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	return out.NodePool, true, nil
 }
 
 type dispatchResult struct {
@@ -547,8 +579,11 @@ func (c *client) urlFor(parts []string, query url.Values) *url.URL {
 
 func statusError(status int, target string, data []byte) error {
 	msg := statusText(status, data)
-	if status == http.StatusNotFound {
+	switch status {
+	case http.StatusNotFound:
 		return fmt.Errorf("%w: %s: %s", errJobGone, target, msg)
+	case http.StatusForbidden:
+		return fmt.Errorf("%w: %s: %s", errJobForbidden, target, msg)
 	}
 	return fmt.Errorf("nomad %s: status %d: %s", target, status, msg)
 }

@@ -38,6 +38,7 @@
 //	GC_NOMAD_PARENT_JOB   optional: the city's parameterized parent job ID (default "gc-sessions")
 //	GC_NOMAD_SIDECAR_DIR  required for lifecycle ops: directory for the sidecar session->job-ID bindings (04 §1)
 //	GC_NOMAD_EGRESS_DIR   optional: local directory for stop-path transcript/evidence egress (NRT-P1-07); unset disables egress
+//	GC_NOMAD_FORBID_REGISTER  optional: "true" forbids ever registering the parent job (04 §4 lab ACL model) — start/provision fail closed instead of attempting a register call that needs the submit-job capability
 package main
 
 import (
@@ -56,6 +57,7 @@ const (
 	envParentJob  = "GC_NOMAD_PARENT_JOB"
 	envSidecarDir = "GC_NOMAD_SIDECAR_DIR"
 	envEgressDir  = "GC_NOMAD_EGRESS_DIR"
+	envForbidReg  = "GC_NOMAD_FORBID_REGISTER"
 
 	defaultParentJob = "gc-sessions"
 
@@ -334,7 +336,15 @@ func newLifecycle() (*lifecycle, error) {
 	if parentJob == "" {
 		parentJob = defaultParentJob
 	}
-	return &lifecycle{client: c, sidecar: sc, parentJobID: parentJob, nodePool: os.Getenv(envNodePool), egressDir: os.Getenv(envEgressDir)}, nil
+	forbidRegistration, _ := strconv.ParseBool(os.Getenv(envForbidReg))
+	return &lifecycle{
+		client:             c,
+		sidecar:            sc,
+		parentJobID:        parentJob,
+		nodePool:           os.Getenv(envNodePool),
+		egressDir:          os.Getenv(envEgressDir),
+		forbidRegistration: forbidRegistration,
+	}, nil
 }
 
 func boolText(b bool) string {
