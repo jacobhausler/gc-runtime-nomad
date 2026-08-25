@@ -25,9 +25,10 @@ const (
 
 // handleExecWS fakes `GET /v1/client/allocation/:alloc_id/exec`. After a
 // successful handshake it drains client frames until it sees a
-// stdin-close, then replies with one scripted stdout frame and an exited
-// frame carrying exit_code 0 — deterministic behavior sufficient for a
-// wire-conformance double; it does not run any real command.
+// stdin-close, then actually runs the command carried in the `command`
+// query param (runCommand) and replies with its real stdout+stderr and
+// exit code — RPP-CONN-001's exit-code fidelity requires a genuine
+// per-command result, not a canned reply.
 func (s *Server) handleExecWS(w http.ResponseWriter, r *http.Request, allocID string) {
 	s.mu.Lock()
 	_, ok := s.allocs[allocID]
@@ -35,6 +36,11 @@ func (s *Server) handleExecWS(w http.ResponseWriter, r *http.Request, allocID st
 	if !ok {
 		writeJSONError(w, http.StatusNotFound, "alloc not found")
 		return
+	}
+
+	var command []string
+	if raw := r.URL.Query().Get("command"); raw != "" {
+		_ = json.Unmarshal([]byte(raw), &command)
 	}
 
 	key := r.Header.Get("Sec-WebSocket-Key")
@@ -81,15 +87,16 @@ func (s *Server) handleExecWS(w http.ResponseWriter, r *http.Request, allocID st
 			continue
 		}
 		if frame.Stdin != nil && frame.Stdin.Close {
+			exitCode, output := s.runCommand(allocID, command)
 			stdout, _ := json.Marshal(map[string]any{
-				"stdout": map[string]string{"data": base64.StdEncoding.EncodeToString([]byte("ok\n"))},
+				"stdout": map[string]string{"data": base64.StdEncoding.EncodeToString(output)},
 			})
 			if err := wsWriteFrame(conn, wsOpText, stdout); err != nil {
 				return
 			}
 			exited, _ := json.Marshal(map[string]any{
 				"exited": true,
-				"result": map[string]int{"exit_code": 0},
+				"result": map[string]int{"exit_code": exitCode},
 			})
 			_ = wsWriteFrame(conn, wsOpText, exited)
 			return

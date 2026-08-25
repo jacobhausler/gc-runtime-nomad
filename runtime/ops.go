@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -262,6 +263,84 @@ func (l *lifecycle) opExec(ctx context.Context, sessionName string, command []st
 	return exitCode, stdout, nil
 }
 
+// opNudge sends text into sessionName's tmux session as if typed at the
+// keyboard, followed by Enter — the turn-start driving verb, realized as
+// tmux commands over exec rather than a bespoke protocol (fnrt-szx). text
+// is carried as a positional shell argument ($1), never interpolated into
+// the script string, so arbitrary content (quotes, backticks, newlines)
+// can never break out of the intended two tmux calls.
+func (l *lifecycle) opNudge(ctx context.Context, sessionName, text string) error {
+	command := []string{
+		"/bin/sh", "-c",
+		`tmux send-keys -t "$1" -l -- "$2" && tmux send-keys -t "$1" Enter`,
+		"nudge", tmuxSessionName, text,
+	}
+	return l.runDrivingVerb(ctx, sessionName, "nudge", command)
+}
+
+// opPeek captures sessionName's tmux pane content and returns it. lines <= 0
+// captures only the visible pane; lines > 0 also captures that many lines of
+// scrollback history (tmux capture-pane -S).
+func (l *lifecycle) opPeek(ctx context.Context, sessionName string, lines int) ([]byte, error) {
+	command := []string{"tmux", "capture-pane", "-t", tmuxSessionName, "-p"}
+	if lines > 0 {
+		command = append(command, "-S", "-"+strconv.Itoa(lines))
+	}
+	allocID, err := l.currentAlloc(ctx, sessionName)
+	if err != nil {
+		return nil, fmt.Errorf("peeking session %q: %w", sessionName, err)
+	}
+	exitCode, out, err := l.client.execAlloc(ctx, allocID, execTaskName, command)
+	if err != nil {
+		return nil, fmt.Errorf("peeking session %q: %w", sessionName, err)
+	}
+	if exitCode != 0 {
+		return nil, fmt.Errorf("peeking session %q: tmux capture-pane exited %d: %s", sessionName, exitCode, out)
+	}
+	return out, nil
+}
+
+// opInterrupt sends Ctrl-C into sessionName's tmux session — a best-effort,
+// idempotent interrupt of whatever is currently running in the pane
+// (mirrors runtime-cloudflare's interrupt op).
+func (l *lifecycle) opInterrupt(ctx context.Context, sessionName string) error {
+	command := []string{"tmux", "send-keys", "-t", tmuxSessionName, "C-c"}
+	return l.runDrivingVerb(ctx, sessionName, "interrupt", command)
+}
+
+// opSendKeys forwards keys verbatim to sessionName's tmux session (tmux
+// send-keys key syntax — e.g. "Enter", "C-c", literal text), unlike opNudge
+// which always types literal text followed by Enter.
+func (l *lifecycle) opSendKeys(ctx context.Context, sessionName string, keys []string) error {
+	command := append([]string{"tmux", "send-keys", "-t", tmuxSessionName}, keys...)
+	return l.runDrivingVerb(ctx, sessionName, "send-keys", command)
+}
+
+// opClearScrollback discards sessionName's tmux scrollback history, leaving
+// the visible pane untouched.
+func (l *lifecycle) opClearScrollback(ctx context.Context, sessionName string) error {
+	command := []string{"tmux", "clear-history", "-t", tmuxSessionName}
+	return l.runDrivingVerb(ctx, sessionName, "clear-scrollback", command)
+}
+
+// runDrivingVerb execs command (a tmux invocation targeting tmuxSessionName)
+// into sessionName's current alloc and turns a nonzero exit or transport
+// failure into an error — the shared tail of every driving verb above.
+func (l *lifecycle) runDrivingVerb(ctx context.Context, sessionName, verb string, command []string) error {
+	allocID, err := l.currentAlloc(ctx, sessionName)
+	if err != nil {
+		return fmt.Errorf("%s session %q: %w", verb, sessionName, err)
+	}
+	exitCode, out, err := l.client.execAlloc(ctx, allocID, execTaskName, command)
+	if err != nil {
+		return fmt.Errorf("%s session %q: %w", verb, sessionName, err)
+	}
+	if exitCode != 0 {
+		return fmt.Errorf("%s session %q: tmux command exited %d: %s", verb, sessionName, exitCode, out)
+	}
+	return nil
+}
+
 // dispatch registers the parent job (idempotent upsert) if needed, then
 // dispatches a tmux-only child for sessionName — the mechanism shared by
 // opProvision directly and opStart (provision half).
@@ -357,12 +436,12 @@ func (l *lifecycle) launch(ctx context.Context, sessionName string) error {
 	if err != nil {
 		return err
 	}
-	exitCode, _, err := l.client.execAlloc(ctx, allocID, execTaskName, launchCommand)
+	exitCode, dbgOut, err := l.client.execAlloc(ctx, allocID, execTaskName, launchCommand)
 	if err != nil {
 		return fmt.Errorf("launching session %q: %w", sessionName, err)
 	}
 	if exitCode != 0 {
-		return fmt.Errorf("launching session %q: launch command exited %d", sessionName, exitCode)
+		return fmt.Errorf("launching session %q: launch command exited %d DEBUGOUT=%q", sessionName, exitCode, string(dbgOut))
 	}
 	return nil
 }

@@ -1,13 +1,15 @@
 // Command gc-runtime-nomad is a Runtime Provider Protocol (RPP) v0
 // executable that runs Gas City sessions as dispatched Nomad jobs. It
 // answers the `protocol` handshake, the four lifecycle ops from NRT-P1-03
-// (start, stop, is-running, list-running), and the provision/launch split
-// plus warm relaunch from NRT-P1-08 (provision, exec, relaunch) — all over
-// Nomad job dispatch/deregister/blocking-reads and the alloc-exec WebSocket
-// (04 §3/§4/§6/§7). Every other op exits 2, the RPP forward-compatibility
-// signal a caller treats as a no-op success; the remaining driving verbs
-// (nudge/peek/...) and staging (workspace/secrets data contracts) are still
-// out of scope.
+// (start, stop, is-running, list-running), the provision/launch split plus
+// warm relaunch from NRT-P1-08 (provision, exec, relaunch), and — from
+// fnrt-szx — the driving verbs (nudge, peek, interrupt, send-keys,
+// clear-scrollback) realized as tmux commands sent into the session's tmux
+// pane over the same exec mechanism. Everything runs over Nomad job
+// dispatch/deregister/blocking-reads and the alloc-exec WebSocket (04
+// §3/§4/§6/§7). Every other op exits 2, the RPP forward-compatibility
+// signal a caller treats as a no-op success; staging (workspace/secrets
+// data contracts) is still out of scope.
 //
 // Calling convention (no shell wrapping — gc execs the binary directly):
 //
@@ -36,7 +38,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
+	"strconv"
 )
 
 const (
@@ -61,7 +65,7 @@ const (
 const protocolHandshakeJSON = `{"version":0,"capabilities":["proc.provision","proc.exec"]}`
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
 
 // lifecycleOps is the set of RPP operations this phase implements against
@@ -69,18 +73,23 @@ func main() {
 // — so a misconfigured or unset GC_NOMAD_ADDR never turns a handshake or an
 // unimplemented-op probe into a spurious failure.
 var lifecycleOps = map[string]bool{
-	"start":        true,
-	"stop":         true,
-	"is-running":   true,
-	"list-running": true,
-	"provision":    true,
-	"relaunch":     true,
-	"exec":         true,
+	"start":            true,
+	"stop":             true,
+	"is-running":       true,
+	"list-running":     true,
+	"provision":        true,
+	"relaunch":         true,
+	"exec":             true,
+	"nudge":            true,
+	"peek":             true,
+	"interrupt":        true,
+	"send-keys":        true,
+	"clear-scrollback": true,
 }
 
 // run dispatches one RPP operation. It is separated from main so tests can
 // drive it with an in-memory stream and assert exit codes.
-func run(args []string, stdout, stderr *os.File) int {
+func run(args []string, stdin io.Reader, stdout, stderr *os.File) int {
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, "gc-runtime-nomad: missing operation")
 		return exitError
@@ -187,11 +196,20 @@ func run(args []string, stdout, stderr *os.File) int {
 		if !ok {
 			return exitError
 		}
-		if len(rest) < 2 {
+		// The command rides on stdin (docs/reference/exec-session-provider.md
+		// exec row), not argv — a single shell command line, run inside the
+		// box via /bin/sh -c so it gets the same quoting/pipeline semantics a
+		// caller typing it into a shell would expect.
+		cmdBytes, err := io.ReadAll(stdin)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc-runtime-nomad %s: reading command: %v\n", op, err)
+			return exitError
+		}
+		if len(cmdBytes) == 0 {
 			fmt.Fprintf(stderr, "gc-runtime-nomad %s: missing command\n", op)
 			return exitError
 		}
-		exitCode, out, err := l.opExec(ctx, name, rest[1:])
+		exitCode, out, err := l.opExec(ctx, name, []string{"/bin/sh", "-c", string(cmdBytes)})
 		if err != nil {
 			return fail(err)
 		}
@@ -203,6 +221,77 @@ func run(args []string, stdout, stderr *os.File) int {
 		// remote command's exit code (04 §3 exec row: "op exit = command
 		// exit", RPP-CONN-001) — not the 0/1/2 lifecycle-op convention.
 		return exitCode
+
+	case "nudge":
+		name, ok := needName()
+		if !ok {
+			return exitError
+		}
+		// Text rides on stdin (mirrors exec's calling convention), not
+		// argv — a nudge's turn-start text can be arbitrarily long/shaped.
+		text, err := io.ReadAll(stdin)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc-runtime-nomad %s: reading nudge text: %v\n", op, err)
+			return exitError
+		}
+		if err := l.opNudge(ctx, name, string(text)); err != nil {
+			return fail(err)
+		}
+		return exitOK
+
+	case "peek":
+		name, ok := needName()
+		if !ok {
+			return exitError
+		}
+		lines := 0
+		if len(rest) > 1 {
+			n, err := strconv.Atoi(rest[1])
+			if err != nil {
+				fmt.Fprintf(stderr, "gc-runtime-nomad %s: invalid line count %q: %v\n", op, rest[1], err)
+				return exitError
+			}
+			lines = n
+		}
+		out, err := l.opPeek(ctx, name, lines)
+		if err != nil {
+			return fail(err)
+		}
+		if _, err := stdout.Write(out); err != nil {
+			fmt.Fprintf(stderr, "gc-runtime-nomad %s: writing stdout: %v\n", op, err)
+			return exitError
+		}
+		return exitOK
+
+	case "interrupt":
+		name, ok := needName()
+		if !ok {
+			return exitError
+		}
+		if err := l.opInterrupt(ctx, name); err != nil {
+			return fail(err)
+		}
+		return exitOK
+
+	case "send-keys":
+		name, ok := needName()
+		if !ok {
+			return exitError
+		}
+		if err := l.opSendKeys(ctx, name, rest[1:]); err != nil {
+			return fail(err)
+		}
+		return exitOK
+
+	case "clear-scrollback":
+		name, ok := needName()
+		if !ok {
+			return exitError
+		}
+		if err := l.opClearScrollback(ctx, name); err != nil {
+			return fail(err)
+		}
+		return exitOK
 
 	default:
 		// Unreachable: lifecycleOps gates entry to this switch. Kept as a

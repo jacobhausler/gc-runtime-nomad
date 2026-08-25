@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -395,6 +396,104 @@ func TestAllocExecWS(t *testing.T) {
 	}
 	if !exitMsg.Exited || exitMsg.Result.ExitCode != 0 {
 		t.Fatalf("exit frame = %+v, want exited=true exit_code=0", exitMsg)
+	}
+}
+
+// TestAllocExecWSRunsRealCommand is the fake's own proof of exit-code/output
+// fidelity (what RPP-CONN-001 requires of the pack): the command in the
+// `command` query param is genuinely executed, not answered with a canned
+// reply — distinct commands must produce distinct stdout and exit codes.
+func TestAllocExecWSRunsRealCommand(t *testing.T) {
+	srv := NewServer()
+	defer srv.Close()
+
+	httpJSON(t, http.MethodPost, srv.URL()+"/v1/jobs", map[string]any{"Job": map[string]any{"ID": "execjob2"}}, &map[string]any{})
+	var dispatchOut map[string]any
+	httpJSON(t, http.MethodPost, srv.URL()+"/v1/job/execjob2/dispatch", map[string]any{}, &dispatchOut)
+	childID, _ := dispatchOut["DispatchedJobID"].(string)
+	var allocs []map[string]any
+	httpJSON(t, http.MethodGet, srv.URL()+"/v1/job/"+childID+"/allocations", nil, &allocs)
+	allocID, _ := allocs[0]["ID"].(string)
+
+	runExec := func(command []string) (stdout string, exitCode int) {
+		host := strings.TrimPrefix(srv.URL(), "http://")
+		conn, err := net.Dial("tcp", host)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		defer conn.Close()
+
+		cmdJSON, err := json.Marshal(command)
+		if err != nil {
+			t.Fatalf("marshal command: %v", err)
+		}
+		path := fmt.Sprintf("/v1/client/allocation/%s/exec?command=%s&task=main", allocID, url.QueryEscape(string(cmdJSON)))
+		clientKey := "dGhlIHNhbXBsZSBub25jZQ=="
+		req := "GET " + path + " HTTP/1.1\r\n" +
+			"Host: " + host + "\r\n" +
+			"Upgrade: websocket\r\n" +
+			"Connection: Upgrade\r\n" +
+			"Sec-WebSocket-Key: " + clientKey + "\r\n" +
+			"Sec-WebSocket-Version: 13\r\n\r\n"
+		if _, err := io.WriteString(conn, req); err != nil {
+			t.Fatalf("write handshake: %v", err)
+		}
+
+		br := bufio.NewReader(conn)
+		statusLine, err := br.ReadString('\n')
+		if err != nil || !strings.Contains(statusLine, "101") {
+			t.Fatalf("handshake status line = %q, err = %v, want 101", statusLine, err)
+		}
+		for {
+			line, err := br.ReadString('\n')
+			if err != nil {
+				t.Fatalf("read handshake headers: %v", err)
+			}
+			if line == "\r\n" {
+				break
+			}
+		}
+
+		closeFrame, _ := json.Marshal(map[string]any{"stdin": map[string]any{"close": true}})
+		if err := writeMaskedFrame(conn, wsOpText, closeFrame); err != nil {
+			t.Fatalf("write stdin-close frame: %v", err)
+		}
+
+		stdoutFrame := readServerFrame(t, br)
+		var stdoutMsg struct {
+			Stdout struct {
+				Data string `json:"data"`
+			} `json:"stdout"`
+		}
+		if err := json.Unmarshal(stdoutFrame, &stdoutMsg); err != nil {
+			t.Fatalf("unmarshal stdout frame: %v", err)
+		}
+		decoded, err := base64.StdEncoding.DecodeString(stdoutMsg.Stdout.Data)
+		if err != nil {
+			t.Fatalf("decode stdout: %v", err)
+		}
+
+		exitFrame := readServerFrame(t, br)
+		var exitMsg struct {
+			Exited bool `json:"exited"`
+			Result struct {
+				ExitCode int `json:"exit_code"`
+			} `json:"result"`
+		}
+		if err := json.Unmarshal(exitFrame, &exitMsg); err != nil {
+			t.Fatalf("unmarshal exit frame: %v", err)
+		}
+		if !exitMsg.Exited {
+			t.Fatalf("exit frame = %+v, want exited=true", exitMsg)
+		}
+		return string(decoded), exitMsg.Result.ExitCode
+	}
+
+	if out, code := runExec([]string{"/bin/sh", "-c", "echo GC_RPP_CONN_EXEC_OK"}); out != "GC_RPP_CONN_EXEC_OK\n" || code != 0 {
+		t.Fatalf("echo command: stdout = %q, exit = %d, want %q / 0", out, code, "GC_RPP_CONN_EXEC_OK\n")
+	}
+	if _, code := runExec([]string{"/bin/sh", "-c", "exit 7"}); code != 7 {
+		t.Fatalf("exit-7 command: exit = %d, want 7", code)
 	}
 }
 

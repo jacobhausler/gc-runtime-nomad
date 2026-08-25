@@ -23,10 +23,16 @@
 package fakenomad
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -98,11 +104,13 @@ type Server struct {
 	jobs       map[string]*Job
 	allocs     map[string]*Allocation
 	allocFiles map[string]map[string]string // allocID -> path -> content
+	execDirs   map[string]string            // allocID -> its exec scratch dir (lazy)
 	faults     []fault
 	dispSeq    uint64
 	trace      []string
 
-	httpSrv *httptest.Server
+	execRoot string // parent of every per-alloc exec scratch dir
+	httpSrv  *httptest.Server
 }
 
 // NewServer starts a fake Nomad server on a loopback listener and returns
@@ -124,19 +132,47 @@ func NewTLSServer() *Server {
 }
 
 func newServer() *Server {
+	execRoot, err := os.MkdirTemp("", "fakenomad-exec-")
+	if err != nil {
+		// Exceedingly unlikely (a functioning os.TempDir is a test-harness
+		// precondition); fall back to a fixed-but-still-scratch location
+		// rather than making NewServer fallible for this.
+		execRoot = filepath.Join(os.TempDir(), fmt.Sprintf("fakenomad-exec-%d", time.Now().UnixNano()))
+	}
 	return &Server{
 		waitCh:     make(chan struct{}),
 		jobs:       map[string]*Job{},
 		allocs:     map[string]*Allocation{},
 		allocFiles: map[string]map[string]string{},
+		execDirs:   map[string]string{},
+		execRoot:   execRoot,
 	}
 }
 
 // URL returns the fake server's base URL (scheme+host).
 func (s *Server) URL() string { return s.httpSrv.URL }
 
-// Close shuts down the underlying HTTP server.
-func (s *Server) Close() { s.httpSrv.Close() }
+// Close shuts down the underlying HTTP server. It also kills any tmux
+// server a caller's exec'd command started inside a per-alloc scratch dir
+// (allocScratchDir) and removes those dirs — exec genuinely runs commands
+// (runCommand), so a caller driving the launch command
+// (`tmux new-session -d -s main`) over exec leaves a real background tmux
+// server behind unless something reaps it.
+func (s *Server) Close() {
+	s.httpSrv.Close()
+	s.mu.Lock()
+	dirs := make([]string, 0, len(s.execDirs))
+	for _, d := range s.execDirs {
+		dirs = append(dirs, d)
+	}
+	s.mu.Unlock()
+	for _, d := range dirs {
+		cmd := exec.Command("tmux", "kill-server")
+		cmd.Env = isolatedTmuxEnv(d)
+		_ = cmd.Run() // best-effort: no server running is not an error worth surfacing
+	}
+	_ = os.RemoveAll(s.execRoot)
+}
 
 // FailNext queues a one-shot fault: the next request matching method and
 // exact path is answered with status and body instead of being routed to
@@ -657,6 +693,56 @@ func (s *Server) systemGC(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+// allocScratchDir lazily creates and returns allocID's own exec scratch
+// directory under s.execRoot, encoded so an arbitrary allocID (real Nomad
+// alloc IDs are UUIDs; this fake's are "alloc-<hex>") can never collide or
+// escape it (mirrors the runtime pack's own sidecar path scheme).
+func (s *Server) allocScratchDir(allocID string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if dir, ok := s.execDirs[allocID]; ok {
+		return dir
+	}
+	dir := filepath.Join(s.execRoot, base64.RawURLEncoding.EncodeToString([]byte(allocID)))
+	_ = os.MkdirAll(dir, 0o700)
+	s.execDirs[allocID] = dir
+	return dir
+}
+
+// runCommand actually executes command as a real subprocess and returns its
+// exit code plus combined stdout+stderr (e2a-exec-protocol: the fake proves
+// wire-level exit-code/output fidelity, not a canned reply). Each alloc gets
+// its own TMUX_TMPDIR (and CWD) via allocScratchDir, so a launch command
+// like `tmux new-session -d -s main` — the in-box tmux session name is a
+// fixed wire-contract constant, not something this fake can rename — never
+// collides across allocs sharing this one test machine's default tmux
+// server. An empty command (no caller sends one; kept for robustness)
+// preserves the pre-NRT-P1-05 scripted reply.
+func (s *Server) runCommand(allocID string, command []string) (int, []byte) {
+	if len(command) == 0 {
+		return 0, []byte("ok\n")
+	}
+	dir := s.allocScratchDir(allocID)
+	cmd := exec.Command(command[0], command[1:]...)
+	cmd.Dir = dir
+	cmd.Env = isolatedTmuxEnv(dir)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	err := cmd.Run()
+	if err == nil {
+		return 0, out.Bytes()
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode(), out.Bytes()
+	}
+	// Not even an exit-code failure (binary missing, etc.): surface as a
+	// generic failure with the error appended to whatever output exists.
+	out.WriteString(err.Error())
+	return 1, out.Bytes()
+}
+
 func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -675,4 +761,20 @@ func splitPath(p string) []string {
 		}
 	}
 	return out
+}
+
+// isolatedTmuxEnv builds the environment for a command that may invoke tmux
+// inside an alloc scratch dir. It strips any inherited TMUX so the tmux
+// client can never resolve the caller's ambient server (a gc worker runs
+// inside tmux; an inherited $TMUX made kill-server take down the whole
+// host server and every sibling worker), then pins the socket dir.
+func isolatedTmuxEnv(dir string) []string {
+	env := make([]string, 0, len(os.Environ())+1)
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "TMUX=") || strings.HasPrefix(kv, "TMUX_TMPDIR=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	return append(env, "TMUX_TMPDIR="+dir)
 }
