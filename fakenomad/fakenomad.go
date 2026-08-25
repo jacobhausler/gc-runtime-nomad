@@ -1,16 +1,19 @@
 // Package fakenomad is an in-memory stand-in for the subset of the Nomad
-// HTTP API a Gas City Nomad runtime provider calls: job register/dispatch,
-// job and allocation reads (both blocking-capable via the index/wait query
-// params against an X-Nomad-Index response header, per the Nomad consistency
-// model), the interactive alloc-exec WebSocket, and the system GC endpoint.
-// It exists so `gc runtime check`/`gc runtime conformance` (and this pack's
-// own tests) can exercise the full wire contract without a live Nomad
-// cluster. It implements exactly the endpoint families NRT-P1-02 scopes:
-// jobs, dispatch, job-read, allocations, alloc-exec-WS, system — and fault
-// hooks (FailNext) for scripted failure injection (L2 in the test pyramid).
+// HTTP API a Gas City Nomad runtime provider calls: job register/dispatch/
+// deregister, job and allocation reads (both blocking-capable via the
+// index/wait query params against an X-Nomad-Index response header, per the
+// Nomad consistency model), the interactive alloc-exec WebSocket, and the
+// system GC endpoint. It exists so `gc runtime check`/`gc runtime
+// conformance` (and this pack's own tests) can exercise the full wire
+// contract without a live Nomad cluster. It implements exactly the endpoint
+// families the provider calls: jobs, dispatch, deregister, job-read,
+// allocations, alloc-exec-WS, system — and fault hooks (FailNext) for
+// scripted failure injection (L2 in the test pyramid). Job deregister
+// (NRT-P1-03) was added once the lifecycle ops needed it; register/dispatch/
+// job-read/allocations/alloc-exec-WS/system are the original NRT-P1-02 scope.
 //
-// Out of scope (by design, per the epic's NRT-P1-02 out-of-scope note):
-// fidelity beyond the endpoints a provider calls, and real WS TLS.
+// Out of scope (by design): fidelity beyond the endpoints a provider calls,
+// and real WS TLS.
 package fakenomad
 
 import (
@@ -193,6 +196,8 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			s.registerJob(w, r, strings.Join(rest, "/"))
 		case r.Method == http.MethodGet:
 			s.readJob(w, r, strings.Join(rest, "/"))
+		case r.Method == http.MethodDelete:
+			s.deregisterJob(w, r, strings.Join(rest, "/"))
 		default:
 			writeJSONError(w, http.StatusNotFound, "not found")
 		}
@@ -393,6 +398,46 @@ func (s *Server) readAlloc(w http.ResponseWriter, r *http.Request, id string) {
 		"DesiredStatus": a.DesiredStatus,
 		"ClientStatus":  a.ClientStatus,
 		"ModifyIndex":   a.ModifyIndex,
+	})
+}
+
+// deregisterJob answers DELETE /v1/job/:id (Nomad's job-deregister family).
+// Without ?purge=true the job record stays (a subsequent GET still returns
+// 200 — matching real Nomad's stop-without-purge contract, e2a-stop-vs-purge)
+// but every non-terminal allocation for it is driven to a terminal state, so
+// a caller's confirm-terminal blocking read resolves. With ?purge=true the
+// job is removed outright, so a subsequent GET 404s (confirmed absence).
+func (s *Server) deregisterJob(w http.ResponseWriter, r *http.Request, id string) {
+	purge := r.URL.Query().Get("purge") == "true"
+
+	s.mu.Lock()
+	if _, ok := s.jobs[id]; !ok {
+		s.mu.Unlock()
+		writeJSONError(w, http.StatusNotFound, "job not found")
+		return
+	}
+	idx := s.bumpIndexLocked()
+	if purge {
+		delete(s.jobs, id)
+	}
+	for _, a := range s.allocs {
+		if a.JobID != id {
+			continue
+		}
+		if a.ClientStatus == "complete" || a.ClientStatus == "failed" {
+			continue
+		}
+		a.DesiredStatus = "stop"
+		a.ClientStatus = "complete"
+		a.ModifyIndex = idx
+	}
+	s.mu.Unlock()
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"EvalID":          "",
+		"EvalCreateIndex": idx,
+		"JobModifyIndex":  idx,
+		"Index":           idx,
 	})
 }
 

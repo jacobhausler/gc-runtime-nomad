@@ -1,0 +1,135 @@
+package main
+
+import (
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+// binding is the sidecar's record of a session's current child job (04 §1
+// "sidecar state dir": provider-owned KV under the city's private dir,
+// stable handles — current-child job ID per session). This bead scopes the
+// sidecar to exactly what start/stop/is-running/list-running need; the
+// fuller record (launched marker, dispatch-attempt counter, disputed
+// ledger, staleness datum, ...) is out of scope here (provision split /
+// staging land it later).
+type binding struct {
+	SessionName string    `json:"session_name"`
+	ChildJobID  string    `json:"child_job_id"`
+	Namespace   string    `json:"namespace"`
+	Nonce       string    `json:"nonce"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+// sidecar is a file-based KV under a directory: one JSON file per session,
+// written temp+rename (04 §1 "temp+rename — e1a §4.5 privatedir contract").
+type sidecar struct {
+	dir string
+}
+
+func newSidecar(dir string) (*sidecar, error) {
+	if strings.TrimSpace(dir) == "" {
+		return nil, fmt.Errorf("nomad sidecar directory is required (set %s)", envSidecarDir)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("creating nomad sidecar directory: %w", err)
+	}
+	return &sidecar{dir: dir}, nil
+}
+
+func (s *sidecar) path(sessionName string) string {
+	// base64url-encode the session name so arbitrary session-name
+	// characters (nothing GC-side guarantees filesystem-safety) never
+	// collide or escape the sidecar directory.
+	return filepath.Join(s.dir, base64.RawURLEncoding.EncodeToString([]byte(sessionName))+".json")
+}
+
+func (s *sidecar) load(sessionName string) (*binding, bool, error) {
+	data, err := os.ReadFile(s.path(sessionName))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("reading sidecar binding for %q: %w", sessionName, err)
+	}
+	var b binding
+	if err := json.Unmarshal(data, &b); err != nil {
+		return nil, false, fmt.Errorf("decoding sidecar binding for %q: %w", sessionName, err)
+	}
+	return &b, true, nil
+}
+
+func (s *sidecar) save(b binding) error {
+	data, err := json.Marshal(b)
+	if err != nil {
+		return fmt.Errorf("encoding sidecar binding for %q: %w", b.SessionName, err)
+	}
+	target := s.path(b.SessionName)
+	tmp := target + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return fmt.Errorf("writing sidecar binding for %q: %w", b.SessionName, err)
+	}
+	if err := os.Rename(tmp, target); err != nil {
+		return fmt.Errorf("committing sidecar binding for %q: %w", b.SessionName, err)
+	}
+	return nil
+}
+
+// remove tombstones a session's binding. Idempotent: a missing binding is
+// success (matches the ops' idempotent-stop contract).
+func (s *sidecar) remove(sessionName string) error {
+	err := os.Remove(s.path(sessionName))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("removing sidecar binding for %q: %w", sessionName, err)
+	}
+	return nil
+}
+
+// list returns every current binding — the basis for list-running's
+// sidecar-primary enumeration (04 §2.1 rule 1: "sidecar binding is
+// primary"). Cluster-side recovery (rule 2, listing the parent's children
+// when the sidecar is missing/cold) needs a children-list endpoint fakenomad
+// does not implement, so it is out of scope for this bead.
+func (s *sidecar) list() ([]binding, error) {
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return nil, fmt.Errorf("listing sidecar directory: %w", err)
+	}
+	var out []binding
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(s.dir, e.Name()))
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue // removed between ReadDir and ReadFile
+			}
+			return nil, fmt.Errorf("reading sidecar binding %q: %w", e.Name(), err)
+		}
+		var b binding
+		if err := json.Unmarshal(data, &b); err != nil {
+			return nil, fmt.Errorf("decoding sidecar binding %q: %w", e.Name(), err)
+		}
+		out = append(out, b)
+	}
+	return out, nil
+}
+
+// newNonce generates the per-dispatch attribution nonce (04 §2.1: dispatch
+// Meta carries gc_session + a random nonce chosen by the pack, never a
+// capability).
+func newNonce() (string, error) {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("generating dispatch nonce: %w", err)
+	}
+	return hex.EncodeToString(buf), nil
+}

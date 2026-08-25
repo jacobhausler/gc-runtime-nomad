@@ -225,6 +225,90 @@ func TestScriptedFault(t *testing.T) {
 	}
 }
 
+// TestDeregisterWithoutPurge drives the stop-without-purge contract a
+// provider's stop op relies on: the job record survives (still 200 on
+// read), but every non-terminal allocation is driven to a terminal
+// ClientStatus so a confirm-terminal blocking read resolves.
+func TestDeregisterWithoutPurge(t *testing.T) {
+	srv := NewServer()
+	defer srv.Close()
+
+	httpJSON(t, http.MethodPost, srv.URL()+"/v1/jobs", map[string]any{"Job": map[string]any{"ID": "stopme"}}, &map[string]any{})
+	var dispatchOut map[string]any
+	httpJSON(t, http.MethodPost, srv.URL()+"/v1/job/stopme/dispatch", map[string]any{}, &dispatchOut)
+	childID, _ := dispatchOut["DispatchedJobID"].(string)
+
+	var allocsBefore []map[string]any
+	httpJSON(t, http.MethodGet, srv.URL()+"/v1/job/"+childID+"/allocations", nil, &allocsBefore)
+	if len(allocsBefore) != 1 || allocsBefore[0]["ClientStatus"] != "pending" {
+		t.Fatalf("allocs before deregister = %v, want one pending alloc", allocsBefore)
+	}
+
+	req, err := http.NewRequest(http.MethodDelete, srv.URL()+"/v1/job/"+childID, nil)
+	if err != nil {
+		t.Fatalf("build deregister request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("deregister: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("deregister: status = %d, want 200", resp.StatusCode)
+	}
+
+	status, _ := httpJSON(t, http.MethodGet, srv.URL()+"/v1/job/"+childID, nil, &map[string]any{})
+	if status != http.StatusOK {
+		t.Fatalf("job read after non-purge deregister: status = %d, want 200 (job should survive)", status)
+	}
+
+	var allocsAfter []map[string]any
+	httpJSON(t, http.MethodGet, srv.URL()+"/v1/job/"+childID+"/allocations", nil, &allocsAfter)
+	if len(allocsAfter) != 1 || allocsAfter[0]["ClientStatus"] != "complete" {
+		t.Fatalf("allocs after deregister = %v, want one complete alloc", allocsAfter)
+	}
+
+	// Deregistering an unknown job 404s (the idempotency contract lives in
+	// the provider, which treats 404 as already-gone).
+	req2, _ := http.NewRequest(http.MethodDelete, srv.URL()+"/v1/job/does-not-exist", nil)
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatalf("deregister unknown job: %v", err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusNotFound {
+		t.Fatalf("deregister unknown job: status = %d, want 404", resp2.StatusCode)
+	}
+}
+
+// TestDeregisterWithPurge confirms ?purge=true removes the job record
+// outright, so a subsequent read 404s (confirmed absence, per the wire rule
+// that only a 200-children-list-lacking-the-entry or a direct 404 counts).
+func TestDeregisterWithPurge(t *testing.T) {
+	srv := NewServer()
+	defer srv.Close()
+
+	httpJSON(t, http.MethodPost, srv.URL()+"/v1/jobs", map[string]any{"Job": map[string]any{"ID": "purgeme"}}, &map[string]any{})
+
+	req, err := http.NewRequest(http.MethodDelete, srv.URL()+"/v1/job/purgeme?purge=true", nil)
+	if err != nil {
+		t.Fatalf("build deregister request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("deregister: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("deregister: status = %d, want 200", resp.StatusCode)
+	}
+
+	status, _ := httpJSON(t, http.MethodGet, srv.URL()+"/v1/job/purgeme", nil, &map[string]any{})
+	if status != http.StatusNotFound {
+		t.Fatalf("job read after purge: status = %d, want 404", status)
+	}
+}
+
 // TestAllocExecWS drives the alloc-exec-WS endpoint family: connect, send a
 // stdin-close frame, and expect one stdout frame followed by an exited
 // frame with exit_code 0.
