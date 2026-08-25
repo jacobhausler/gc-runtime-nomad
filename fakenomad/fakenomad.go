@@ -132,7 +132,14 @@ func NewTLSServer() *Server {
 }
 
 func newServer() *Server {
-	execRoot, err := os.MkdirTemp("", "fakenomad-exec-")
+	// Rooted at /tmp rather than os.TempDir(): macOS's per-user $TMPDIR
+	// (/var/folders/.../T) is deep enough that execRoot + the per-alloc
+	// scratch dir + "tmux-<uid>/default" blows past AF_UNIX's sun_path
+	// limit (104 bytes on macOS), so tmux's own socket connect fails.
+	execRoot, err := os.MkdirTemp("/tmp", "fakenomad-exec-")
+	if err != nil {
+		execRoot, err = os.MkdirTemp("", "fakenomad-exec-")
+	}
 	if err != nil {
 		// Exceedingly unlikely (a functioning os.TempDir is a test-harness
 		// precondition); fall back to a fixed-but-still-scratch location

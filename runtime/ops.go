@@ -275,7 +275,7 @@ func (l *lifecycle) opNudge(ctx context.Context, sessionName, text string) error
 		`tmux send-keys -t "$1" -l -- "$2" && tmux send-keys -t "$1" Enter`,
 		"nudge", tmuxSessionName, text,
 	}
-	return l.runDrivingVerb(ctx, sessionName, "nudge", command)
+	return bestEffort(l.runDrivingVerb(ctx, sessionName, "nudge", command))
 }
 
 // opPeek captures sessionName's tmux pane content and returns it. lines <= 0
@@ -305,7 +305,19 @@ func (l *lifecycle) opPeek(ctx context.Context, sessionName string, lines int) (
 // (mirrors runtime-cloudflare's interrupt op).
 func (l *lifecycle) opInterrupt(ctx context.Context, sessionName string) error {
 	command := []string{"tmux", "send-keys", "-t", tmuxSessionName, "C-c"}
-	return l.runDrivingVerb(ctx, sessionName, "interrupt", command)
+	return bestEffort(l.runDrivingVerb(ctx, sessionName, "interrupt", command))
+}
+
+// bestEffort turns an errSessionNotFound failure into success — the
+// protocol's best-effort convention for interrupt/nudge (docs/reference/
+// exec-session-provider.md), which must return 0 even when the session was
+// never provisioned or has already stopped. Any other error (transport
+// fault, nonzero tmux exit) still propagates.
+func bestEffort(err error) error {
+	if errors.Is(err, errSessionNotFound) {
+		return nil
+	}
+	return err
 }
 
 // opSendKeys forwards keys verbatim to sessionName's tmux session (tmux
@@ -464,6 +476,14 @@ func (l *lifecycle) markLaunched(ctx context.Context, sessionName string) error 
 	return l.sidecar.save(*b)
 }
 
+// errSessionNotFound marks a currentAlloc failure caused by the session
+// simply not existing (never provisioned, or already stopped) rather than a
+// transport/lookup fault — the distinction opNudge and opInterrupt need to
+// honor the protocol's best-effort convention (docs/reference/exec-session-
+// provider.md "Best-effort interrupt/nudge: Return 0 even if the session
+// doesn't exist").
+var errSessionNotFound = errors.New("session not found")
+
 // currentAlloc resolves the non-terminal Nomad alloc ID backing
 // sessionName's current child job, sidecar-binding-primary (04 §2.1 rule 1).
 func (l *lifecycle) currentAlloc(ctx context.Context, sessionName string) (string, error) {
@@ -472,7 +492,7 @@ func (l *lifecycle) currentAlloc(ctx context.Context, sessionName string) (strin
 		return "", err
 	}
 	if !ok || b.ChildJobID == "" {
-		return "", fmt.Errorf("session %q has no provisioned box", sessionName)
+		return "", fmt.Errorf("session %q has no provisioned box: %w", sessionName, errSessionNotFound)
 	}
 	allocs, _, err := l.client.listAllocsForJob(ctx, b.ChildJobID, 0, 0)
 	if err != nil {
@@ -483,7 +503,7 @@ func (l *lifecycle) currentAlloc(ctx context.Context, sessionName string) (strin
 			return a.ID, nil
 		}
 	}
-	return "", fmt.Errorf("session %q has no non-terminal alloc", sessionName)
+	return "", fmt.Errorf("session %q has no non-terminal alloc: %w", sessionName, errSessionNotFound)
 }
 
 // egressMaxAttempts bounds the stop-path transcript/evidence egress retries
