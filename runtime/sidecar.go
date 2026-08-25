@@ -33,6 +33,12 @@ type binding struct {
 	// deregister does not re-copy files on retry.
 	EgressComplete bool `json:"egress_complete,omitempty"`
 
+	// EvidenceLost marks that the stop-path egress (NRT-P1-07) exhausted
+	// its bounded retries without succeeding, and stop proceeded anyway
+	// (04 §6 R2b-04: evidence-best-effort beats a wedged fleet). Mutually
+	// exclusive with EgressComplete.
+	EvidenceLost bool `json:"evidence_lost,omitempty"`
+
 	// Launched distinguishes "provisioned, agent never launched" (false)
 	// from "launched" (true) — the two states that are otherwise
 	// observationally identical from the Nomad alloc alone (04 §6:
@@ -106,8 +112,10 @@ func (s *sidecar) remove(sessionName string) error {
 
 // list returns every current binding. opListRunning uses it only for the
 // launched marker (04 §6 RPP-PROVISION-001) — existence and non-terminal
-// status now come from the children-of-parent jobs list (04 §2.1 rule 2/3),
-// not this sidecar scan.
+// status come from the children-of-parent jobs list (04 §2.1 rule 2/3) via
+// client.listChildJobs, not this sidecar scan. dispatch's narrower
+// positive-attribution adoption (rule 6: recovering a SINGLE session's own
+// orphaned child by nonce match, in ops.go) uses the same client call.
 func (s *sidecar) list() ([]binding, error) {
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {

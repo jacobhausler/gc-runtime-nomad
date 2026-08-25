@@ -6,14 +6,17 @@
 // system GC endpoint. It exists so `gc runtime check`/`gc runtime
 // conformance` (and this pack's own tests) can exercise the full wire
 // contract without a live Nomad cluster. It implements exactly the endpoint
-// families the provider calls: jobs, dispatch, deregister, job-read,
-// allocations, alloc-exec-WS, client-fs-cat, system — and fault hooks
-// (FailNext) for scripted failure injection (L2 in the test pyramid), plus a
-// request Trace() for asserting call order. Job deregister (NRT-P1-03) was
-// added once the lifecycle ops needed it; client-fs-cat (NRT-P1-07) was
-// added for the stop-path transcript/evidence egress read; register/
-// dispatch/job-read/allocations/alloc-exec-WS/system are the original
-// NRT-P1-02 scope.
+// families the provider calls: jobs, jobs-list, dispatch, deregister,
+// job-read, allocations, alloc-exec-WS, client-fs-cat, system — and fault
+// hooks (FailNext) for scripted failure injection (L2 in the test
+// pyramid), plus a request Trace() for asserting call order. Job
+// deregister (NRT-P1-03) was added once the lifecycle ops needed it;
+// client-fs-cat (NRT-P1-07) was added for the stop-path transcript/
+// evidence egress read; jobs-list (NRT-P1-08b) was added for list-running's
+// children-of-parent enumeration and is reused by NRT-P1-09's
+// positive-attribution adoption (04 §2.1 rule 6); register/dispatch/
+// job-read/allocations/alloc-exec-WS/system are the original NRT-P1-02
+// scope.
 //
 // Out of scope (by design): fidelity beyond the endpoints a provider calls,
 // and real WS TLS.
@@ -378,14 +381,14 @@ func (s *Server) registerJob(w http.ResponseWriter, r *http.Request, pathID stri
 }
 
 // jobListEntry is one row of the `GET /v1/jobs` response: the subset of a
-// Nomad job summary a children-of-parent list needs (04 §2.1 rule 2/3).
+// Nomad job summary a children-of-parent list needs (04 §2.1 rule 2/3/6).
 // Meta is included only when the request carries `?meta=true` (real Nomad
-// omits it from the list endpoint by default to save bandwidth — the
-// children-of-parent recovery path relies on that param, e2a-amend-jobs-
-// list-params) and Status reflects whether the job currently has any
-// non-terminal allocation ("running") or not ("dead"), the job-level
-// non-terminal signal `list-running`'s children-of-parent enumeration
-// filters on.
+// omits it from the list endpoint by default to save bandwidth — both the
+// children-of-parent recovery path and dispatch's orphan-adoption lookup
+// rely on that param, e2a-amend-jobs-list-params) and Status reflects
+// whether the job currently has any non-terminal allocation ("running") or
+// not ("dead"), the job-level non-terminal signal `list-running`'s and
+// dispatch's children-of-parent enumeration filter on.
 type jobListEntry struct {
 	ID        string
 	ParentID  string
@@ -395,10 +398,10 @@ type jobListEntry struct {
 }
 
 // listJobs answers `GET /v1/jobs` (optionally `?meta=true`) — the
-// children-of-parent enumeration a list-running cluster-recovery path reads
-// (04 §2.1 rule 2/3): every job filters client-side on ParentID, since this
-// fake mirrors real Nomad's jobs-list endpoint, which has no parent filter
-// param of its own.
+// children-of-parent enumeration both a list-running cluster-recovery path
+// and dispatch's positive-attribution adoption (04 §2.1 rule 2/3/6) read:
+// every job filters client-side on ParentID, since this fake mirrors real
+// Nomad's jobs-list endpoint, which has no parent filter param of its own.
 func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
 	includeMeta := r.URL.Query().Get("meta") == "true"
 

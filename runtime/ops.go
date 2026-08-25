@@ -9,8 +9,15 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 )
+
+// sessionLockPollInterval is how often lockSession retries a contended
+// session lock while waiting on ctx. Short enough that a start/provision
+// call is not visibly delayed once the lock frees up; long enough not to
+// spin.
+const sessionLockPollInterval = 20 * time.Millisecond
 
 // lifecycle implements the RPP ops this pack scopes so far: the four
 // dispatch/deregister/blocking-read lifecycle ops (start, stop, is-running,
@@ -30,6 +37,45 @@ type lifecycle struct {
 	// stop behavior unchanged. Sinks beyond a local directory (remote
 	// upload, etc.) are out of scope for this bead.
 	egressDir string
+}
+
+// lockSession acquires an exclusive, cross-process advisory file lock for
+// sessionName under the sidecar directory — the single-flight lock
+// concurrent same-name Start must go through (R2b-03). It has to be
+// cross-process, not merely in-process: `gc` execs this binary fresh per
+// op (main.go's calling convention, "gc execs the binary directly — no
+// shell wrapping"), so two concurrent `start` calls for one session are
+// two separate OS processes racing, never two goroutines sharing one
+// `lifecycle` value. flock is associated with the open file description
+// rather than the process, so it also serializes correctly within a
+// single process (this pack's own in-process L2 fault-suite tests), and it
+// is released automatically by the kernel when that descriptor closes —
+// including on a crash — so there is no stale-lock cleanup to get wrong.
+func (l *lifecycle) lockSession(ctx context.Context, sessionName string) (func(), error) {
+	path := filepath.Join(l.sidecar.dir, base64.RawURLEncoding.EncodeToString([]byte(sessionName))+".lock")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("opening session lock for %q: %w", sessionName, err)
+	}
+	for {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return func() {
+				_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+				_ = f.Close()
+			}, nil
+		}
+		if err != syscall.EWOULDBLOCK {
+			_ = f.Close()
+			return nil, fmt.Errorf("locking session %q: %w", sessionName, err)
+		}
+		select {
+		case <-ctx.Done():
+			_ = f.Close()
+			return nil, fmt.Errorf("locking session %q: %w", sessionName, ctx.Err())
+		case <-time.After(sessionLockPollInterval):
+		}
+	}
 }
 
 // egressFile is one well-known file a stop-path egress reads out of every
@@ -121,17 +167,69 @@ func isTerminalStatus(status string) bool {
 // constant, R1a-02: gc's exec proxy infers ErrSessionExists from that exact
 // phrase).
 func (l *lifecycle) opProvision(ctx context.Context, sessionName string) error {
+	unlock, err := l.lockSession(ctx, sessionName)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	return l.dispatch(ctx, sessionName)
 }
 
 // opStart is provision + launch (04 §3 start row): dispatch a fresh child,
 // then launch the agent into it over exec, and only then mark the binding
-// launched.
+// launched. Held under sessionName's single-flight lock end-to-end
+// (R2b-03) so two concurrent Start calls for the same session cannot both
+// observe an absent/terminal binding and each dispatch a child.
+//
+// Before dispatching, it checks for a binding left by a prior attempt that
+// crashed after the dispatch call committed but before the launched marker
+// was recorded (04 §2.1 rule 6 territory, the "after binding, before
+// ConfirmStarted" crash point): that binding IS the positive attribution
+// (no cluster lookup needed, since this pack already wrote it), so the
+// retry resumes straight to launch instead of dispatching a second child or
+// being rejected by dispatch's already-exists check.
 func (l *lifecycle) opStart(ctx context.Context, sessionName string) error {
+	unlock, err := l.lockSession(ctx, sessionName)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	if resume, err := l.resumeUnlaunched(ctx, sessionName); err != nil {
+		return err
+	} else if resume {
+		return l.markLaunched(ctx, sessionName)
+	}
+
 	if err := l.dispatch(ctx, sessionName); err != nil {
 		return err
 	}
 	return l.markLaunched(ctx, sessionName)
+}
+
+// resumeUnlaunched reports whether sessionName has a binding whose child
+// was dispatched but never marked launched, and that child still has a
+// live (non-terminal) alloc. Returns false (with no error) for anything
+// that should fall through to a normal fresh dispatch, including a lookup
+// failure — a stuck lookup must not block start from ever proceeding.
+func (l *lifecycle) resumeUnlaunched(ctx context.Context, sessionName string) (bool, error) {
+	b, ok, err := l.sidecar.load(sessionName)
+	if err != nil {
+		return false, err
+	}
+	if !ok || b.ChildJobID == "" || b.Launched {
+		return false, nil
+	}
+	allocs, _, err := l.client.listAllocsForJob(ctx, b.ChildJobID, 0, 0)
+	if err != nil {
+		return false, nil
+	}
+	for _, a := range allocs {
+		if !isTerminalStatus(a.ClientStatus) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // opRelaunch re-execs the agent inside the SAME alloc without a fresh
@@ -168,9 +266,11 @@ func (l *lifecycle) opExec(ctx context.Context, sessionName string, command []st
 // dispatches a tmux-only child for sessionName — the mechanism shared by
 // opProvision directly and opStart (provision half).
 func (l *lifecycle) dispatch(ctx context.Context, sessionName string) error {
-	if existing, ok, err := l.sidecar.load(sessionName); err != nil {
+	existing, existingOK, err := l.sidecar.load(sessionName)
+	if err != nil {
 		return err
-	} else if ok && existing.ChildJobID != "" {
+	}
+	if existingOK && existing.ChildJobID != "" {
 		allocs, _, err := l.client.listAllocsForJob(ctx, existing.ChildJobID, 0, 0)
 		if err == nil {
 			for _, a := range allocs {
@@ -188,6 +288,22 @@ func (l *lifecycle) dispatch(ctx context.Context, sessionName string) error {
 
 	if err := l.client.registerJob(ctx, parentJobSpec(l.client.namespace, l.parentJobID)); err != nil {
 		return fmt.Errorf("registering parent job: %w", err)
+	}
+
+	// Positive-attribution adoption (04 §2.1 rule 6): a prior attempt may
+	// have crashed after its dispatch call returned but before the binding
+	// commit that records ChildJobID, leaving an orphaned child cluster-side
+	// the sidecar only half-remembers (an intent record with a nonce and no
+	// ChildJobID). Minting a second dispatch here would leave two
+	// non-terminal children for one session, violating rule 4 — so look for
+	// a child whose dispatch Meta nonce matches ours first, and adopt it
+	// instead of dispatching fresh if one is still alive.
+	if existingOK && existing.Nonce != "" && existing.ChildJobID == "" {
+		if adopted, ok, err := l.findOrphanByNonce(ctx, sessionName, existing.Nonce); err == nil && ok {
+			final := *existing
+			final.ChildJobID = adopted
+			return l.sidecar.save(final)
+		}
 	}
 
 	nonce, err := newNonce()
@@ -212,6 +328,25 @@ func (l *lifecycle) dispatch(ctx context.Context, sessionName string) error {
 	final := intent
 	final.ChildJobID = childID
 	return l.sidecar.save(final)
+}
+
+// findOrphanByNonce looks up the parent job's dispatched children (04 §2.1
+// rule 2: "list the city parent's children with meta=true") for one whose
+// Meta gc_session/gc_nonce match, and reports it only if it is still
+// non-terminal — a matched-but-terminal child died along with the crashed
+// attempt that dispatched it and is not adopted.
+func (l *lifecycle) findOrphanByNonce(ctx context.Context, sessionName, nonce string) (string, bool, error) {
+	children, err := l.client.listChildJobs(ctx, l.parentJobID)
+	if err != nil {
+		return "", false, err
+	}
+	for _, c := range children {
+		if c.Terminal || c.Meta["gc_session"] != sessionName || c.Meta["gc_nonce"] != nonce {
+			continue
+		}
+		return c.ID, true, nil
+	}
+	return "", false, nil
 }
 
 // launch execs launchCommand into sessionName's current alloc — the
@@ -272,6 +407,11 @@ func (l *lifecycle) currentAlloc(ctx context.Context, sessionName string) (strin
 	return "", fmt.Errorf("session %q has no non-terminal alloc", sessionName)
 }
 
+// egressMaxAttempts bounds the stop-path transcript/evidence egress retries
+// before opStop gives up and falls back to an evidence_lost marker (04 §6
+// R2b-04): evidence-best-effort beats a wedged fleet.
+const egressMaxAttempts = 3
+
 // opStop egresses sessionName's transcript/evidence files (if egress is
 // configured, NRT-P1-07), deregisters its child job without purge, confirms
 // terminal via a blocking read, and tombstones the sidecar binding. Stop on
@@ -291,15 +431,26 @@ func (l *lifecycle) opStop(ctx context.Context, sessionName string) error {
 		return l.sidecar.remove(sessionName)
 	}
 
-	// Egress transcript/evidence before deregister makes them unreachable,
-	// then receipt completion in the sidecar (still resident) so a stop
-	// that crashes after egress but before deregister does not re-copy on
-	// retry (NRT-P1-07).
-	if !b.EgressComplete {
-		if err := l.egressAllocFiles(ctx, sessionName, b.ChildJobID); err != nil {
-			return err
+	// Egress transcript/evidence before deregister makes them unreachable.
+	// A failing egress gets egressMaxAttempts bounded retries (R2b-04); if
+	// it still hasn't succeeded, stop PROCEEDS rather than wedging behind
+	// evidence collection — it just marks the tombstone evidence_lost
+	// instead. Either outcome is receipted in the sidecar (still resident)
+	// before deregister, so a stop that then crashes before deregister
+	// retries idempotently: it neither re-attempts a marker that already
+	// gave up nor re-copies files it already egressed (NRT-P1-07).
+	if !b.EgressComplete && !b.EvidenceLost {
+		var egressErr error
+		for attempt := 0; attempt < egressMaxAttempts; attempt++ {
+			if egressErr = l.egressAllocFiles(ctx, sessionName, b.ChildJobID); egressErr == nil {
+				break
+			}
 		}
-		b.EgressComplete = true
+		if egressErr == nil {
+			b.EgressComplete = true
+		} else {
+			b.EvidenceLost = true
+		}
 		if err := l.sidecar.save(*b); err != nil {
 			return err
 		}

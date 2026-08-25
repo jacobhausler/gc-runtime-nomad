@@ -87,7 +87,7 @@ them.
 | `start` | `provision` + launch: dispatches, then execs the launch command (`tmux new-session -d -s main`) into the alloc, then sets the launched marker. Same "already exists" rejection as `provision`. |
 | `exec` | Runs a command inside the session's current alloc over the Nomad alloc-exec WebSocket and streams its stdout; **the op's own exit code is the remote command's exit code** (04 §3 exec row, RPP-CONN-001) — not the 0/1/2 lifecycle-op convention. Works regardless of the launched marker — a provisioned-but-not-launched box already answers exec (RPP-PROVISION-001). |
 | `relaunch` | Re-execs the launch command into the SAME alloc — no fresh dispatch — then sets the launched marker (04 §7 warm relaunch, launch-only fingerprint drift). Fails if the session has no live alloc to relaunch into. |
-| `stop` | If `GC_NOMAD_EGRESS_DIR` is set, first copies the session's transcript/evidence files (via the Nomad client fs API) into it and receipts completion in the sidecar. Then deregisters the session's child job without purge, confirms terminal via a blocking read, and tombstones the sidecar binding. Idempotent — a session with no binding is a no-op success, and a stop that fails after egress but before deregister does not re-copy files on retry. |
+| `stop` | If `GC_NOMAD_EGRESS_DIR` is set, first copies the session's transcript/evidence files (via the Nomad client fs API) into it, retrying up to 3 times before giving up and marking the tombstone `evidence_lost` rather than wedging (R2b-04); a successful egress receipts completion in the sidecar instead. Then deregisters the session's child job without purge, confirms terminal via a blocking read, and tombstones the sidecar binding. Idempotent — a session with no binding is a no-op success, and a stop that fails after egress but before deregister does not re-attempt egress on retry. |
 | `is-running` | Prints `true`/`false`. False whenever the launched marker is unset, even if the alloc is running (RPP-PROVISION-001: "provisioned, agent never launched" reads as not-running). Once launched, the honesty split (04 §6) applies — Nomad API unavailability never flips this to `false`, it answers last-known-good instead. |
 | `list-running [prefix]` | Prints one running session name per line — launched sessions only. Enumerates the children-of-parent jobs list (`GET /v1/jobs?meta=true`, 04 §2.1 rule 2/3) rather than trusting the sidecar as the existence source, decodes each non-terminal child's `gc_session` Meta key, and — when a prefix argument is given — filters the decoded names to it (`ListRunning(prefix)`, E2a amendment A-1). The sidecar is still consulted for the launched marker, which the children list alone cannot answer. Exits 1 on any lookup error rather than returning a partial list. |
 
@@ -108,6 +108,10 @@ scope for this phase — they land in later phases (see `fnrt-szx`).
   agent-bootstrap supervisor binary, and the launch command is a bare
   `tmux new-session`, not a real agent command line.
 - The fuller sidecar record (dispatch-attempt counter, disputed-children
-  ledger, staleness datum, single-flight lock) — this pack's sidecar
-  binding is scoped to exactly what start/stop/is-running/list-running/
-  provision/exec/relaunch need.
+  ledger, staleness datum) — this pack's sidecar binding is scoped to
+  exactly what start/stop/is-running/list-running/provision/exec/relaunch
+  need. The single-flight lock concurrent same-name `start`/`provision`
+  needs (R2b-03) is a per-session `flock` on a file in the sidecar
+  directory rather than a sidecar-record field — it has to survive across
+  provider processes, since `gc` execs this binary fresh per op (a race is
+  between two OS processes, never two goroutines in one).

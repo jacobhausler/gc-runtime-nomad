@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -40,7 +42,7 @@ func TestFaultAPIOutage(t *testing.T) {
 
 	// unavailable-is-never-empty: list-running surfaces the error instead of
 	// silently reporting nothing running.
-	if _, err := l.opListRunning(ctx); err == nil {
+	if _, err := l.opListRunning(ctx, ""); err == nil {
 		t.Fatalf("list-running during outage = nil error, want a propagated error")
 	}
 }
@@ -189,9 +191,11 @@ func TestFaultStaleIndexNeverTrusted(t *testing.T) {
 	}
 }
 
-// TestFaultLostAlloc covers the unknown/lost-alloc fault row: an alloc gone
-// terminal via "lost" (client node failure) must be excluded from both
-// is-running and list-running, same as any other terminal status.
+// TestFaultLostAlloc covers the lost-alloc half of the unknown/lost-alloc
+// fault row: an alloc gone terminal via "lost" (client node failure) must
+// be excluded from both is-running and list-running, same as any other
+// terminal status. TestFaultUnknownAlloc below covers the opposite-answer
+// "unknown" half of the same row.
 func TestFaultLostAlloc(t *testing.T) {
 	l, srv := newTestLifecycle(t)
 	ctx := context.Background()
@@ -214,7 +218,7 @@ func TestFaultLostAlloc(t *testing.T) {
 	if err != nil || running {
 		t.Fatalf("is-running with a lost alloc = (%v, %v), want (false, nil)", running, err)
 	}
-	names, err := l.opListRunning(ctx)
+	names, err := l.opListRunning(ctx, "")
 	if err != nil {
 		t.Fatalf("list-running: %v", err)
 	}
@@ -222,6 +226,51 @@ func TestFaultLostAlloc(t *testing.T) {
 		if n == session {
 			t.Fatalf("list-running still includes %q after its only alloc went lost", session)
 		}
+	}
+}
+
+// TestFaultUnknownAlloc covers the unknown-alloc half of the unknown/lost
+// fault row: 04 §6 lists alloc-unknown (a disconnected client node — the
+// client hasn't been heard from, but nothing has declared the alloc dead)
+// and alloc-lost as SEPARATE rows with OPPOSITE required answers. "unknown"
+// must never read as gone — the honesty split holds: is-running stays true
+// (last-known-good) and list-running keeps including the session, exactly
+// as if the API were merely unavailable, because isTerminalStatus does not
+// treat "unknown" as terminal.
+func TestFaultUnknownAlloc(t *testing.T) {
+	l, srv := newTestLifecycle(t)
+	ctx := context.Background()
+	const session = "sess-unknown"
+
+	if err := l.opStart(ctx, session); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	b, ok, err := l.sidecar.load(session)
+	if err != nil || !ok {
+		t.Fatalf("sidecar.load(%q) = (%v, %v, %v)", session, b, ok, err)
+	}
+	allocs, _, err := l.client.listAllocsForJob(ctx, b.ChildJobID, 0, 0)
+	if err != nil || len(allocs) != 1 {
+		t.Fatalf("listAllocsForJob = (%v, %v), want exactly one alloc", allocs, err)
+	}
+	srv.SetAllocStatus(allocs[0].ID, "unknown")
+
+	running, err := l.opIsRunning(ctx, session)
+	if err != nil || !running {
+		t.Fatalf("is-running with an unknown-status alloc = (%v, %v), want (true, nil): unknown must never read as gone", running, err)
+	}
+	names, err := l.opListRunning(ctx, "")
+	if err != nil {
+		t.Fatalf("list-running: %v", err)
+	}
+	found := false
+	for _, n := range names {
+		if n == session {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("list-running dropped %q after its alloc went unknown, want it retained (last-known-good)", session)
 	}
 }
 
@@ -281,42 +330,151 @@ func TestFaultTokenAfterPurge(t *testing.T) {
 	}
 }
 
-// TestFaultCrashPointOrphanedDispatch covers the crash-point-suite fault
-// row: the process dies between a successful dispatch and the final
-// sidecar commit that binds ChildJobID, leaving the sidecar showing only
-// the pre-dispatch intent while a real child job exists cluster-side. A
-// fresh start must not wedge behind that orphan.
-func TestFaultCrashPointOrphanedDispatch(t *testing.T) {
-	l, _ := newTestLifecycle(t)
-	ctx := context.Background()
-	const session = "sess-orphan"
+// TestFaultCrashPointSuite covers the crash-point-suite fault row's three
+// pinned crash points (08 §3 line 96 / 04 §2.1 rule 6, R2b-02): crash
+// before dispatch, crash after dispatch but before the binding commit, and
+// crash after the binding commit but before the launched marker
+// ("ConfirmStarted"). Each must converge to a single non-terminal child on
+// retry, adopting via the dispatch-intent nonce rather than ever leaving a
+// duplicate live child.
+func TestFaultCrashPointSuite(t *testing.T) {
+	t.Run("before dispatch: nothing cluster-side yet", func(t *testing.T) {
+		l, _ := newTestLifecycle(t)
+		ctx := context.Background()
+		const session = "sess-crash-predispatch"
 
-	if err := l.client.registerJob(ctx, parentJobSpec("default", l.parentJobID)); err != nil {
-		t.Fatalf("registerJob: %v", err)
-	}
-	nonce, err := newNonce()
-	if err != nil {
-		t.Fatalf("newNonce: %v", err)
-	}
-	intent := binding{SessionName: session, Namespace: "default", Nonce: nonce, CreatedAt: time.Now().UTC()}
-	if err := l.sidecar.save(intent); err != nil {
-		t.Fatalf("sidecar.save(intent): %v", err)
-	}
-	if _, err := l.client.dispatchChild(ctx, l.parentJobID, session, nonce); err != nil {
-		t.Fatalf("dispatchChild: %v", err)
-	}
+		nonce, err := newNonce()
+		if err != nil {
+			t.Fatalf("newNonce: %v", err)
+		}
+		// Simulates a crash between the pre-dispatch intent write (04 §2.1
+		// rule 1) and the dispatch call itself: the intent is on record,
+		// but no child job was ever created cluster-side.
+		if err := l.sidecar.save(binding{SessionName: session, Namespace: "default", Nonce: nonce, CreatedAt: time.Now().UTC()}); err != nil {
+			t.Fatalf("sidecar.save(intent): %v", err)
+		}
 
-	running, err := l.opIsRunning(ctx, session)
-	if err != nil || running {
-		t.Fatalf("is-running with an orphaned intent binding = (%v, %v), want (false, nil)", running, err)
-	}
-	if err := l.opStart(ctx, session); err != nil {
-		t.Fatalf("start after a crashed prior dispatch = %v, want nil (must not wedge behind the orphan)", err)
-	}
+		if err := l.opStart(ctx, session); err != nil {
+			t.Fatalf("start retry after a pre-dispatch crash = %v, want nil (nothing to adopt, dispatch fresh)", err)
+		}
+
+		names, err := l.opListRunning(ctx, "")
+		if err != nil {
+			t.Fatalf("list-running: %v", err)
+		}
+		count := 0
+		for _, n := range names {
+			if n == session {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Fatalf("list-running reports %d entries for %q after retrying a pre-dispatch crash, want exactly 1 (single non-terminal child)", count, session)
+		}
+	})
+
+	t.Run("after dispatch, before binding: orphan gets adopted", func(t *testing.T) {
+		l, _ := newTestLifecycle(t)
+		ctx := context.Background()
+		const session = "sess-crash-orphan"
+
+		if err := l.client.registerJob(ctx, parentJobSpec("default", l.parentJobID)); err != nil {
+			t.Fatalf("registerJob: %v", err)
+		}
+		nonce, err := newNonce()
+		if err != nil {
+			t.Fatalf("newNonce: %v", err)
+		}
+		intent := binding{SessionName: session, Namespace: "default", Nonce: nonce, CreatedAt: time.Now().UTC()}
+		if err := l.sidecar.save(intent); err != nil {
+			t.Fatalf("sidecar.save(intent): %v", err)
+		}
+		orphanID, err := l.client.dispatchChild(ctx, l.parentJobID, session, nonce)
+		if err != nil {
+			t.Fatalf("dispatchChild: %v", err)
+		}
+
+		running, err := l.opIsRunning(ctx, session)
+		if err != nil || running {
+			t.Fatalf("is-running with an orphaned intent binding = (%v, %v), want (false, nil)", running, err)
+		}
+		if err := l.opStart(ctx, session); err != nil {
+			t.Fatalf("start after a crashed prior dispatch = %v, want nil (must not wedge behind the orphan)", err)
+		}
+
+		b, ok, err := l.sidecar.load(session)
+		if err != nil || !ok {
+			t.Fatalf("sidecar.load(%q) after adoption = (%v, %v, %v)", session, b, ok, err)
+		}
+		if b.ChildJobID != orphanID {
+			t.Fatalf("sidecar binding after retry = %q, want the orphaned child %q adopted rather than a fresh dispatch (04 §2.1 rule 6)", b.ChildJobID, orphanID)
+		}
+
+		names, err := l.opListRunning(ctx, "")
+		if err != nil {
+			t.Fatalf("list-running: %v", err)
+		}
+		count := 0
+		for _, n := range names {
+			if n == session {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Fatalf("list-running reports %d entries for %q after adopting the orphan, want exactly 1 (single non-terminal child)", count, session)
+		}
+	})
+
+	t.Run("after binding, before ConfirmStarted: retry resumes to launch", func(t *testing.T) {
+		l, srv := newTestLifecycle(t)
+		ctx := context.Background()
+		const session = "sess-crash-prelaunch"
+
+		// dispatch() alone reproduces exactly the state a crash right
+		// after it commits the binding (with ChildJobID set) but before
+		// markLaunched runs would leave: a bound, live, not-yet-launched
+		// child.
+		if err := l.dispatch(ctx, session); err != nil {
+			t.Fatalf("dispatch: %v", err)
+		}
+		b, ok, err := l.sidecar.load(session)
+		if err != nil || !ok || b.ChildJobID == "" || b.Launched {
+			t.Fatalf("sidecar.load(%q) after dispatch = (%+v, %v, %v), want a bound, not-yet-launched binding", session, b, ok, err)
+		}
+		childID := b.ChildJobID
+
+		if err := l.opStart(ctx, session); err != nil {
+			t.Fatalf("start retry after a crashed pre-launch attempt = %v, want nil (resume to launch)", err)
+		}
+
+		b2, ok, err := l.sidecar.load(session)
+		if err != nil || !ok || !b2.Launched {
+			t.Fatalf("sidecar.load(%q) after resume = (%+v, %v, %v), want Launched=true", session, b2, ok, err)
+		}
+		if b2.ChildJobID != childID {
+			t.Fatalf("sidecar binding after resume = %q, want the same child %q reused rather than a second dispatch", b2.ChildJobID, childID)
+		}
+
+		dispatches := 0
+		for _, req := range srv.Trace() {
+			if strings.HasPrefix(req, "POST ") && strings.HasSuffix(req, "/dispatch") {
+				dispatches++
+			}
+		}
+		if dispatches != 1 {
+			t.Fatalf("resume after a pre-launch crash issued %d dispatch calls, want exactly 1 (no duplicate dispatch); trace = %v", dispatches, srv.Trace())
+		}
+	})
 }
 
-// TestFaultStopSuite covers the stop-suite fault row across the shapes stop
-// must handle without ever silently doing the wrong thing.
+// TestFaultStopSuite covers the stop-suite fault row's three pinned rows
+// (08 §3 line 99 / R2b-04): egress error exhausts bounded retries and falls
+// back to an evidence_lost marker rather than wedging stop; stop during an
+// outage exits with a failure; and a crash between egress and deregister
+// retries idempotently via the egress-complete marker (not re-copying
+// files a prior attempt already egressed). Also covers the pre-dispatch
+// intent-only binding shape, since Stop must stay idempotent there too
+// (04 §6, E1a §6.1).
 func TestFaultStopSuite(t *testing.T) {
 	t.Run("intent-only binding from a pre-dispatch crash", func(t *testing.T) {
 		l, _ := newTestLifecycle(t)
@@ -338,10 +496,11 @@ func TestFaultStopSuite(t *testing.T) {
 		}
 	})
 
-	t.Run("deregister fault propagates instead of silently succeeding", func(t *testing.T) {
+	t.Run("egress error exhausts bounded retries then proceeds with evidence_lost", func(t *testing.T) {
 		l, srv := newTestLifecycle(t)
+		l.egressDir = t.TempDir()
 		ctx := context.Background()
-		const session = "sess-stopfail"
+		const session = "sess-egress-fail"
 
 		if err := l.opStart(ctx, session); err != nil {
 			t.Fatalf("start: %v", err)
@@ -350,25 +509,110 @@ func TestFaultStopSuite(t *testing.T) {
 		if err != nil || !ok {
 			t.Fatalf("sidecar.load(%q) = (%v, %v, %v)", session, b, ok, err)
 		}
-		srv.FailNext("DELETE", "/v1/job/"+b.ChildJobID, 500, `{"error":"injected"}`)
+		allocs, _, err := l.client.listAllocsForJob(ctx, b.ChildJobID, 0, 0)
+		if err != nil || len(allocs) != 1 {
+			t.Fatalf("listAllocsForJob = (%v, %v), want exactly one alloc", allocs, err)
+		}
+		srv.FailSticky("GET", "/v1/client/fs/cat/"+allocs[0].ID, 500, `{"error":"injected"}`)
 
+		before := len(srv.Trace())
+		if err := l.opStop(ctx, session); err != nil {
+			t.Fatalf("stop with a persistently failing egress = %v, want nil (bounded retries then evidence_lost, R2b-04)", err)
+		}
+		after := srv.Trace()
+
+		catAttempts := 0
+		deregistered := false
+		for _, req := range after[before:] {
+			switch {
+			case req == "GET /v1/client/fs/cat/"+allocs[0].ID:
+				catAttempts++
+			case req == "DELETE /v1/job/"+b.ChildJobID:
+				deregistered = true
+			}
+		}
+		if catAttempts != egressMaxAttempts {
+			t.Fatalf("egress fs-cat attempts = %d, want exactly %d (bounded retries, R2b-04); trace = %v", catAttempts, egressMaxAttempts, after[before:])
+		}
+		if !deregistered {
+			t.Fatalf("stop never deregistered the child job after the evidence_lost fallback; trace = %v", after[before:])
+		}
+		if _, ok, err := l.sidecar.load(session); err != nil || ok {
+			t.Fatalf("sidecar binding for %q survived a successful stop", session)
+		}
+	})
+
+	t.Run("stop during outage exits with a failure", func(t *testing.T) {
+		l, srv := newTestLifecycle(t)
+		ctx := context.Background()
+		const session = "sess-stop-outage"
+
+		if err := l.opStart(ctx, session); err != nil {
+			t.Fatalf("start: %v", err)
+		}
+		srv.Close()
+
+		if err := l.opStop(ctx, session); err == nil {
+			t.Fatalf("stop during an API outage = nil error, want failure (04 §3 stop row)")
+		}
+		if _, ok, err := l.sidecar.load(session); err != nil || !ok {
+			t.Fatalf("sidecar binding for %q removed despite an unconfirmed stop", session)
+		}
+	})
+
+	t.Run("crash between egress and deregister retries idempotently via egress-complete marker", func(t *testing.T) {
+		l, srv := newTestLifecycle(t)
+		l.egressDir = t.TempDir()
+		ctx := context.Background()
+		const session = "sess-crash-between"
+
+		if err := l.opStart(ctx, session); err != nil {
+			t.Fatalf("start: %v", err)
+		}
+		b, ok, err := l.sidecar.load(session)
+		if err != nil || !ok {
+			t.Fatalf("sidecar.load(%q) = (%v, %v, %v)", session, b, ok, err)
+		}
+
+		// Deregister itself fails once, leaving EgressComplete already
+		// receipted — the state a crash between egress and deregister
+		// would leave behind.
+		srv.FailNext("DELETE", "/v1/job/"+b.ChildJobID, 500, `{"error":"injected"}`)
 		if err := l.opStop(ctx, session); err == nil {
 			t.Fatalf("stop with a faulted deregister = nil error, want failure")
 		}
-		if _, ok, err := l.sidecar.load(session); err != nil || !ok {
-			t.Fatalf("sidecar binding for %q removed despite a failed deregister", session)
+		b2, ok, err := l.sidecar.load(session)
+		if err != nil || !ok || !b2.EgressComplete {
+			t.Fatalf("sidecar.load(%q) after the crashed deregister = (%+v, %v, %v), want EgressComplete=true retained", session, b2, ok, err)
+		}
+
+		before := len(srv.Trace())
+		if err := l.opStop(ctx, session); err != nil {
+			t.Fatalf("stop retry after the crash = %v, want nil", err)
+		}
+		after := srv.Trace()
+
+		catAttempts := 0
+		for _, req := range after[before:] {
+			if strings.HasPrefix(req, "GET /v1/client/fs/cat/") {
+				catAttempts++
+			}
+		}
+		if catAttempts != 0 {
+			t.Fatalf("stop retry re-read egress files %d times after EgressComplete was already true, want 0 (idempotent retry via the egress-complete marker)", catAttempts)
+		}
+		if _, ok, err := l.sidecar.load(session); err != nil || ok {
+			t.Fatalf("sidecar binding for %q survived the successful retry", session)
 		}
 	})
 }
 
-// TestFaultConcurrentStartRace covers the concurrency-race fault row: two
-// goroutines racing opStart for the same session must not panic or corrupt
-// the on-disk sidecar binding, and must leave the session in a coherent
-// running state. Which goroutine "wins" is not guaranteed (04 §6 notes the
-// pre-dispatch duplicate check is best-effort, not a hard lock) — this test
-// asserts safety, not exclusivity. Run with -race to catch real data races.
+// TestFaultConcurrentStartRace covers the concurrency-race fault row:
+// concurrent same-name Start under the single-flight lock must produce
+// exactly one child (R2b-03) — not merely avoid a panic or corrupt the
+// on-disk sidecar binding. Run with -race to catch real data races on top.
 func TestFaultConcurrentStartRace(t *testing.T) {
-	l, _ := newTestLifecycle(t)
+	l, srv := newTestLifecycle(t)
 	ctx := context.Background()
 	const session = "sess-race"
 
@@ -383,6 +627,16 @@ func TestFaultConcurrentStartRace(t *testing.T) {
 	}
 	wg.Wait()
 
+	succeeded := 0
+	for _, err := range errs {
+		if err == nil {
+			succeeded++
+		}
+	}
+	if succeeded != 1 {
+		t.Fatalf("concurrent same-name start: %d of 2 calls succeeded, want exactly 1 under the single-flight lock (R2b-03); errs = %v", succeeded, errs)
+	}
+
 	b, ok, err := l.sidecar.load(session)
 	if err != nil {
 		t.Fatalf("sidecar binding corrupted by concurrent start: %v", err)
@@ -394,6 +648,91 @@ func TestFaultConcurrentStartRace(t *testing.T) {
 	running, err := l.opIsRunning(ctx, session)
 	if err != nil || !running {
 		t.Fatalf("is-running after concurrent start = (%v, %v), want (true, nil)", running, err)
+	}
+
+	dispatches := 0
+	for _, req := range srv.Trace() {
+		if strings.HasSuffix(req, "/dispatch") && strings.HasPrefix(req, "POST ") {
+			dispatches++
+		}
+	}
+	if dispatches != 1 {
+		t.Fatalf("concurrent same-name start issued %d dispatch calls, want exactly 1 non-terminal child (R2b-03); trace = %v", dispatches, srv.Trace())
+	}
+}
+
+// TestFaultConcurrentStartRaceCrossProcess covers the concurrency-race row
+// under the shape it actually happens in: `gc` execs gc-runtime-nomad fresh
+// per op (main.go's calling convention — "gc execs the binary directly, no
+// shell wrapping"), so a real race is between two independent OS processes,
+// never two goroutines sharing one Go value. This test races two separate
+// *lifecycle values that share only the sidecar directory on disk (as two
+// process invocations would), so an in-process-only lock (e.g. a plain
+// sync.Mutex on the lifecycle) would pass TestFaultConcurrentStartRace
+// above while doing nothing here — only a lock that lives on disk (flock)
+// closes this race for real.
+func TestFaultConcurrentStartRaceCrossProcess(t *testing.T) {
+	srv := fakenomad.NewServer()
+	t.Cleanup(srv.Close)
+	sidecarDir := filepath.Join(t.TempDir(), "sidecar")
+	const session = "sess-race-xproc"
+
+	newProcessLifecycle := func() (*lifecycle, error) {
+		c, err := newClient(srv.URL(), "", "default")
+		if err != nil {
+			return nil, err
+		}
+		sc, err := newSidecar(sidecarDir)
+		if err != nil {
+			return nil, err
+		}
+		return &lifecycle{client: c, sidecar: sc, parentJobID: "gc-sessions"}, nil
+	}
+
+	l1, err := newProcessLifecycle()
+	if err != nil {
+		t.Fatalf("newProcessLifecycle: %v", err)
+	}
+	l2, err := newProcessLifecycle()
+	if err != nil {
+		t.Fatalf("newProcessLifecycle: %v", err)
+	}
+	lifecycles := []*lifecycle{l1, l2}
+
+	ctx := context.Background()
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i := range errs {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = lifecycles[i].opStart(ctx, session)
+		}(i)
+	}
+	wg.Wait()
+
+	succeeded := 0
+	for _, err := range errs {
+		if err == nil {
+			succeeded++
+		}
+	}
+	if succeeded != 1 {
+		t.Fatalf("concurrent same-name start from two independent lifecycle values (simulating two OS processes): %d of 2 succeeded, want exactly 1 (R2b-03); errs = %v", succeeded, errs)
+	}
+
+	names, err := l1.opListRunning(ctx, "")
+	if err != nil {
+		t.Fatalf("list-running: %v", err)
+	}
+	count := 0
+	for _, n := range names {
+		if n == session {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("list-running reports %d entries for %q after a cross-process race, want exactly 1 (single non-terminal child)", count, session)
 	}
 }
 
@@ -420,7 +759,7 @@ func TestFaultConsistencyAcrossSessions(t *testing.T) {
 	}
 	srv.SetAllocStatus(allocs[0].ID, "complete")
 
-	names, err := l.opListRunning(ctx)
+	names, err := l.opListRunning(ctx, "")
 	if err != nil {
 		t.Fatalf("list-running: %v", err)
 	}
@@ -452,7 +791,7 @@ func TestFaultSidecarLoss(t *testing.T) {
 	if err != nil || running {
 		t.Fatalf("is-running after sidecar loss = (%v, %v), want (false, nil)", running, err)
 	}
-	if _, err := l.opListRunning(ctx); err == nil {
+	if _, err := l.opListRunning(ctx, ""); err == nil {
 		t.Fatalf("list-running after sidecar loss = nil error, want a propagated error")
 	}
 }
@@ -480,7 +819,13 @@ func TestFaultPermanentAuth(t *testing.T) {
 			t.Fatalf("attempt %d: is-running under permanent auth failure = (%v, %v), want (true, nil)", i, running, err)
 		}
 	}
-	if _, err := l.opListRunning(ctx); err == nil {
+
+	// list-running's honesty split is driven by the children-of-parent jobs
+	// list (04 §2.1 rule 2/3), not the per-job allocations endpoint
+	// is-running above just exercised — fault that endpoint too so
+	// list-running's own unavailable-is-never-empty answer gets asserted.
+	srv.FailSticky("GET", "/v1/jobs", 401, `{"error":"permission denied"}`)
+	if _, err := l.opListRunning(ctx, ""); err == nil {
 		t.Fatalf("list-running under permanent auth failure = nil error, want a propagated error")
 	}
 }
