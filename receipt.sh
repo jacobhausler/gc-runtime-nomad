@@ -17,6 +17,12 @@ set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$here"
 
+if [ -n "$(git status --porcelain)" ]; then
+  echo "receipt: refusing to run against a dirty working tree (git status --porcelain is non-empty)" >&2
+  echo "receipt: commit or stash changes first so the receipt names a single tested commit" >&2
+  exit 1
+fi
+
 commit="$(git rev-parse HEAD)"
 ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 tmp="$(mktemp -d)"
