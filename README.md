@@ -82,6 +82,23 @@ the pack keeps zero gascity Go dependencies. Optional-op requirements
 four lifecycle ops — later beads make them pass; this harness only runs
 them.
 
+### Conformance receipt
+
+```bash
+GC_BIN=$(command -v gc) ./receipt.sh
+```
+
+`receipt.sh` runs the full offline ladder in one hermetic pass — `check`
+(`gc runtime check`), the golden suite (`gc runtime conformance`), the
+env probe (`TestM3StagingReceiptWorkspaceProbe`), L0-L2
+(`go vet`/`go test` across the `runtime` and `fakenomad` modules), and
+secrets-grep (`TestM3StagingReceiptNoCanaryLeak`, zero planted-canary hits)
+— then writes the per-item pass/fail result, linked to the commit it ran
+at, to `CONFORMANCE-RECEIPT.md` (NRT-P1-90; 08 §1 pack-tier conformance
+standard). Exits non-zero if any ladder item is red. Fixing a red ladder
+step is out of scope for the receipt itself — bounce back to the owning
+bead.
+
 ## RPP operations
 
 | Op | Notes |
