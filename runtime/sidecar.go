@@ -44,6 +44,16 @@ type binding struct {
 	// observationally identical from the Nomad alloc alone (04 §6:
 	// RPP-PROVISION-001).
 	Launched bool `json:"launched"`
+
+	// AgentPID is the in-box pid of the tmux pane launch created, captured
+	// right after buildLaunchCommand succeeds (markLaunched). It lets
+	// opIsRunning's liveness probe kill -0 the exact process launch
+	// started, not just the tmux session wrapping it — a session that
+	// survives with its pane process gone is still an agent-dead answer
+	// (04 §3 provision row, in-box agent kill). Zero for bindings recorded
+	// before this field existed; the probe falls back to a tmux-session-only
+	// check in that case.
+	AgentPID int `json:"agent_pid,omitempty"`
 }
 
 // sidecar is a file-based KV under a directory: one JSON file per session,
