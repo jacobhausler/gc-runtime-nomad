@@ -54,6 +54,13 @@ type lifecycle struct {
 	// boundary, trading a start failure with a precise cause for the
 	// default behavior of attempting register and surfacing its 403.
 	forbidRegistration bool
+
+	// logShipper configures the optional log-shipper task added to the
+	// session task group's jobspec (fnrt-t4l.13). Zero value (Sink=="")
+	// disables it — parentJobSpec's default single-task group is
+	// unaffected. It only ever rides the parent job body parentJobSpec
+	// builds, same as nodePool above.
+	logShipper logShipperConfig
 }
 
 // lockSession acquires an exclusive, cross-process advisory file lock for
@@ -515,7 +522,7 @@ func (l *lifecycle) dispatch(ctx context.Context, sessionName string) error {
 // attempt entirely for a deployment that wants a config-time guarantee of
 // that, rather than discovering it from a 403 at the first drifted Start.
 func (l *lifecycle) ensureParentRegistered(ctx context.Context) error {
-	spec := parentJobSpec(l.client.namespace, l.nodePool, l.parentJobID)
+	spec := parentJobSpec(l.client.namespace, l.nodePool, l.parentJobID, l.logShipper)
 
 	nodePool, meta, ok, err := l.client.getJob(ctx, l.parentJobID)
 	if err != nil {

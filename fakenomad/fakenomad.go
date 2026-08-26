@@ -58,12 +58,25 @@ type Job struct {
 	Meta        map[string]string
 	ModifyIndex uint64
 
-	// Command is the first task group's first task's exec-driver command
-	// (Config's "command"/"args" pair, task-lifetime modeling for
-	// NRT-P2-06.1) — empty for a job registered with no task Config, which
-	// keeps every pre-existing caller that registers a bare `{"ID": ...}`
-	// job unaffected. A dispatched child inherits its parent's Command
-	// (dispatch requests never carry their own TaskGroups).
+	// Tasks is the first task group's own tasks, each an exec-driver
+	// command (Config's "command"/"args" pair, task-lifetime modeling for
+	// NRT-P2-06.1/fnrt-t4l.13) — empty for a job registered with no task
+	// Config, which keeps every pre-existing caller that registers a bare
+	// `{"ID": ...}` job unaffected. A dispatched child inherits its
+	// parent's Tasks (dispatch requests never carry their own TaskGroups).
+	// Tasks[0] is this fake's modeled "main"/leader task: it alone drives
+	// the alloc's ClientStatus (startAllTasks), mirroring real Nomad's own
+	// per-task-state aggregation — an alloc stays "running" as long as ANY
+	// task is still running, so a non-main task (e.g. a log-shipper
+	// sidecar) crashing must never flip ClientStatus away from "running".
+	Tasks []TaskSpec
+}
+
+// TaskSpec is one task within a dispatched job's single task group — the
+// subset fakenomad needs to run each task as a real subprocess
+// (fnrt-t4l.13 N-task group modeling).
+type TaskSpec struct {
+	Name    string
 	Command []string
 }
 
@@ -104,12 +117,13 @@ type fault struct {
 	passthrough bool
 }
 
-// taskProc is the fake's live handle on a dispatched job's own task-command
-// subprocess (task-lifetime modeling, NRT-P2-06.1) — as opposed to a
-// caller's alloc-exec commands, which run and complete synchronously via
-// runCommand. done closes once the background Wait() goroutine has resolved
-// the alloc's terminal ClientStatus, so Close can bound how long it waits on
-// a killed process before giving up.
+// taskProc is the fake's live handle on one of a dispatched job's own
+// task-command subprocesses (task-lifetime modeling, NRT-P2-06.1) — as
+// opposed to a caller's alloc-exec commands, which run and complete
+// synchronously via runCommand. done closes once the background Wait()
+// goroutine has resolved (the alloc's ClientStatus for the main task, or
+// just the process's own exit for a side task — see startAllTasks), so
+// Close can bound how long it waits on a killed process before giving up.
 type taskProc struct {
 	cmd  *exec.Cmd
 	done chan struct{}
@@ -125,7 +139,7 @@ type Server struct {
 	allocs     map[string]*Allocation
 	allocFiles map[string]map[string]string // allocID -> path -> content
 	execDirs   map[string]string            // allocID -> its exec scratch dir (lazy)
-	taskProcs  map[string]*taskProc         // allocID -> its running task-command subprocess (lazy)
+	taskProcs  map[string][]*taskProc       // allocID -> its running task-command subprocesses, main task first (lazy)
 	faults     []fault
 	dispSeq    uint64
 	trace      []string
@@ -174,7 +188,7 @@ func newServer() *Server {
 		allocs:     map[string]*Allocation{},
 		allocFiles: map[string]map[string]string{},
 		execDirs:   map[string]string{},
-		taskProcs:  map[string]*taskProc{},
+		taskProcs:  map[string][]*taskProc{},
 		execRoot:   execRoot,
 	}
 }
@@ -208,9 +222,9 @@ func (s *Server) Close() {
 	for _, d := range s.execDirs {
 		dirs = append(dirs, d)
 	}
-	procs := make([]*taskProc, 0, len(s.taskProcs))
-	for _, p := range s.taskProcs {
-		procs = append(procs, p)
+	var procs []*taskProc
+	for _, ps := range s.taskProcs {
+		procs = append(procs, ps...)
 	}
 	s.mu.Unlock()
 
@@ -451,6 +465,7 @@ func (s *Server) registerJob(w http.ResponseWriter, r *http.Request, pathID stri
 			Meta       map[string]string `json:"Meta"`
 			TaskGroups []struct {
 				Tasks []struct {
+					Name   string         `json:"Name"`
 					Config map[string]any `json:"Config"`
 				} `json:"Tasks"`
 			} `json:"TaskGroups"`
@@ -469,14 +484,16 @@ func (s *Server) registerJob(w http.ResponseWriter, r *http.Request, pathID stri
 	if ns == "" {
 		ns = "default"
 	}
-	var command []string
-	if len(req.Job.TaskGroups) > 0 && len(req.Job.TaskGroups[0].Tasks) > 0 {
-		command = taskCommand(req.Job.TaskGroups[0].Tasks[0].Config)
+	var tasks []TaskSpec
+	if len(req.Job.TaskGroups) > 0 {
+		for _, t := range req.Job.TaskGroups[0].Tasks {
+			tasks = append(tasks, TaskSpec{Name: t.Name, Command: taskCommand(t.Config)})
+		}
 	}
 
 	s.mu.Lock()
 	idx := s.bumpIndexLocked()
-	s.jobs[id] = &Job{ID: id, Namespace: ns, NodePool: req.Job.NodePool, Meta: req.Job.Meta, Command: command, ModifyIndex: idx}
+	s.jobs[id] = &Job{ID: id, Namespace: ns, NodePool: req.Job.NodePool, Meta: req.Job.Meta, Tasks: tasks, ModifyIndex: idx}
 	s.mu.Unlock()
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -569,8 +586,8 @@ func (s *Server) dispatchJob(w http.ResponseWriter, r *http.Request, parentID st
 	s.dispSeq++
 	childID := fmt.Sprintf("%s/dispatch-%d-%06x", parentID, time.Now().UTC().Unix(), s.dispSeq)
 	idx := s.bumpIndexLocked()
-	command := parent.Command
-	s.jobs[childID] = &Job{ID: childID, Namespace: parent.Namespace, NodePool: parent.NodePool, ParentID: parentID, Dispatched: true, Meta: req.Meta, Command: command, ModifyIndex: idx}
+	tasks := parent.Tasks
+	s.jobs[childID] = &Job{ID: childID, Namespace: parent.Namespace, NodePool: parent.NodePool, ParentID: parentID, Dispatched: true, Meta: req.Meta, Tasks: tasks, ModifyIndex: idx}
 
 	allocID := fmt.Sprintf("alloc-%06x", s.dispSeq)
 	allocIdx := s.bumpIndexLocked()
@@ -585,17 +602,17 @@ func (s *Server) dispatchJob(w http.ResponseWriter, r *http.Request, parentID st
 	s.allocFiles[allocID] = defaultAllocFiles(allocID)
 	s.mu.Unlock()
 
-	// Actually run the task's own command as a real subprocess so the
+	// Actually run each task's own command as a real subprocess so the
 	// alloc's ClientStatus reflects its real lifetime (task-lifetime
-	// modeling, NRT-P2-06.1) — a job registered with no task Config (every
-	// pre-existing bare `{"ID": ...}` caller) leaves command empty and
-	// this is a no-op, keeping ClientStatus "pending" exactly as before.
-	// Synchronous so the dispatch response never races ahead of it: by the
-	// time this call returns, the task has either started (ClientStatus
-	// "running") or failed to start (ClientStatus "failed").
-	if len(command) > 0 {
-		s.startTask(allocID, command)
-	}
+	// modeling, NRT-P2-06.1/fnrt-t4l.13) — a job registered with no task
+	// Config (every pre-existing bare `{"ID": ...}` caller) leaves tasks
+	// empty and this is a no-op, keeping ClientStatus "pending" exactly as
+	// before. The main task (tasks[0]) starts synchronously so the
+	// dispatch response never races ahead of it: by the time this call
+	// returns, it has either started (ClientStatus "running") or failed to
+	// start (ClientStatus "failed"). Every other task starts in the
+	// background — see startAllTasks.
+	s.startAllTasks(allocID, tasks)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"DispatchedJobID": childID,
@@ -751,16 +768,17 @@ func (s *Server) deregisterJob(w http.ResponseWriter, r *http.Request, id string
 		a.DesiredStatus = "stop"
 		a.ClientStatus = "complete"
 		a.ModifyIndex = idx
-		if p, ok := s.taskProcs[a.ID]; ok {
+		for _, p := range s.taskProcs[a.ID] {
 			toKill = append(toKill, p.cmd)
 		}
 	}
 	s.mu.Unlock()
 
-	// Kill each force-completed alloc's real task-command subprocess
-	// (task-lifetime modeling, NRT-P2-06.1) — mirrors real Nomad killing
-	// the task on deregister. The background Wait() goroutine (startTask)
-	// sees the alloc already terminal and leaves ClientStatus alone.
+	// Kill every force-completed alloc's real task-command subprocesses —
+	// ALL of them, not just the main task (task-lifetime modeling,
+	// NRT-P2-06.1/fnrt-t4l.13) — mirrors real Nomad killing every task on
+	// deregister. The background Wait() goroutines (startAllTasks) see the
+	// alloc already terminal and leave ClientStatus alone.
 	for _, cmd := range toKill {
 		if cmd.Process != nil {
 			_ = cmd.Process.Kill()
@@ -897,18 +915,42 @@ func taskCommand(cfg map[string]any) []string {
 	return out
 }
 
-// startTask runs command as a real subprocess standing in for Nomad's exec
-// driver actually running a dispatched job's task (task-lifetime modeling,
-// NRT-P2-06.1) and drives allocID's ClientStatus accordingly: "running" once
-// it starts, "failed" if it never starts, and "complete"/"failed" once it
-// exits — the model a fixed-status alloc cannot express, and the one
-// NRT-P2-06.1 needs to catch a task command (like the placeholder /bin/true
-// this pack used to dispatch) that exits before launch's alloc-exec call can
-// ever reach the box. Starting is synchronous (the caller — dispatchJob —
-// blocks on it) so the dispatch response is never observed before the
-// alloc's ClientStatus reflects whether the task actually started; only the
-// exit wait runs in the background.
-func (s *Server) startTask(allocID string, command []string) {
+// startAllTasks runs every one of tasks as a real subprocess (fnrt-t4l.13
+// N-task group modeling). tasks[0] is this fake's modeled "main"/leader
+// task and alone drives allocID's ClientStatus (startMainTask); every other
+// task runs independently via startSideTask, whose own lifetime — start
+// failure, crash, or clean exit — never touches ClientStatus, mirroring
+// real Nomad's per-task-state aggregation (an alloc stays "running" as long
+// as ANY task is still running). A task with an empty Command (no task
+// Config, e.g. every pre-existing bare `{"ID": ...}` caller) is skipped
+// entirely — for tasks[0] that keeps ClientStatus "pending" exactly as
+// before this modeling existed.
+func (s *Server) startAllTasks(allocID string, tasks []TaskSpec) {
+	for i, t := range tasks {
+		if len(t.Command) == 0 {
+			continue
+		}
+		if i == 0 {
+			s.startMainTask(allocID, t.Command)
+		} else {
+			s.startSideTask(allocID, t.Command)
+		}
+	}
+}
+
+// startMainTask runs command as a real subprocess standing in for Nomad's
+// exec driver actually running a dispatched job's main task (task-lifetime
+// modeling, NRT-P2-06.1) and drives allocID's ClientStatus accordingly:
+// "running" once it starts, "failed" if it never starts, and
+// "complete"/"failed" once it exits — the model a fixed-status alloc cannot
+// express, and the one NRT-P2-06.1 needs to catch a task command (like the
+// placeholder /bin/true this pack used to dispatch) that exits before
+// launch's alloc-exec call can ever reach the box. Starting is synchronous
+// (the caller — dispatchJob, via startAllTasks — blocks on it) so the
+// dispatch response is never observed before the alloc's ClientStatus
+// reflects whether the task actually started; only the exit wait runs in
+// the background.
+func (s *Server) startMainTask(allocID string, command []string) {
 	dir := s.allocScratchDir(allocID)
 	cmd := exec.Command(command[0], command[1:]...)
 	cmd.Dir = dir
@@ -927,7 +969,7 @@ func (s *Server) startTask(allocID string, command []string) {
 		return
 	}
 	done := make(chan struct{})
-	s.taskProcs[allocID] = &taskProc{cmd: cmd, done: done}
+	s.taskProcs[allocID] = append(s.taskProcs[allocID], &taskProc{cmd: cmd, done: done})
 	if ok {
 		a.ClientStatus = "running"
 		a.ModifyIndex = s.bumpIndexLocked()
@@ -947,6 +989,33 @@ func (s *Server) startTask(allocID string, command []string) {
 		}
 		close(done)
 		s.mu.Unlock()
+	}()
+}
+
+// startSideTask runs command as a real subprocess standing in for a
+// non-main task in the group (e.g. fnrt-t4l.13's log-shipper) — best
+// effort, and deliberately never touches allocID's ClientStatus: a side
+// task that fails to start, crashes, or exits is invisible to the alloc's
+// aggregate state, matching real Nomad (an alloc stays "running" as long as
+// its main task is). It is still recorded in s.taskProcs so Close and
+// deregisterJob's kill sweep reap it like any other task subprocess.
+func (s *Server) startSideTask(allocID string, command []string) {
+	dir := s.allocScratchDir(allocID)
+	cmd := exec.Command(command[0], command[1:]...)
+	cmd.Dir = dir
+	cmd.Env = isolatedTmuxEnv(dir, "")
+
+	if err := cmd.Start(); err != nil {
+		return
+	}
+	done := make(chan struct{})
+	s.mu.Lock()
+	s.taskProcs[allocID] = append(s.taskProcs[allocID], &taskProc{cmd: cmd, done: done})
+	s.mu.Unlock()
+
+	go func() {
+		_ = cmd.Wait()
+		close(done)
 	}()
 }
 

@@ -365,6 +365,67 @@ func TestTaskLifetimeReflectsRealProcess(t *testing.T) {
 	}
 }
 
+// TestSideTaskCrashLeavesAllocRunning drives fnrt-t4l.13's N-task group
+// modeling and its failure-injection scope line directly: a second
+// (non-main) task in the group — standing in for the log-shipper sidecar —
+// crashes immediately, and the alloc's ClientStatus must stay "running" the
+// whole time the main (session) task is still alive, exactly matching real
+// Nomad's per-task-state aggregation. TestTaskLifetimeReflectsRealProcess
+// covers the single-task case this generalizes.
+func TestSideTaskCrashLeavesAllocRunning(t *testing.T) {
+	srv := NewServer()
+	defer srv.Close()
+
+	job := map[string]any{
+		"ID": "job-side-task-crash",
+		"TaskGroups": []map[string]any{{
+			"Tasks": []map[string]any{
+				{
+					"Name":   "agent",
+					"Config": map[string]any{"command": "sh", "args": []string{"-c", "sleep 5"}},
+				},
+				{
+					"Name":   "log-shipper",
+					"Config": map[string]any{"command": "sh", "args": []string{"-c", "exit 1"}},
+				},
+			},
+		}},
+	}
+	status, _ := httpJSON(t, http.MethodPost, srv.URL()+"/v1/jobs", map[string]any{"Job": job}, &map[string]any{})
+	if status != http.StatusOK {
+		t.Fatalf("register: status = %d, want 200", status)
+	}
+
+	var dispatchOut map[string]any
+	status, _ = httpJSON(t, http.MethodPost, srv.URL()+"/v1/job/job-side-task-crash/dispatch", map[string]any{}, &dispatchOut)
+	if status != http.StatusOK {
+		t.Fatalf("dispatch: status = %d, want 200", status)
+	}
+	childID, _ := dispatchOut["DispatchedJobID"].(string)
+
+	var allocs []map[string]any
+	status, _ = httpJSON(t, http.MethodGet, srv.URL()+"/v1/job/"+childID+"/allocations", nil, &allocs)
+	if status != http.StatusOK || len(allocs) != 1 {
+		t.Fatalf("list allocations = (%d, %v), want one alloc", status, allocs)
+	}
+	if got, _ := allocs[0]["ClientStatus"].(string); got != "running" {
+		t.Fatalf("ClientStatus immediately after dispatch = %q, want %q", got, "running")
+	}
+
+	// Give the side task (log-shipper) time to crash and exit — well
+	// beyond its own near-instant "exit 1" — and confirm the alloc is
+	// still "running" throughout, driven only by the still-alive main
+	// (agent) task.
+	deadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		httpJSON(t, http.MethodGet, srv.URL()+"/v1/job/"+childID+"/allocations", nil, &allocs)
+		if got, _ := allocs[0]["ClientStatus"].(string); got != "running" {
+			t.Fatalf("ClientStatus after side-task crash = %q, want still %q (main task is still alive)", got, "running")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // TestDeregisterWithPurge confirms ?purge=true removes the job record
 // outright, so a subsequent read 404s (confirmed absence, per the wire rule
 // that only a 200-children-list-lacking-the-entry or a direct 404 counts).

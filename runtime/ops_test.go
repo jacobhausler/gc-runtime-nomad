@@ -34,6 +34,31 @@ func newTestLifecycle(t *testing.T) (*lifecycle, *fakenomad.Server) {
 // duplicate start is rejected with an "already exists" stderr phrase (04 §6
 // wire-contract constant), stop is idempotent, and is-running flips to
 // false after stop.
+// TestLifecycleStartSucceedsWithLogShipperEnabled proves the fnrt-t4l.13
+// wiring end to end: a lifecycle configured with a non-empty logShipper
+// still starts and reports running normally, even though fakenomad's
+// sandbox has no real vector binary for the log-shipper task's artifact
+// stanza to fetch (fakenomad doesn't process Artifacts/Templates at all —
+// only Config's command/args) — so the log-shipper's wrapper script fails
+// its own `exec` immediately. That failure must stay confined to the
+// log-shipper task (fakenomad's side-task modeling) and never affect the
+// session's own is-running answer, which is exactly the "shipper crash →
+// session task unaffected" scope line exercised at the real ops layer
+// rather than fakenomad's synthetic unit test.
+func TestLifecycleStartSucceedsWithLogShipperEnabled(t *testing.T) {
+	l, _ := newTestLifecycle(t)
+	l.logShipper = logShipperConfig{Sink: "https://logs.example.internal/ingest"}
+	ctx := context.Background()
+	const session = "sess-log-shipper"
+
+	if err := l.opStart(ctx, session); err != nil {
+		t.Fatalf("start with log-shipper enabled: %v", err)
+	}
+	if running, err := l.opIsRunning(ctx, session); err != nil || !running {
+		t.Fatalf("is-running after start with log-shipper enabled = (%v, %v), want (true, nil)", running, err)
+	}
+}
+
 func TestLifecycleRoundTrip(t *testing.T) {
 	l, _ := newTestLifecycle(t)
 	ctx := context.Background()
@@ -339,7 +364,7 @@ func TestOpStartFaultPropagates(t *testing.T) {
 
 	// The parent job must exist before the dispatch call this start makes,
 	// so fault-inject the dispatch endpoint specifically.
-	if err := l.client.registerJob(ctx, parentJobSpec("default", l.nodePool, l.parentJobID)); err != nil {
+	if err := l.client.registerJob(ctx, parentJobSpec("default", l.nodePool, l.parentJobID, logShipperConfig{})); err != nil {
 		t.Fatalf("registerJob: %v", err)
 	}
 	srv.FailNext("POST", "/v1/job/"+l.parentJobID+"/dispatch", 500, `{"error":"injected"}`)
@@ -377,7 +402,7 @@ func TestOpStartSucceedsWhenParentExistsAndRegisterIsForbidden(t *testing.T) {
 	const session = "sess-dispatch-only-token"
 
 	// Simulate the one-time management-token registration step.
-	if err := l.client.registerJob(ctx, parentJobSpec("default", l.nodePool, l.parentJobID)); err != nil {
+	if err := l.client.registerJob(ctx, parentJobSpec("default", l.nodePool, l.parentJobID, logShipperConfig{})); err != nil {
 		t.Fatalf("registerJob (management token): %v", err)
 	}
 
@@ -424,7 +449,7 @@ func TestOpStartRegistersWhenNodePoolDrifted(t *testing.T) {
 	ctx := context.Background()
 
 	// Parent registered under the OLD (empty) node pool.
-	if err := l.client.registerJob(ctx, parentJobSpec("default", "", l.parentJobID)); err != nil {
+	if err := l.client.registerJob(ctx, parentJobSpec("default", "", l.parentJobID, logShipperConfig{})); err != nil {
 		t.Fatalf("registerJob (stale node pool): %v", err)
 	}
 
@@ -458,7 +483,7 @@ func TestOpStartDetectsJobspecDriftAndFailsClearlyWhenRegisterIsForbidden(t *tes
 	// Register a parent matching this build's NodePool, but with a
 	// hand-set jobspec-hash Meta standing in for a task that predates a
 	// code change — NodePool alone can never see this kind of drift.
-	stale := parentJobSpec("default", l.nodePool, l.parentJobID)
+	stale := parentJobSpec("default", l.nodePool, l.parentJobID, logShipperConfig{})
 	stale.Meta = map[string]string{jobspecHashMetaKey: "stale-hash-from-prior-build"}
 	if err := l.client.registerJob(ctx, stale); err != nil {
 		t.Fatalf("registerJob (stale jobspec): %v", err)

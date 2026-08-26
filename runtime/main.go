@@ -39,6 +39,9 @@
 //	GC_NOMAD_SIDECAR_DIR  required for lifecycle ops: directory for the sidecar session->job-ID bindings (04 §1)
 //	GC_NOMAD_EGRESS_DIR   optional: local directory for stop-path transcript/evidence egress (NRT-P1-07); unset disables egress
 //	GC_NOMAD_FORBID_REGISTER  optional: "true" forbids ever registering the parent job (04 §4 lab ACL model) — start/provision fail closed instead of attempting a register call that needs the submit-job capability
+//	GC_NOMAD_LOG_SINK     optional: HTTP JSON-lines endpoint for the session task group's log-shipper task (fnrt-t4l.13); unset disables the task entirely — session logs are not shipped
+//	GC_NOMAD_LOG_SINK_TOKEN_FILE  optional: in-box path the log-shipper task reads its Authorization bearer token's value from; unset means an unauthenticated sink
+//	GC_NOMAD_LOG_LABELS   optional: "k=v,k=v" labels merged onto every shipped log line alongside the fixed session_name/alloc_id/node/runtime=nomad set
 package main
 
 import (
@@ -58,6 +61,9 @@ const (
 	envSidecarDir = "GC_NOMAD_SIDECAR_DIR"
 	envEgressDir  = "GC_NOMAD_EGRESS_DIR"
 	envForbidReg  = "GC_NOMAD_FORBID_REGISTER"
+	envLogSink    = "GC_NOMAD_LOG_SINK"
+	envLogTokFile = "GC_NOMAD_LOG_SINK_TOKEN_FILE"
+	envLogLabels  = "GC_NOMAD_LOG_LABELS"
 
 	defaultParentJob = "gc-sessions"
 
@@ -344,6 +350,11 @@ func newLifecycle() (*lifecycle, error) {
 		nodePool:           os.Getenv(envNodePool),
 		egressDir:          os.Getenv(envEgressDir),
 		forbidRegistration: forbidRegistration,
+		logShipper: logShipperConfig{
+			Sink:      os.Getenv(envLogSink),
+			TokenFile: os.Getenv(envLogTokFile),
+			Labels:    os.Getenv(envLogLabels),
+		},
 	}, nil
 }
 

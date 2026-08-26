@@ -15,7 +15,12 @@ As of `NRT-P1-05`, `exec` plus the driving verbs (`nudge`, `peek`,
 `interrupt`, `send-keys`, `clear-scrollback`) are realized as tmux commands
 over the same exec mechanism. As of `NRT-P1-06`, `start`/`provision` accept
 an optional workspace/secrets staging config on stdin (04 §5), materialized
-into the alloc over tar-over-exec-stdin.
+into the alloc over tar-over-exec-stdin. As of `fnrt-t4l.13`, setting
+`GC_NOMAD_LOG_SINK` adds a second `log-shipper` task (a pinned+checksummed
+`vector` binary) to the session task group, tailing the agent's session
+JSONL and captured stdout to that HTTP JSON-lines sink and exposing
+vector's own metrics via `prometheus_exporter` on a group-local port —
+unset, this task is never added at all.
 
 ## Layout
 
@@ -32,7 +37,7 @@ runtime-nomad/
 │   ├── main.go     # RPP op dispatch + env config
 │   ├── client.go   # Nomad API client (register/dispatch/deregister/blocking reads/alloc-exec WS)
 │   ├── exec_ws.go  # client-side RFC 6455 frame codec for the alloc-exec WebSocket
-│   ├── jobspec.go  # parent job spec builder (04 §4 job-template invariants)
+│   ├── jobspec.go  # parent job spec builder (04 §4 job-template invariants) + optional log-shipper task (fnrt-t4l.13)
 │   ├── sidecar.go  # session -> child-job-ID binding store + launched marker (04 §1 sidecar state dir)
 │   ├── staging.go  # wire start config, envArgvSafe classification, tar-over-exec-stdin builder (NRT-P1-06)
 │   └── ops.go      # start/stop/is-running/list-running/provision/exec/relaunch/stage, stop-path fs egress (NRT-P1-07)
@@ -65,6 +70,9 @@ Lifecycle ops need Nomad API configuration on the environment:
 | `GC_NOMAD_NAMESPACE` | no | Nomad namespace (default `default`) |
 | `GC_NOMAD_PARENT_JOB` | no | The city's parameterized parent job ID (default `gc-sessions`) |
 | `GC_NOMAD_EGRESS_DIR` | no | Local directory for stop-path transcript/evidence egress (`NRT-P1-07`); unset disables egress |
+| `GC_NOMAD_LOG_SINK` | no | HTTP JSON-lines endpoint for the session group's `log-shipper` task (`fnrt-t4l.13`) — the one env var that turns log shipping on; unset ⇒ session logs are not shipped |
+| `GC_NOMAD_LOG_SINK_TOKEN_FILE` | no | In-box path the `log-shipper` task reads its `Authorization: Bearer` token's value from; unset ⇒ an unauthenticated sink |
+| `GC_NOMAD_LOG_LABELS` | no | `k=v,k=v` labels merged onto every shipped log line alongside the fixed `session_name`/`alloc_id`/`node`/`runtime=nomad` set |
 
 ## Conformance
 
@@ -119,10 +127,15 @@ caller treats as a no-op success.
 
 ## Out of scope
 
-- Retention policy for egressed transcript/evidence files (owner decision)
-  and any egress sink beyond a local directory (`NRT-P1-07`) — no
-  directory listing/discovery either, just the two well-known files
-  (`ops.go`'s `egressFiles`).
+- Retention policy for egressed transcript/evidence files (owner decision,
+  `NRT-P1-07`) — no directory listing/discovery either, just the two
+  well-known files (`ops.go`'s `egressFiles`). (The older version of this
+  bullet also scoped out any egress sink beyond a local directory; that is
+  overruled as of `fnrt-t4l.13`'s `GC_NOMAD_LOG_SINK` HTTP sink — see
+  above. `NRT-P1-07`'s own stop-path file egress is still local-directory
+  only; it is a distinct mechanism from the log-shipper's live streaming.)
+- Log-shipper flush-order-vs-egress and the `gc runtime check` warning for
+  an unset `GC_NOMAD_LOG_SINK` (`fnrt-t4l.14`).
 - Remote artifact blocks and the env.ledger tunnel (`NRT-P1-06`) — staging
   only materializes what a caller sends inline on stdin; the launch command
   is still a bare `tmux new-session` (plus `-e` flags), not a real agent
