@@ -318,8 +318,13 @@ func TestFaultUnknownAlloc(t *testing.T) {
 }
 
 // TestFaultReplacementAlloc covers the replacement-alloc fault row: Nomad
-// reschedules a failed alloc under the same job. is-running must count the
-// live replacement even though the original alloc is terminal.
+// reschedules a failed alloc under the same job. is-running must select the
+// live replacement even though the original alloc is terminal — but since
+// nothing has launched an agent into the fresh replacement yet, the in-box
+// liveness probe correctly answers false there (agent not present) rather
+// than reusing the OLD alloc's now-stale launched state; only once the
+// replacement is explicitly relaunched does is-running flip true again,
+// proving the alloc-selection logic is now checking the NEW alloc.
 func TestFaultReplacementAlloc(t *testing.T) {
 	l, srv := newTestLifecycle(t)
 	ctx := context.Background()
@@ -340,8 +345,74 @@ func TestFaultReplacementAlloc(t *testing.T) {
 	srv.PlaceAlloc(b.ChildJobID, "running")
 
 	running, err := l.opIsRunning(ctx, session)
+	if err != nil || running {
+		t.Fatalf("is-running right after a replacement alloc = (%v, %v), want (false, nil): no agent has been launched into the new alloc yet", running, err)
+	}
+
+	if err := l.opRelaunch(ctx, session); err != nil {
+		t.Fatalf("relaunch into the replacement alloc: %v", err)
+	}
+	running, err = l.opIsRunning(ctx, session)
 	if err != nil || !running {
-		t.Fatalf("is-running after a replacement alloc = (%v, %v), want (true, nil)", running, err)
+		t.Fatalf("is-running after relaunching into the replacement alloc = (%v, %v), want (true, nil)", running, err)
+	}
+}
+
+// TestFaultInBoxAgentKill covers the in-box-agent-kill fault row (08 §3):
+// the box (alloc) survives untouched, but the agent process/tmux session
+// inside it dies on its own (e.g. an OOM kill) without ever touching
+// Nomad's task-main process. is-running must flip to false (agent-dead)
+// even though the alloc's ClientStatus stays "running" throughout — the
+// exact honesty gap ClientStatus-only checks can never see — and must not
+// read as a confirmed box death either: a relaunch into the SAME alloc (no
+// re-dispatch) brings the session straight back.
+func TestFaultInBoxAgentKill(t *testing.T) {
+	l, _ := newTestLifecycle(t)
+	ctx := context.Background()
+	const session = "sess-inbox-kill"
+
+	if err := l.opStart(ctx, session); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if running, err := l.opIsRunning(ctx, session); err != nil || !running {
+		t.Fatalf("is-running after start = (%v, %v), want (true, nil)", running, err)
+	}
+
+	b, ok, err := l.sidecar.load(session)
+	if err != nil || !ok {
+		t.Fatalf("sidecar.load(%q) = (%+v, %v, %v)", session, b, ok, err)
+	}
+	allocID, err := l.currentAlloc(ctx, session)
+	if err != nil {
+		t.Fatalf("currentAlloc: %v", err)
+	}
+
+	// Kill the in-box tmux session (and with it the pid capturePanePID
+	// recorded at launch) directly over exec, without touching the alloc
+	// itself: jobspec.go's sessionSupervisorScript (the task-main process)
+	// is untouched, so ClientStatus stays "running" — exactly the fault
+	// this row models.
+	exitCode, out, err := l.client.execAlloc(ctx, allocID, execTaskName, []string{"tmux", "kill-session", "-t", tmuxSessionName})
+	if err != nil || exitCode != 0 {
+		t.Fatalf("tmux kill-session = (%d, %v): %s", exitCode, err, out)
+	}
+
+	allocs, _, err := l.client.listAllocsForJob(ctx, b.ChildJobID, 0, 0)
+	if err != nil || len(allocs) != 1 || allocs[0].ClientStatus != "running" {
+		t.Fatalf("alloc status after in-box agent kill = (%+v, %v), want exactly one alloc still %q", allocs, err, "running")
+	}
+
+	running, err := l.opIsRunning(ctx, session)
+	if err != nil || running {
+		t.Fatalf("is-running after in-box agent kill = (%v, %v), want (false, nil): box survives but the agent is gone", running, err)
+	}
+
+	if err := l.opRelaunch(ctx, session); err != nil {
+		t.Fatalf("relaunch after in-box agent kill: %v", err)
+	}
+	running, err = l.opIsRunning(ctx, session)
+	if err != nil || !running {
+		t.Fatalf("is-running after relaunch = (%v, %v), want (true, nil)", running, err)
 	}
 }
 

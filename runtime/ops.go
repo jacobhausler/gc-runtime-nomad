@@ -581,15 +581,48 @@ func (l *lifecycle) launch(ctx context.Context, sessionName string, env map[stri
 	return nil
 }
 
+// capturePanePID reads back the pid tmux assigned the pane launch just
+// created inside sessionName's current alloc — the in-box liveness probe
+// (opIsRunning) later kill -0's this exact pid rather than trusting the
+// tmux session's mere existence, which alone cannot tell "agent died,
+// nothing reaped the empty session" apart from "agent alive" (08 §3 in-box
+// agent kill row). A lookup failure here is non-fatal to launch itself: it
+// just leaves AgentPID unset, and the probe falls back to a tmux-session-
+// only check.
+func (l *lifecycle) capturePanePID(ctx context.Context, sessionName string) (int, error) {
+	allocID, err := l.currentAlloc(ctx, sessionName)
+	if err != nil {
+		return 0, err
+	}
+	exitCode, out, err := l.client.execAlloc(ctx, allocID, execTaskName, []string{"tmux", "list-panes", "-t", tmuxSessionName, "-F", "#{pane_pid}"})
+	if err != nil {
+		return 0, err
+	}
+	if exitCode != 0 {
+		return 0, fmt.Errorf("tmux list-panes exited %d: %s", exitCode, out)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return 0, fmt.Errorf("parsing pane pid %q: %w", strings.TrimSpace(string(out)), err)
+	}
+	return pid, nil
+}
+
 // markLaunched launches sessionName's agent and, only once that succeeds,
-// records the launched marker in the sidecar binding — shared by opStart
-// (provision then launch) and opRelaunch (launch only, no re-dispatch).
-// env's argvSafe subset rides the launch command (buildLaunchCommand);
-// opRelaunch passes nil since no fresh env accompanies a relaunch.
+// records the launched marker (and the pane pid the probe will later
+// kill -0) in the sidecar binding — shared by opStart (provision then
+// launch) and opRelaunch (launch only, no re-dispatch). env's argvSafe
+// subset rides the launch command (buildLaunchCommand); opRelaunch passes
+// nil since no fresh env accompanies a relaunch.
 func (l *lifecycle) markLaunched(ctx context.Context, sessionName string, env map[string]string) error {
 	if err := l.launch(ctx, sessionName, env); err != nil {
 		return err
 	}
+	// Best-effort: a failure recording the pid does not fail the launch
+	// itself, since the tmux session already exists and answers exec — it
+	// just leaves the probe without a pid to kill -0 (falls back to a
+	// tmux-session-only check).
+	pid, _ := l.capturePanePID(ctx, sessionName)
 	b, ok, err := l.sidecar.load(sessionName)
 	if err != nil {
 		return err
@@ -598,6 +631,7 @@ func (l *lifecycle) markLaunched(ctx context.Context, sessionName string, env ma
 		return fmt.Errorf("session %q binding vanished before launch could be recorded", sessionName)
 	}
 	b.Launched = true
+	b.AgentPID = pid
 	return l.sidecar.save(*b)
 }
 
@@ -780,16 +814,43 @@ func (l *lifecycle) opStop(ctx context.Context, sessionName string) error {
 	return l.sidecar.remove(sessionName)
 }
 
-// opIsRunning reports whether sessionName has a non-terminal child alloc
-// AND is past the launched marker — a provisioned-but-not-launched box
-// (alloc running, launched marker unset) answers false here even though it
-// already answers exec (04 §6 decision table, RPP-PROVISION-001: the
-// launched marker is what distinguishes "provisioned, agent never
-// launched" from "launched, agent died"). Once launched, the per-op
-// honesty split (04 §6) applies: API unavailability answers last-known-good
-// (true, since a binding is still on record) rather than false — flipping
-// to false here would read as confirmed death to gc's heal/quarantine
-// ladders.
+// probeAgentAlive execs an in-box liveness check into allocID: the tmux
+// session launch created (tmuxSessionName) must still exist, AND — when
+// pid was captured at launch (capturePanePID) — that exact process must
+// still answer kill -0. A box whose alloc stays non-terminal but whose
+// agent died inside it (the tmux session and/or its pane process gone) is
+// otherwise indistinguishable from a healthy session to an alloc-status-
+// only check (08 §3 in-box agent kill row). A transport error execing the
+// probe itself is returned to the caller rather than collapsed to
+// alive/dead here — opIsRunning applies its own honesty split to that case.
+func (l *lifecycle) probeAgentAlive(ctx context.Context, allocID string, pid int) (bool, error) {
+	check := fmt.Sprintf("tmux has-session -t %s", tmuxSessionName)
+	if pid > 0 {
+		check += fmt.Sprintf(" && kill -0 %d", pid)
+	}
+	exitCode, _, err := l.client.execAlloc(ctx, allocID, execTaskName, []string{"/bin/sh", "-c", check})
+	if err != nil {
+		return false, err
+	}
+	return exitCode == 0, nil
+}
+
+// opIsRunning reports whether sessionName has a non-terminal child alloc,
+// is past the launched marker, AND the in-box agent itself is still alive —
+// a provisioned-but-not-launched box (alloc running, launched marker unset)
+// answers false here even though it already answers exec (04 §6 decision
+// table, RPP-PROVISION-001: the launched marker is what distinguishes
+// "provisioned, agent never launched" from "launched, agent died"). Once
+// launched, alive=true requires BOTH the alloc to be non-terminal AND
+// probeAgentAlive to confirm the agent process/tmux session is still there
+// — alive=false with the box otherwise healthy means the agent died inside
+// a surviving box (08 §3 in-box agent kill row), which the alloc's
+// ClientStatus alone can never see. The per-op honesty split (04 §6) still
+// applies to every transport fault along the way — listing allocs or
+// execing the probe itself — answering last-known-good (true, since a
+// binding is still on record) rather than false; flipping to false on mere
+// unavailability would read as confirmed death to gc's heal/quarantine
+// ladders, indistinguishable from a genuine agent-dead answer.
 func (l *lifecycle) opIsRunning(ctx context.Context, sessionName string) (bool, error) {
 	b, ok, err := l.sidecar.load(sessionName)
 	if err != nil {
@@ -802,12 +863,23 @@ func (l *lifecycle) opIsRunning(ctx context.Context, sessionName string) (bool, 
 	if err != nil {
 		return true, nil
 	}
+	allocID := ""
 	for _, a := range allocs {
 		if !isTerminalStatus(a.ClientStatus) {
-			return true, nil
+			allocID = a.ID
+			break
 		}
 	}
-	return false, nil
+	if allocID == "" {
+		return false, nil
+	}
+	alive, err := l.probeAgentAlive(ctx, allocID, b.AgentPID)
+	if err != nil {
+		// Transport fault probing in-box liveness: unknown, not confirmed
+		// death — same honesty split as the alloc lookup above.
+		return true, nil
+	}
+	return alive, nil
 }
 
 // opListRunning enumerates every launched, non-terminal session, per 04
