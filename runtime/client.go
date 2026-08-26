@@ -91,24 +91,26 @@ func (c *client) registerJob(ctx context.Context, job nomadJob) error {
 // reports ok=false, err=nil only on a confirmed absence (404) — mirroring
 // errJobGone's meaning elsewhere in this client; any other failure is
 // returned as an error since a lookup failure is not proof of absence. It
-// decodes only NodePool: the one parentJobSpec field beyond namespace that
-// varies at runtime (NRT-P2-05), and so the only field
-// lifecycle.ensureParentRegistered needs to compare against this build's
-// config to decide whether an already-registered parent still matches. A
-// namespace-scoped GET against real Nomad already proves the namespace half
-// of that identity on its own — Nomad 404s a job that exists only in a
-// different namespace rather than returning it.
-func (c *client) getJob(ctx context.Context, jobID string) (nodePool string, ok bool, err error) {
+// decodes NodePool and Meta: NodePool is the one parentJobSpec field beyond
+// namespace that varies at runtime (NRT-P2-05), and Meta carries
+// jobspecHashMetaKey (fnrt-t4l.9) — together the two signals
+// lifecycle.ensureParentRegistered needs to decide whether an
+// already-registered parent still matches this build's jobspec, not only its
+// node pool. A namespace-scoped GET against real Nomad already proves the
+// namespace half of that identity on its own — Nomad 404s a job that exists
+// only in a different namespace rather than returning it.
+func (c *client) getJob(ctx context.Context, jobID string) (nodePool string, meta map[string]string, ok bool, err error) {
 	var out struct {
 		NodePool string
+		Meta     map[string]string
 	}
 	if _, err := c.doIndexed(ctx, defaultTimeout, http.MethodGet, []string{"v1", "job", jobID}, c.nsQuery(), nil, &out); err != nil {
 		if errors.Is(err, errJobGone) {
-			return "", false, nil
+			return "", nil, false, nil
 		}
-		return "", false, err
+		return "", nil, false, err
 	}
-	return out.NodePool, true, nil
+	return out.NodePool, out.Meta, true, nil
 }
 
 type dispatchResult struct {
