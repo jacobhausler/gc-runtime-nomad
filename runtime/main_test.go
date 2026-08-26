@@ -76,6 +76,42 @@ func TestProtocolHandshakeDeclaresProvisionAndExec(t *testing.T) {
 	}
 }
 
+func TestRunCheckWarnsWhenLogSinkUnset(t *testing.T) {
+	t.Setenv(envLogSink, "")
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := run([]string{"check"}, strings.NewReader(""), w, w)
+	w.Close()
+	out, _ := io.ReadAll(r)
+	r.Close()
+	if got != exitOK {
+		t.Fatalf("run(check) = %d, want %d", got, exitOK)
+	}
+	if want := "warning: session logs will not be shipped (GC_NOMAD_LOG_SINK unset)"; !strings.Contains(string(out), want) {
+		t.Fatalf("run(check) output = %q, want warning %q", out, want)
+	}
+}
+
+func TestRunCheckOmitsWarningWhenLogSinkConfigured(t *testing.T) {
+	t.Setenv(envLogSink, "https://logs.example.internal/ingest")
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := run([]string{"check"}, strings.NewReader(""), w, w)
+	w.Close()
+	out, _ := io.ReadAll(r)
+	r.Close()
+	if got != exitOK {
+		t.Fatalf("run(check) = %d, want %d", got, exitOK)
+	}
+	if strings.Contains(string(out), "session logs will not be shipped") {
+		t.Fatalf("run(check) output = %q, want no unset-sink warning", out)
+	}
+}
+
 // TestRunExecReadsCommandFromStdin is a regression test for the exec op's
 // calling convention: docs/reference/exec-session-provider.md carries the
 // command on stdin (invocation is just `exec <name>`), not extra argv. A

@@ -213,6 +213,12 @@ func sessionTask() nomadTask {
 const (
 	logShipperTaskName         = "log-shipper"
 	logShipperMetricsPortLabel = "metrics"
+	// These files are the allocation-local control channel between opStop
+	// and the log-shipper wrapper. They live under NOMAD_ALLOC_DIR, which is
+	// shared by the session task group.
+	logShipperPIDFile       = ".gc-log-shipper.pid"
+	logShipperFlushRequest  = ".gc-log-shipper.flush"
+	logShipperFlushComplete = ".gc-log-shipper.flushed"
 
 	// vectorVersion/vectorArchive/vectorSHA256/vectorURL pin the
 	// log-shipper's own binary artifact ("vector sidecar ... pinned
@@ -255,13 +261,28 @@ const (
 // resolves the Authorization bearer token's VALUE from
 // GC_LOG_SINK_TOKEN_FILE (never the job spec itself, see logShipperConfig)
 // before handing off to vector, mirroring sessionTask's own /bin/sh -c
-// wrapper pattern rather than invoking the fetched binary directly.
+// wrapper pattern rather than invoking the fetched binary directly. It also
+// publishes the vector child pid and records a successful graceful exit
+// after opStop has requested the final flush.
 const logShipperWrapperScript = `set -eu
+pid_file="$NOMAD_ALLOC_DIR/` + logShipperPIDFile + `"
+flush_request="$NOMAD_ALLOC_DIR/` + logShipperFlushRequest + `"
+flush_complete="$NOMAD_ALLOC_DIR/` + logShipperFlushComplete + `"
+rm -f "$pid_file" "$flush_complete"
 if [ -n "${GC_LOG_SINK_TOKEN_FILE:-}" ]; then
   GC_LOG_SINK_TOKEN="$(cat "$GC_LOG_SINK_TOKEN_FILE")"
   export GC_LOG_SINK_TOKEN
 fi
-exec ` + vectorBinPath + ` --config local/vector.toml`
+` + vectorBinPath + ` --config local/vector.toml &
+vector_pid=$!
+printf '%s\n' "$vector_pid" >"$pid_file"
+vector_status=0
+wait "$vector_pid" || vector_status=$?
+rm -f "$pid_file"
+if [ -e "$flush_request" ] && [ "$vector_status" -eq 0 ]; then
+  : >"$flush_complete"
+fi
+exit "$vector_status"`
 
 // logShipperTask builds the log-shipper task added to the session group
 // when cfg.enabled() (fnrt-t4l.13). It shares the group's alloc dir with

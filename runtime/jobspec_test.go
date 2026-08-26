@@ -58,6 +58,21 @@ func TestParentJobSpecAddsLogShipperTask(t *testing.T) {
 	if shipper.Driver != "exec" {
 		t.Fatalf("shipper.Driver = %q, want %q", shipper.Driver, "exec")
 	}
+	if command, ok := shipper.Config["args"].([]string); !ok || len(command) != 2 || command[0] != "-c" {
+		t.Fatalf("shipper.Config[args] = %#v, want shell wrapper args", shipper.Config["args"])
+	} else {
+		wrapper := command[1]
+		for _, want := range []string{
+			logShipperPIDFile,
+			logShipperFlushRequest,
+			logShipperFlushComplete,
+			`wait "$vector_pid" || vector_status=$?`,
+		} {
+			if !strings.Contains(wrapper, want) {
+				t.Errorf("log-shipper wrapper missing %q\ngot:\n%s", want, wrapper)
+			}
+		}
+	}
 	if shipper.KillTimeout <= agent.KillTimeout {
 		t.Fatalf("shipper.KillTimeout = %d, want > agent.KillTimeout = %d (bounded flush window after the leader exits)", shipper.KillTimeout, agent.KillTimeout)
 	}
