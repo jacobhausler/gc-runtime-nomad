@@ -58,6 +58,7 @@ provider = "nomad"
 ```bash
 ./install.sh   # put gc-runtime-nomad on PATH
 gc doctor      # the pack-runtimes check verifies install + handshake
+gc-runtime-nomad check  # warn when session-log shipping is not configured
 ```
 
 Lifecycle ops need Nomad API configuration on the environment:
@@ -123,6 +124,7 @@ bead.
 
 | Op | Notes |
 |----|-------|
+| `check` | Pack-local diagnostic. Emits `warning: session logs will not be shipped (GC_NOMAD_LOG_SINK unset)` to stderr when the optional log sink is unset; does not require Nomad configuration. |
 | `protocol` | `{"version":0,"capabilities":["proc.provision","proc.exec","env.workspace"]}` |
 | `provision` | Registers the parent job (idempotent upsert) if needed, then dispatches a tmux-only child for the session — no agent launched, sidecar launched marker stays unset. Rejects a session with a live child with an "already exists" error (04 §6 wire-contract constant). Reads an optional staging config (JSON) on stdin and materializes it (see `start`'s staging row) before returning. |
 | `start` | `provision` + launch: dispatches, stages an optional workspace/secrets config read as JSON from stdin (`staging.go`'s `stageConfig`, NRT-P1-06 — workspace files land under `WorkDir` and non-`envArgvSafe` env entries land as files under `$NOMAD_SECRETS_DIR`, both via tar-over-exec-stdin, 04 §5), then execs the launch command (`tmux new-session -d -s main`, plus `-e KEY=VALUE` for any `envArgvSafe`-classified env entries) into the alloc, then sets the launched marker. Empty/absent stdin is a no-op config — pre-staging callers are unaffected. Same "already exists" rejection as `provision`. |
@@ -133,8 +135,8 @@ bead.
 | `is-running` | Prints `true`/`false`. False whenever the launched marker is unset, even if the alloc is running (RPP-PROVISION-001: "provisioned, agent never launched" reads as not-running). Once launched, it also execs an in-box liveness probe into the alloc (`tmux has-session -t main`, plus `kill -0 <pid>` on the pane pid `start`/`relaunch` captured) — a box whose alloc stays non-terminal but whose agent died inside it (08 §3 in-box agent kill row) answers `false`, not `true`; ClientStatus alone can never see that gap. The honesty split (04 §6) still governs every transport fault along the way — a lookup error listing allocs, or a transport error execing the probe itself — which answers last-known-good (`true`) rather than `false`; only a definitive, non-transport probe result (the tmux session/pid genuinely gone) reads as agent-dead. |
 | `list-running [prefix]` | Prints one running session name per line — launched sessions only. Enumerates the children-of-parent jobs list (`GET /v1/jobs?meta=true`, 04 §2.1 rule 2/3) rather than trusting the sidecar as the existence source, decodes each non-terminal child's `gc_session` Meta key, and — when a prefix argument is given — filters the decoded names to it (`ListRunning(prefix)`, E2a amendment A-1). The sidecar is still consulted for the launched marker, which the children list alone cannot answer. Exits 1 on any lookup error rather than returning a partial list. |
 
-Every other operation exits 2 — the RPP forward-compatibility signal the
-caller treats as a no-op success.
+Every other operation besides the pack-local `check` diagnostic exits 2 — the
+RPP forward-compatibility signal the caller treats as a no-op success.
 
 ## Out of scope
 

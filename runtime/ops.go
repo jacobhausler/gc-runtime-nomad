@@ -844,7 +844,10 @@ func (l *lifecycle) opStop(ctx context.Context, sessionName string) error {
 	// it must not prevent the local egress attempt or the deregister below.
 	needEgress := !b.EgressComplete && !b.EvidenceLost
 	if l.logShipper.enabled() && !b.EvidenceLost {
-		if err := l.flushLogShipper(ctx, b.ChildJobID); err != nil {
+		allocID, err := l.currentAlloc(ctx, sessionName)
+		if err != nil {
+			b.EvidenceLost = true
+		} else if err := l.flushLogShipper(ctx, allocID); err != nil {
 			b.EvidenceLost = true
 		}
 	}

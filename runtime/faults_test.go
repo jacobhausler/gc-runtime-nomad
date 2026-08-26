@@ -693,6 +693,16 @@ func TestFaultStopSuite(t *testing.T) {
 		if !after.EvidenceLost {
 			t.Fatalf("binding after failed shipper flush = %+v, want evidence_lost marker", after)
 		}
+		actualExecs := 0
+		wantExecPrefix := "GET /v1/client/allocation/" + allocs[0].ID + "/exec"
+		for _, req := range srv.Trace() {
+			if strings.HasPrefix(req, wantExecPrefix) {
+				actualExecs++
+			}
+		}
+		if actualExecs < 2 {
+			t.Fatalf("faulted shipper flush reached allocation exec %d time(s), want agent stop plus flush: trace = %v", actualExecs, srv.Trace())
+		}
 	})
 
 	t.Run("stop during outage exits with a failure", func(t *testing.T) {

@@ -552,20 +552,44 @@ func TestOpStopFlushesLogShipperBeforeEgress(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("load binding after start: (%v, %v, %v)", b, ok, err)
 	}
+	allocs, _, err := l.client.listAllocsForJob(ctx, b.ChildJobID, 0, 0)
+	if err != nil || len(allocs) != 1 {
+		t.Fatalf("listAllocsForJob(%q) = (%v, %v), want one allocation", b.ChildJobID, allocs, err)
+	}
+	allocID := allocs[0].ID
+	// fakenomad deliberately does not materialize Nomad artifact stanzas, so
+	// install a tiny controllable shipper process in the alloc. This makes
+	// the ordering assertion cover a successful flush, not only the failure
+	// path exercised by faults_test.go.
+	const shipperFixture = `set -eu
+nohup /bin/sh -c 'trap "touch $NOMAD_ALLOC_DIR/.gc-log-shipper.flushed; exit 0" TERM; while :; do sleep 1; done' </dev/null >/dev/null 2>&1 &
+printf '%s\n' "$!" >"$NOMAD_ALLOC_DIR/.gc-log-shipper.pid"
+`
+	if exitCode, out, err := l.client.execAlloc(ctx, allocID, execTaskName, []string{"/bin/sh", "-c", shipperFixture}); err != nil || exitCode != 0 {
+		t.Fatalf("install shipper fixture: exit=%d output=%q err=%v", exitCode, out, err)
+	}
+	// Keep the binding inspectable after the ordering run so the test can
+	// prove that successful flush and egress were both recorded before the
+	// final deregister attempt.
+	srv.FailNext("DELETE", "/v1/job/"+b.ChildJobID, 500, `{"error":"inspect stop receipt"}`)
 	before := len(srv.Trace())
 
-	if err := l.opStop(ctx, session); err != nil {
-		t.Fatalf("stop: %v", err)
+	if err := l.opStop(ctx, session); err == nil {
+		t.Fatalf("stop with an injected deregister failure = nil, want failure")
 	}
 	trace := srv.Trace()[before:]
 
 	var exec, cat, dereg int
 	firstExec, secondExec := -1, -1
 	cat, dereg = -1, -1
+	wantExecPrefix := "GET /v1/client/allocation/" + allocID + "/exec"
 	for i, req := range trace {
 		switch {
 		case strings.HasPrefix(req, "GET /v1/client/allocation/") && strings.HasSuffix(req, "/exec"):
 			exec++
+			if !strings.HasPrefix(req, wantExecPrefix) {
+				t.Fatalf("alloc-exec target = %q, want allocation %q; trace = %v", req, allocID, trace)
+			}
 			if firstExec == -1 {
 				firstExec = i
 			} else if secondExec == -1 {
@@ -587,6 +611,13 @@ func TestOpStopFlushesLogShipperBeforeEgress(t *testing.T) {
 	}
 	if !(firstExec < secondExec && secondExec < cat && cat < dereg) {
 		t.Fatalf("stop ordering = agent exec %d, shipper exec %d, egress %d, deregister %d; trace = %v", firstExec, secondExec, cat, dereg, trace)
+	}
+	after, ok, err := l.sidecar.load(session)
+	if err != nil || !ok {
+		t.Fatalf("sidecar.load(%q) after injected deregister failure = (%+v, %v, %v)", session, after, ok, err)
+	}
+	if after.EvidenceLost || !after.EgressComplete {
+		t.Fatalf("stop receipt after successful shipper flush = %+v, want egress_complete without evidence_lost", after)
 	}
 }
 
