@@ -113,7 +113,7 @@ func TestFaultTimeoutMidDispatch(t *testing.T) {
 	ctx := context.Background()
 	const session = "sess-timeout"
 
-	if err := l.client.registerJob(ctx, parentJobSpec("default", l.nodePool, l.parentJobID)); err != nil {
+	if err := l.client.registerJob(ctx, parentJobSpec("default", l.nodePool, l.parentJobID, logShipperConfig{})); err != nil {
 		t.Fatalf("registerJob: %v", err)
 	}
 	srv.DelayNext("POST", "/v1/job/"+l.parentJobID+"/dispatch", 300*time.Millisecond)
@@ -142,7 +142,7 @@ func TestFaultSlowServer(t *testing.T) {
 	ctx := context.Background()
 	const session = "sess-slow"
 
-	if err := l.client.registerJob(ctx, parentJobSpec("default", l.nodePool, l.parentJobID)); err != nil {
+	if err := l.client.registerJob(ctx, parentJobSpec("default", l.nodePool, l.parentJobID, logShipperConfig{})); err != nil {
 		t.Fatalf("registerJob: %v", err)
 	}
 	srv.DelayNext("POST", "/v1/job/"+l.parentJobID+"/dispatch", 300*time.Millisecond)
@@ -492,7 +492,7 @@ func TestFaultCrashPointSuite(t *testing.T) {
 		ctx := context.Background()
 		const session = "sess-crash-orphan"
 
-		if err := l.client.registerJob(ctx, parentJobSpec("default", l.nodePool, l.parentJobID)); err != nil {
+		if err := l.client.registerJob(ctx, parentJobSpec("default", l.nodePool, l.parentJobID, logShipperConfig{})); err != nil {
 			t.Fatalf("registerJob: %v", err)
 		}
 		nonce, err := newNonce()
