@@ -125,6 +125,29 @@ bead.
 Every other operation exits 2 — the RPP forward-compatibility signal the
 caller treats as a no-op success.
 
+### Roles
+
+The lab ACL model splits acting into two roles:
+
+- **Operator** — cluster-side actions: node drain, client restarts,
+  partitions, snapshot/restore, upgrades, and force-leave. These use the
+  management token (or root) and are never part of the pack's session path.
+- **Pack session path** — dispatch, launch, peek, stop, is-running, and
+  list-running run only on the narrowed runtime token and never need
+  register-job: a matching parent job makes the registration check a
+  read-only no-op, and a missing or drifted one fails the op with a
+  re-registration error.
+
+### Parent job lifecycle
+
+`gc-sessions` is registered once, via the pack, with the management token
+(run `provision` or `start` once with `GC_NOMAD_TOKEN` set to the management
+token), and stamped with the `gc_jobspec_hash` fingerprint of its jobspec.
+After **any** jobspec change — task spec or node pool — re-register it the
+same way. Until then the pack reports `parent job "gc-sessions" is stale —
+re-register with a management token` and refuses to dispatch; the runtime
+token cannot fix the drift in place.
+
 ## Out of scope
 
 - Retention policy for egressed transcript/evidence files (owner decision,
