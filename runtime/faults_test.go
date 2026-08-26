@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -226,6 +227,48 @@ func TestFaultLostAlloc(t *testing.T) {
 		if n == session {
 			t.Fatalf("list-running still includes %q after its only alloc went lost", session)
 		}
+	}
+}
+
+// TestFaultTaskExitedBeforeLaunch covers the NRT-P2-06.1 regression: a
+// session task that has already exited (terminal alloc) by the time an op
+// needs to exec into the box — the /bin/true placeholder's failure mode on
+// a real client, simulated directly here rather than racing a real
+// process's exit — must fail clearly (errSessionNotFound: no non-terminal
+// alloc) instead of silently launching into a dead alloc, and must not
+// wedge a subsequent fresh start.
+func TestFaultTaskExitedBeforeLaunch(t *testing.T) {
+	l, srv := newTestLifecycle(t)
+	ctx := context.Background()
+	const session = "sess-task-exited-early"
+
+	if err := l.opProvision(ctx, session); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	b, ok, err := l.sidecar.load(session)
+	if err != nil || !ok || b.ChildJobID == "" {
+		t.Fatalf("sidecar.load(%q) after provision = (%+v, %v, %v)", session, b, ok, err)
+	}
+	allocs, _, err := l.client.listAllocsForJob(ctx, b.ChildJobID, 0, 0)
+	if err != nil || len(allocs) != 1 {
+		t.Fatalf("listAllocsForJob = (%v, %v), want exactly one alloc", allocs, err)
+	}
+	srv.SetAllocStatus(allocs[0].ID, "complete")
+
+	if err := l.opRelaunch(ctx, session); err == nil {
+		t.Fatalf("relaunch onto a pre-launch-terminal alloc = nil error, want failure")
+	} else if !errors.Is(err, errSessionNotFound) {
+		t.Fatalf("relaunch onto a pre-launch-terminal alloc = %v, want an errSessionNotFound-wrapped error (nothing live to exec into)", err)
+	}
+
+	// A fresh start must not wedge behind the dead child: dispatch's
+	// "already exists" guard only fires for a still-live child, so start
+	// transparently redispatches and the session comes up normally.
+	if err := l.opStart(ctx, session); err != nil {
+		t.Fatalf("start after the dead child = %v, want nil (fresh dispatch)", err)
+	}
+	if running, err := l.opIsRunning(ctx, session); err != nil || !running {
+		t.Fatalf("is-running after fresh start = (%v, %v), want (true, nil)", running, err)
 	}
 }
 

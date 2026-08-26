@@ -720,6 +720,16 @@ func (l *lifecycle) opStop(ctx context.Context, sessionName string) error {
 		return l.sidecar.remove(sessionName)
 	}
 
+	// Best-effort: end the agent's tmux session before the task itself is
+	// killed below (NRT-P2-06.1). The task's own exit is independent of
+	// this — jobspec.go's sessionSupervisorScript traps SIGTERM and exits 0
+	// on its own once deregister signals it — but tmux's server process is
+	// a detached daemon outside the task's process tree once launch starts
+	// it (buildLaunchCommand), so nothing else ever reaps it. Any failure
+	// here (alloc already terminal, transport fault) is ignored — the
+	// deregister call below is what actually confirms terminal either way.
+	_ = l.runDrivingVerb(ctx, sessionName, "stop-kill-session", []string{"tmux", "kill-session", "-t", tmuxSessionName})
+
 	// Egress transcript/evidence before deregister makes them unreachable.
 	// A failing egress gets egressMaxAttempts bounded retries (R2b-04); if
 	// it still hasn't succeeded, stop PROCEEDS rather than wedging behind

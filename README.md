@@ -110,7 +110,7 @@ bead.
 | `exec` | Runs a command inside the session's current alloc over the Nomad alloc-exec WebSocket and streams its stdout; **the op's own exit code is the remote command's exit code** (04 §3 exec row, RPP-CONN-001) — not the 0/1/2 lifecycle-op convention. Works regardless of the launched marker — a provisioned-but-not-launched box already answers exec (RPP-PROVISION-001). |
 | `relaunch` | Re-execs the launch command into the SAME alloc — no fresh dispatch, no fresh env — then sets the launched marker (04 §7 warm relaunch, launch-only fingerprint drift). Fails if the session has no live alloc to relaunch into. |
 | `nudge` / `peek` / `interrupt` / `send-keys` / `clear-scrollback` | The driving verbs (NRT-P1-05), realized as tmux commands sent into the session's tmux pane over the same exec mechanism. `nudge`/`interrupt` are best-effort — a not-found session answers success rather than an error, per the RPP's best-effort convention. |
-| `stop` | If `GC_NOMAD_EGRESS_DIR` is set, first copies the session's transcript/evidence files (via the Nomad client fs API) into it, retrying up to 3 times before giving up and marking the tombstone `evidence_lost` rather than wedging (R2b-04); a successful egress receipts completion in the sidecar instead. Then deregisters the session's child job without purge, confirms terminal via a blocking read, and tombstones the sidecar binding. Idempotent — a session with no binding is a no-op success, and a stop that fails after egress but before deregister does not re-attempt egress on retry. |
+| `stop` | Best-effort `tmux kill-session` for the agent's session before anything else (NRT-P2-06.1) — the task's own exit is independent of this (its supervisor script traps and exits on Nomad's own SIGTERM), but tmux's server is a detached daemon nothing else reaps. If `GC_NOMAD_EGRESS_DIR` is set, then copies the session's transcript/evidence files (via the Nomad client fs API) into it, retrying up to 3 times before giving up and marking the tombstone `evidence_lost` rather than wedging (R2b-04); a successful egress receipts completion in the sidecar instead. Then deregisters the session's child job without purge, confirms terminal via a blocking read, and tombstones the sidecar binding. Idempotent — a session with no binding is a no-op success, and a stop that fails after egress but before deregister does not re-attempt egress on retry. |
 | `is-running` | Prints `true`/`false`. False whenever the launched marker is unset, even if the alloc is running (RPP-PROVISION-001: "provisioned, agent never launched" reads as not-running). Once launched, the honesty split (04 §6) applies — Nomad API unavailability never flips this to `false`, it answers last-known-good instead. |
 | `list-running [prefix]` | Prints one running session name per line — launched sessions only. Enumerates the children-of-parent jobs list (`GET /v1/jobs?meta=true`, 04 §2.1 rule 2/3) rather than trusting the sidecar as the existence source, decodes each non-terminal child's `gc_session` Meta key, and — when a prefix argument is given — filters the decoded names to it (`ListRunning(prefix)`, E2a amendment A-1). The sidecar is still consulted for the launched marker, which the children list alone cannot answer. Exits 1 on any lookup error rather than returning a partial list. |
 
@@ -124,10 +124,14 @@ caller treats as a no-op success.
   directory listing/discovery either, just the two well-known files
   (`ops.go`'s `egressFiles`).
 - Remote artifact blocks and the env.ledger tunnel (`NRT-P1-06`) — staging
-  only materializes what a caller sends inline on stdin; the parent job's
-  task is still a structurally-valid tmux-only placeholder (`jobspec.go`),
-  not a real agent-bootstrap supervisor binary, and the launch command is a
-  bare `tmux new-session` (plus `-e` flags), not a real agent command line.
+  only materializes what a caller sends inline on stdin; the launch command
+  is still a bare `tmux new-session` (plus `-e` flags), not a real agent
+  command line. The session task's own command (`jobspec.go`'s
+  `sessionSupervisorScript`, NRT-P2-06.1) is a real long-lived
+  trap-and-loop that keeps the alloc alive until stop — no longer the
+  `/bin/true` placeholder that used to exit immediately on a real client —
+  but it carries no agent itself; the agent is still launched afterward as
+  a separate detached tmux-client command over alloc-exec.
 - `PackOverlayDirs`/`OverlayDir` merge semantics (04 §5's overlay-precedence
   rules) — `stageConfig.Files` is this pack's own flat CopyFiles-analog
   channel; provider-side overlay resolution is not reimplemented.

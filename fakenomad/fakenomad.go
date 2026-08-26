@@ -57,6 +57,14 @@ type Job struct {
 	Dispatched  bool
 	Meta        map[string]string
 	ModifyIndex uint64
+
+	// Command is the first task group's first task's exec-driver command
+	// (Config's "command"/"args" pair, task-lifetime modeling for
+	// NRT-P2-06.1) — empty for a job registered with no task Config, which
+	// keeps every pre-existing caller that registers a bare `{"ID": ...}`
+	// job unaffected. A dispatched child inherits its parent's Command
+	// (dispatch requests never carry their own TaskGroups).
+	Command []string
 }
 
 // Allocation is the fake's minimal record of a placed allocation.
@@ -96,6 +104,17 @@ type fault struct {
 	passthrough bool
 }
 
+// taskProc is the fake's live handle on a dispatched job's own task-command
+// subprocess (task-lifetime modeling, NRT-P2-06.1) — as opposed to a
+// caller's alloc-exec commands, which run and complete synchronously via
+// runCommand. done closes once the background Wait() goroutine has resolved
+// the alloc's terminal ClientStatus, so Close can bound how long it waits on
+// a killed process before giving up.
+type taskProc struct {
+	cmd  *exec.Cmd
+	done chan struct{}
+}
+
 // Server is a fake Nomad API server. Zero value is not usable; construct
 // with NewServer. Safe for concurrent use.
 type Server struct {
@@ -106,6 +125,7 @@ type Server struct {
 	allocs     map[string]*Allocation
 	allocFiles map[string]map[string]string // allocID -> path -> content
 	execDirs   map[string]string            // allocID -> its exec scratch dir (lazy)
+	taskProcs  map[string]*taskProc         // allocID -> its running task-command subprocess (lazy)
 	faults     []fault
 	dispSeq    uint64
 	trace      []string
@@ -154,6 +174,7 @@ func newServer() *Server {
 		allocs:     map[string]*Allocation{},
 		allocFiles: map[string]map[string]string{},
 		execDirs:   map[string]string{},
+		taskProcs:  map[string]*taskProc{},
 		execRoot:   execRoot,
 	}
 }
@@ -187,9 +208,27 @@ func (s *Server) Close() {
 	for _, d := range s.execDirs {
 		dirs = append(dirs, d)
 	}
+	procs := make([]*taskProc, 0, len(s.taskProcs))
+	for _, p := range s.taskProcs {
+		procs = append(procs, p)
+	}
 	s.mu.Unlock()
 
 	s.httpSrv.Close()
+	// Kill every still-live task-command subprocess (task-lifetime
+	// modeling, NRT-P2-06.1) before the tmux-kill-server sweep below: a
+	// session supervisor script polls on a 5s interval, far longer than a
+	// caller should ever wait on Close, so this reaps it directly instead
+	// of waiting for it to notice its tmux server died.
+	for _, p := range procs {
+		if p.cmd.Process != nil {
+			_ = p.cmd.Process.Kill()
+		}
+		select {
+		case <-p.done:
+		case <-time.After(2 * time.Second):
+		}
+	}
 	for _, d := range dirs {
 		cmd := exec.Command("tmux", "kill-server")
 		cmd.Env = isolatedTmuxEnv(d, "")
@@ -406,10 +445,15 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) registerJob(w http.ResponseWriter, r *http.Request, pathID string) {
 	var req struct {
 		Job struct {
-			ID        string            `json:"ID"`
-			Namespace string            `json:"Namespace"`
-			NodePool  string            `json:"NodePool"`
-			Meta      map[string]string `json:"Meta"`
+			ID         string            `json:"ID"`
+			Namespace  string            `json:"Namespace"`
+			NodePool   string            `json:"NodePool"`
+			Meta       map[string]string `json:"Meta"`
+			TaskGroups []struct {
+				Tasks []struct {
+					Config map[string]any `json:"Config"`
+				} `json:"Tasks"`
+			} `json:"TaskGroups"`
 		} `json:"Job"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
@@ -425,10 +469,14 @@ func (s *Server) registerJob(w http.ResponseWriter, r *http.Request, pathID stri
 	if ns == "" {
 		ns = "default"
 	}
+	var command []string
+	if len(req.Job.TaskGroups) > 0 && len(req.Job.TaskGroups[0].Tasks) > 0 {
+		command = taskCommand(req.Job.TaskGroups[0].Tasks[0].Config)
+	}
 
 	s.mu.Lock()
 	idx := s.bumpIndexLocked()
-	s.jobs[id] = &Job{ID: id, Namespace: ns, NodePool: req.Job.NodePool, Meta: req.Job.Meta, ModifyIndex: idx}
+	s.jobs[id] = &Job{ID: id, Namespace: ns, NodePool: req.Job.NodePool, Meta: req.Job.Meta, Command: command, ModifyIndex: idx}
 	s.mu.Unlock()
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -521,7 +569,8 @@ func (s *Server) dispatchJob(w http.ResponseWriter, r *http.Request, parentID st
 	s.dispSeq++
 	childID := fmt.Sprintf("%s/dispatch-%d-%06x", parentID, time.Now().UTC().Unix(), s.dispSeq)
 	idx := s.bumpIndexLocked()
-	s.jobs[childID] = &Job{ID: childID, Namespace: parent.Namespace, NodePool: parent.NodePool, ParentID: parentID, Dispatched: true, Meta: req.Meta, ModifyIndex: idx}
+	command := parent.Command
+	s.jobs[childID] = &Job{ID: childID, Namespace: parent.Namespace, NodePool: parent.NodePool, ParentID: parentID, Dispatched: true, Meta: req.Meta, Command: command, ModifyIndex: idx}
 
 	allocID := fmt.Sprintf("alloc-%06x", s.dispSeq)
 	allocIdx := s.bumpIndexLocked()
@@ -535,6 +584,18 @@ func (s *Server) dispatchJob(w http.ResponseWriter, r *http.Request, parentID st
 	}
 	s.allocFiles[allocID] = defaultAllocFiles(allocID)
 	s.mu.Unlock()
+
+	// Actually run the task's own command as a real subprocess so the
+	// alloc's ClientStatus reflects its real lifetime (task-lifetime
+	// modeling, NRT-P2-06.1) — a job registered with no task Config (every
+	// pre-existing bare `{"ID": ...}` caller) leaves command empty and
+	// this is a no-op, keeping ClientStatus "pending" exactly as before.
+	// Synchronous so the dispatch response never races ahead of it: by the
+	// time this call returns, the task has either started (ClientStatus
+	// "running") or failed to start (ClientStatus "failed").
+	if len(command) > 0 {
+		s.startTask(allocID, command)
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"DispatchedJobID": childID,
@@ -593,16 +654,23 @@ func (s *Server) readJob(w http.ResponseWriter, r *http.Request, id string) {
 	})
 }
 
+// listAllocsForJob and its siblings below copy each matched Allocation by
+// value while still holding s.mu, rather than letting a *Allocation escape
+// the lock into writeJSON's later JSON-encode: task-lifetime modeling
+// (startTask) now mutates a live Allocation's ClientStatus/ModifyIndex from
+// a background goroutine at any time, so a pointer read here without the
+// lock held is a genuine data race (caught by `go test -race` once a
+// dispatched job's task actually runs), not just a theoretical one.
 func (s *Server) listAllocsForJob(w http.ResponseWriter, r *http.Request, jobID string) {
 	if since, wait, blocking := blockingParams(r); blocking {
 		s.blockUntil(since, wait)
 	}
 	s.mu.Lock()
 	idx := s.index
-	var out []*Allocation
+	var out []Allocation
 	for _, a := range s.allocs {
 		if a.JobID == jobID {
-			out = append(out, a)
+			out = append(out, *a)
 		}
 	}
 	s.mu.Unlock()
@@ -616,9 +684,9 @@ func (s *Server) listAllocs(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	idx := s.index
-	var out []*Allocation
+	out := make([]Allocation, 0, len(s.allocs))
 	for _, a := range s.allocs {
-		out = append(out, a)
+		out = append(out, *a)
 	}
 	s.mu.Unlock()
 	w.Header().Set("X-Nomad-Index", strconv.FormatUint(idx, 10))
@@ -631,6 +699,10 @@ func (s *Server) readAlloc(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	s.mu.Lock()
 	a, ok := s.allocs[id]
+	var alloc Allocation
+	if ok {
+		alloc = *a
+	}
 	idx := s.index
 	s.mu.Unlock()
 	if !ok {
@@ -640,12 +712,12 @@ func (s *Server) readAlloc(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	w.Header().Set("X-Nomad-Index", strconv.FormatUint(idx, 10))
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ID":            a.ID,
-		"JobID":         a.JobID,
-		"Namespace":     a.Namespace,
-		"DesiredStatus": a.DesiredStatus,
-		"ClientStatus":  a.ClientStatus,
-		"ModifyIndex":   a.ModifyIndex,
+		"ID":            alloc.ID,
+		"JobID":         alloc.JobID,
+		"Namespace":     alloc.Namespace,
+		"DesiredStatus": alloc.DesiredStatus,
+		"ClientStatus":  alloc.ClientStatus,
+		"ModifyIndex":   alloc.ModifyIndex,
 	})
 }
 
@@ -668,6 +740,7 @@ func (s *Server) deregisterJob(w http.ResponseWriter, r *http.Request, id string
 	if purge {
 		delete(s.jobs, id)
 	}
+	var toKill []*exec.Cmd
 	for _, a := range s.allocs {
 		if a.JobID != id {
 			continue
@@ -678,8 +751,21 @@ func (s *Server) deregisterJob(w http.ResponseWriter, r *http.Request, id string
 		a.DesiredStatus = "stop"
 		a.ClientStatus = "complete"
 		a.ModifyIndex = idx
+		if p, ok := s.taskProcs[a.ID]; ok {
+			toKill = append(toKill, p.cmd)
+		}
 	}
 	s.mu.Unlock()
+
+	// Kill each force-completed alloc's real task-command subprocess
+	// (task-lifetime modeling, NRT-P2-06.1) — mirrors real Nomad killing
+	// the task on deregister. The background Wait() goroutine (startTask)
+	// sees the alloc already terminal and leaves ClientStatus alone.
+	for _, cmd := range toKill {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"EvalID":          "",
@@ -787,6 +873,81 @@ func (s *Server) runCommand(allocID string, command []string, stdin []byte) (int
 	// generic failure with the error appended to whatever output exists.
 	out.WriteString(err.Error())
 	return 1, out.Bytes()
+}
+
+// taskCommand extracts the exec-driver "command"/"args" pair from a Nomad
+// task Config block (map[string]any, matching the wire JSON shape a real
+// job register body carries) — the subset this fake needs to actually run a
+// dispatched job's task as a real subprocess (task-lifetime modeling,
+// NRT-P2-06.1). Returns nil for a Config with no (or non-string) "command",
+// which callers treat as "no task to run" rather than an error.
+func taskCommand(cfg map[string]any) []string {
+	command, _ := cfg["command"].(string)
+	if command == "" {
+		return nil
+	}
+	out := []string{command}
+	if rawArgs, ok := cfg["args"].([]any); ok {
+		for _, a := range rawArgs {
+			if s, ok := a.(string); ok {
+				out = append(out, s)
+			}
+		}
+	}
+	return out
+}
+
+// startTask runs command as a real subprocess standing in for Nomad's exec
+// driver actually running a dispatched job's task (task-lifetime modeling,
+// NRT-P2-06.1) and drives allocID's ClientStatus accordingly: "running" once
+// it starts, "failed" if it never starts, and "complete"/"failed" once it
+// exits — the model a fixed-status alloc cannot express, and the one
+// NRT-P2-06.1 needs to catch a task command (like the placeholder /bin/true
+// this pack used to dispatch) that exits before launch's alloc-exec call can
+// ever reach the box. Starting is synchronous (the caller — dispatchJob —
+// blocks on it) so the dispatch response is never observed before the
+// alloc's ClientStatus reflects whether the task actually started; only the
+// exit wait runs in the background.
+func (s *Server) startTask(allocID string, command []string) {
+	dir := s.allocScratchDir(allocID)
+	cmd := exec.Command(command[0], command[1:]...)
+	cmd.Dir = dir
+	cmd.Env = isolatedTmuxEnv(dir, "")
+
+	err := cmd.Start()
+
+	s.mu.Lock()
+	a, ok := s.allocs[allocID]
+	if err != nil {
+		if ok {
+			a.ClientStatus = "failed"
+			a.ModifyIndex = s.bumpIndexLocked()
+		}
+		s.mu.Unlock()
+		return
+	}
+	done := make(chan struct{})
+	s.taskProcs[allocID] = &taskProc{cmd: cmd, done: done}
+	if ok {
+		a.ClientStatus = "running"
+		a.ModifyIndex = s.bumpIndexLocked()
+	}
+	s.mu.Unlock()
+
+	go func() {
+		waitErr := cmd.Wait()
+		s.mu.Lock()
+		if a, ok := s.allocs[allocID]; ok && !terminalAllocStatus(a.ClientStatus) {
+			if waitErr == nil {
+				a.ClientStatus = "complete"
+			} else {
+				a.ClientStatus = "failed"
+			}
+			a.ModifyIndex = s.bumpIndexLocked()
+		}
+		close(done)
+		s.mu.Unlock()
+	}()
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

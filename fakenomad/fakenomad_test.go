@@ -282,6 +282,89 @@ func TestDeregisterWithoutPurge(t *testing.T) {
 	}
 }
 
+// TestTaskLifetimeReflectsRealProcess drives fakenomad's task-lifetime
+// modeling (NRT-P2-06.1): a dispatched job's task Config command runs as a
+// real subprocess, and the alloc's ClientStatus tracks it — "running" while
+// it is alive, terminal once it exits. This is what makes the /bin/true
+// placeholder bug (a task command that exits immediately, driving the alloc
+// terminal before launch's alloc-exec call could ever reach it) visible to
+// this offline suite at all: a job registered with no task Config (every
+// pre-existing bare `{"ID": ...}` caller, e.g. TestDeregisterWithoutPurge)
+// is unaffected and stays "pending" until an explicit SetAllocStatus or
+// deregister, exactly as before this modeling landed.
+func TestTaskLifetimeReflectsRealProcess(t *testing.T) {
+	srv := NewServer()
+	defer srv.Close()
+
+	cases := []struct {
+		name         string
+		command      []string
+		wantTerminal bool
+	}{
+		{name: "exits-immediately", command: []string{"true"}, wantTerminal: true},
+		{name: "long-lived", command: []string{"sh", "-c", "sleep 5"}, wantTerminal: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			jobID := "job-" + tc.name
+			job := map[string]any{
+				"ID": jobID,
+				"TaskGroups": []map[string]any{{
+					"Tasks": []map[string]any{{
+						"Config": map[string]any{"command": tc.command[0], "args": tc.command[1:]},
+					}},
+				}},
+			}
+			status, _ := httpJSON(t, http.MethodPost, srv.URL()+"/v1/jobs", map[string]any{"Job": job}, &map[string]any{})
+			if status != http.StatusOK {
+				t.Fatalf("register: status = %d, want 200", status)
+			}
+
+			var dispatchOut map[string]any
+			status, _ = httpJSON(t, http.MethodPost, srv.URL()+"/v1/job/"+jobID+"/dispatch", map[string]any{}, &dispatchOut)
+			if status != http.StatusOK {
+				t.Fatalf("dispatch: status = %d, want 200", status)
+			}
+			childID, _ := dispatchOut["DispatchedJobID"].(string)
+
+			var allocs []map[string]any
+			status, _ = httpJSON(t, http.MethodGet, srv.URL()+"/v1/job/"+childID+"/allocations", nil, &allocs)
+			if status != http.StatusOK || len(allocs) != 1 {
+				t.Fatalf("list allocations = (%d, %v), want one alloc", status, allocs)
+			}
+			// dispatchJob starts the task command synchronously before
+			// answering the dispatch request, so ClientStatus is never
+			// observably "pending" here regardless of how fast the command
+			// itself exits.
+			if got, _ := allocs[0]["ClientStatus"].(string); got != "running" {
+				t.Fatalf("ClientStatus immediately after dispatch = %q, want %q", got, "running")
+			}
+
+			if tc.wantTerminal {
+				deadline := time.Now().Add(2 * time.Second)
+				for {
+					httpJSON(t, http.MethodGet, srv.URL()+"/v1/job/"+childID+"/allocations", nil, &allocs)
+					got, _ := allocs[0]["ClientStatus"].(string)
+					if got == "complete" || got == "failed" {
+						break
+					}
+					if time.Now().After(deadline) {
+						t.Fatalf("ClientStatus never went terminal after the task command exited, stuck at %q", got)
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+			} else {
+				time.Sleep(200 * time.Millisecond)
+				httpJSON(t, http.MethodGet, srv.URL()+"/v1/job/"+childID+"/allocations", nil, &allocs)
+				if got, _ := allocs[0]["ClientStatus"].(string); got != "running" {
+					t.Fatalf("ClientStatus after 200ms of a long-lived task = %q, want still %q", got, "running")
+				}
+			}
+		})
+	}
+}
+
 // TestDeregisterWithPurge confirms ?purge=true removes the job record
 // outright, so a subsequent read 404s (confirmed absence, per the wire rule
 // that only a 200-children-list-lacking-the-entry or a direct 404 counts).
