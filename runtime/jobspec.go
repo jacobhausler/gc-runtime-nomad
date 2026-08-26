@@ -90,20 +90,31 @@ func sessionTaskGroup() nomadTaskGroup {
 	}
 }
 
+// sessionSupervisorScript is the session task's own long-lived command (04
+// §3 provision row + NRT-P2-06.1): a trap-and-loop that does nothing but
+// stay alive until it is signaled, so the task — and therefore the alloc —
+// stays running for the box's whole lifetime instead of exiting the instant
+// Config.command returns. The placeholder this replaces (`/bin/true`)
+// exited immediately on a real client, driving the alloc terminal before
+// launch's alloc-exec call could ever reach it
+// (ops/receipts/nrt-p2-06-1-density.md). It deliberately never touches tmux
+// itself: buildLaunchCommand (ops.go) is what creates the tmuxSessionName
+// session over alloc-exec, and a supervisor that pre-created that same
+// session would collide with it ("duplicate session"). `wait "$!"` on a
+// backgrounded sleep (rather than a foreground `sleep`) is what lets the
+// TERM trap fire immediately instead of only between sleep ticks, so stop
+// exits this loop with code 0 promptly — well inside kill_timeout — rather
+// than needing Nomad's SIGKILL fallback once kill_timeout elapses.
+const sessionSupervisorScript = `trap 'exit 0' TERM; while :; do sleep 5 & wait "$!"; done`
+
 func sessionTask() nomadTask {
 	return nomadTask{
-		Name: "agent",
-		// Provision dispatches a tmux-ONLY task (04 §3 provision row): the
-		// task's own command is a bare supervisor that starts the tmux
-		// server and exits when it dies, carrying no agent. The agent is
-		// launched afterward as a separate detached tmux-client command
-		// over alloc-exec (ops.go's launch/launchCommand) — never baked
-		// into this task's command. Wiring a real tmux-server supervisor
-		// binary into Config is staging work (untestable against
-		// fakenomad, which never executes task commands); this placeholder
-		// keeps the job spec structurally valid for dispatch.
+		Name:   "agent",
 		Driver: "exec",
-		Config: map[string]any{"command": "/bin/true"},
+		Config: map[string]any{
+			"command": "/bin/sh",
+			"args":    []string{"-c", sessionSupervisorScript},
+		},
 		Resources: nomadResources{
 			CPU:      sessionCPU,
 			MemoryMB: sessionMemoryMB,
