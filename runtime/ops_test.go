@@ -534,6 +534,62 @@ func countFSCat(trace []string) int {
 	return n
 }
 
+// TestOpStopFlushesLogShipperBeforeEgress confirms the stop ordering for an
+// enabled log shipper: the agent stop command completes first, then the
+// shipper flush command, then the transcript/evidence egress, and only then
+// the child-job deregister.
+func TestOpStopFlushesLogShipperBeforeEgress(t *testing.T) {
+	l, srv := newTestLifecycle(t)
+	l.egressDir = t.TempDir()
+	l.logShipper = logShipperConfig{Sink: "https://logs.example.internal/ingest"}
+	ctx := context.Background()
+	const session = "sess-log-stop-order"
+
+	if err := l.opStart(ctx, session); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	b, ok, err := l.sidecar.load(session)
+	if err != nil || !ok {
+		t.Fatalf("load binding after start: (%v, %v, %v)", b, ok, err)
+	}
+	before := len(srv.Trace())
+
+	if err := l.opStop(ctx, session); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	trace := srv.Trace()[before:]
+
+	var exec, cat, dereg int
+	firstExec, secondExec := -1, -1
+	cat, dereg = -1, -1
+	for i, req := range trace {
+		switch {
+		case strings.HasPrefix(req, "GET /v1/client/allocation/") && strings.HasSuffix(req, "/exec"):
+			exec++
+			if firstExec == -1 {
+				firstExec = i
+			} else if secondExec == -1 {
+				secondExec = i
+			}
+		case strings.HasPrefix(req, "GET /v1/client/fs/cat/"):
+			if cat == -1 {
+				cat = i
+			}
+		case req == "DELETE /v1/job/"+b.ChildJobID:
+			dereg = i
+		}
+	}
+	if exec < 2 {
+		t.Fatalf("stop issued %d alloc-exec requests, want agent stop plus shipper flush: %v", exec, trace)
+	}
+	if cat == -1 || dereg == -1 {
+		t.Fatalf("stop trace missing egress or deregister: %v", trace)
+	}
+	if !(firstExec < secondExec && secondExec < cat && cat < dereg) {
+		t.Fatalf("stop ordering = agent exec %d, shipper exec %d, egress %d, deregister %d; trace = %v", firstExec, secondExec, cat, dereg, trace)
+	}
+}
+
 // TestOpStopEgressesBeforeDeregister drives the NRT-P1-07 acceptance: with
 // egress configured, stop reads every allocation's transcript/evidence
 // files via the fs API, lands them under the sink directory, and the fake's

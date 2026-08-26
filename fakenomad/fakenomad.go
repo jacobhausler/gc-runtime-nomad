@@ -1050,12 +1050,13 @@ func splitPath(p string) []string {
 func isolatedTmuxEnv(dir, secretsDir string) []string {
 	env := make([]string, 0, len(os.Environ())+2)
 	for _, kv := range os.Environ() {
-		if strings.HasPrefix(kv, "TMUX=") || strings.HasPrefix(kv, "TMUX_TMPDIR=") || strings.HasPrefix(kv, "NOMAD_SECRETS_DIR=") {
+		if strings.HasPrefix(kv, "TMUX=") || strings.HasPrefix(kv, "TMUX_TMPDIR=") || strings.HasPrefix(kv, "NOMAD_SECRETS_DIR=") || strings.HasPrefix(kv, "NOMAD_ALLOC_DIR=") {
 			continue
 		}
 		env = append(env, kv)
 	}
 	env = append(env, "TMUX_TMPDIR="+dir)
+	env = append(env, "NOMAD_ALLOC_DIR="+dir)
 	if secretsDir != "" {
 		env = append(env, "NOMAD_SECRETS_DIR="+secretsDir)
 	}

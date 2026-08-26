@@ -74,6 +74,17 @@ Lifecycle ops need Nomad API configuration on the environment:
 | `GC_NOMAD_LOG_SINK_TOKEN_FILE` | no | In-box path the `log-shipper` task reads its `Authorization: Bearer` token's value from; unset ⇒ an unauthenticated sink |
 | `GC_NOMAD_LOG_LABELS` | no | `k=v,k=v` labels merged onto every shipped log line alongside the fixed `session_name`/`alloc_id`/`node`/`runtime=nomad` set |
 
+Enable live session-log continuity with the recommended one-line setup:
+
+```bash
+export GC_NOMAD_LOG_SINK="https://<firehose>/ingest"
+```
+
+Add `GC_NOMAD_LOG_SINK_TOKEN_FILE` when the firehose requires bearer auth and
+`GC_NOMAD_LOG_LABELS` for deployment-specific labels. If the sink is unset,
+the pack prints a warning during its check and session logs will not be
+shipped; disabling shipping is therefore explicit and visible.
+
 ## Conformance
 
 ```bash
@@ -118,7 +129,7 @@ bead.
 | `exec` | Runs a command inside the session's current alloc over the Nomad alloc-exec WebSocket and streams its stdout; **the op's own exit code is the remote command's exit code** (04 §3 exec row, RPP-CONN-001) — not the 0/1/2 lifecycle-op convention. Works regardless of the launched marker — a provisioned-but-not-launched box already answers exec (RPP-PROVISION-001). |
 | `relaunch` | Re-execs the launch command into the SAME alloc — no fresh dispatch, no fresh env — then sets the launched marker (04 §7 warm relaunch, launch-only fingerprint drift). Fails if the session has no live alloc to relaunch into. |
 | `nudge` / `peek` / `interrupt` / `send-keys` / `clear-scrollback` | The driving verbs (NRT-P1-05), realized as tmux commands sent into the session's tmux pane over the same exec mechanism. `nudge`/`interrupt` are best-effort — a not-found session answers success rather than an error, per the RPP's best-effort convention. |
-| `stop` | Best-effort `tmux kill-session` for the agent's session before anything else (NRT-P2-06.1) — the task's own exit is independent of this (its supervisor script traps and exits on Nomad's own SIGTERM), but tmux's server is a detached daemon nothing else reaps. If `GC_NOMAD_EGRESS_DIR` is set, then copies the session's transcript/evidence files (via the Nomad client fs API) into it, retrying up to 3 times before giving up and marking the tombstone `evidence_lost` rather than wedging (R2b-04); a successful egress receipts completion in the sidecar instead. Then deregisters the session's child job without purge, confirms terminal via a blocking read, and tombstones the sidecar binding. Idempotent — a session with no binding is a no-op success, and a stop that fails after egress but before deregister does not re-attempt egress on retry. |
+| `stop` | Best-effort `tmux kill-session` for the agent's session before anything else (NRT-P2-06.1) — the task's own exit is independent of this (its supervisor script traps and exits on Nomad's own SIGTERM), but tmux's server is a detached daemon nothing else reaps. When log shipping is enabled, requests and waits for the `log-shipper` graceful flush. If `GC_NOMAD_EGRESS_DIR` is set, then copies the session's transcript/evidence files (via the Nomad client fs API) into it, retrying up to 3 times before giving up and marking the tombstone `evidence_lost` rather than wedging (R2b-04); a flush failure also records `evidence_lost`, while a successful egress receipts completion in the sidecar instead. The order is agent stop → shipper flush → egress → deregister. Then deregisters the session's child job without purge, confirms terminal via a blocking read, and tombstones the sidecar binding. Idempotent — a session with no binding is a no-op success, and a stop that fails after egress but before deregister does not re-attempt egress on retry. |
 | `is-running` | Prints `true`/`false`. False whenever the launched marker is unset, even if the alloc is running (RPP-PROVISION-001: "provisioned, agent never launched" reads as not-running). Once launched, it also execs an in-box liveness probe into the alloc (`tmux has-session -t main`, plus `kill -0 <pid>` on the pane pid `start`/`relaunch` captured) — a box whose alloc stays non-terminal but whose agent died inside it (08 §3 in-box agent kill row) answers `false`, not `true`; ClientStatus alone can never see that gap. The honesty split (04 §6) still governs every transport fault along the way — a lookup error listing allocs, or a transport error execing the probe itself — which answers last-known-good (`true`) rather than `false`; only a definitive, non-transport probe result (the tmux session/pid genuinely gone) reads as agent-dead. |
 | `list-running [prefix]` | Prints one running session name per line — launched sessions only. Enumerates the children-of-parent jobs list (`GET /v1/jobs?meta=true`, 04 §2.1 rule 2/3) rather than trusting the sidecar as the existence source, decodes each non-terminal child's `gc_session` Meta key, and — when a prefix argument is given — filters the decoded names to it (`ListRunning(prefix)`, E2a amendment A-1). The sidecar is still consulted for the launched marker, which the children list alone cannot answer. Exits 1 on any lookup error rather than returning a partial list. |
 
@@ -134,8 +145,6 @@ caller treats as a no-op success.
   overruled as of `fnrt-t4l.13`'s `GC_NOMAD_LOG_SINK` HTTP sink — see
   above. `NRT-P1-07`'s own stop-path file egress is still local-directory
   only; it is a distinct mechanism from the log-shipper's live streaming.)
-- Log-shipper flush-order-vs-egress and the `gc runtime check` warning for
-  an unset `GC_NOMAD_LOG_SINK` (`fnrt-t4l.14`).
 - Remote artifact blocks and the env.ledger tunnel (`NRT-P1-06`) — staging
   only materializes what a caller sends inline on stdin; the launch command
   is still a bare `tmux new-session` (plus `-e` flags), not a real agent

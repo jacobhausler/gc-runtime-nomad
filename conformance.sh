@@ -49,6 +49,10 @@ export GC_NOMAD_TOKEN=""
 export GC_NOMAD_NAMESPACE="default"
 export GC_NOMAD_SIDECAR_DIR="$sidecar_dir"
 
+if [ -z "${GC_NOMAD_LOG_SINK:-}" ]; then
+  echo "warning: session logs will not be shipped (GC_NOMAD_LOG_SINK unset)"
+fi
+
 echo "conformance: gc runtime check"
 "$gc_bin" runtime check "$bindir/gc-runtime-nomad"
 

@@ -33,10 +33,12 @@ type binding struct {
 	// deregister does not re-copy files on retry.
 	EgressComplete bool `json:"egress_complete,omitempty"`
 
-	// EvidenceLost marks that the stop-path egress (NRT-P1-07) exhausted
-	// its bounded retries without succeeding, and stop proceeded anyway
-	// (04 §6 R2b-04: evidence-best-effort beats a wedged fleet). Mutually
-	// exclusive with EgressComplete.
+	// EvidenceLost marks that required stop-path evidence was unavailable
+	// after bounded retries and stop proceeded anyway (04 §6 R2b-04:
+	// evidence-best-effort beats a wedged fleet). This covers both local
+	// egress and the optional log-shipper flush, so it may coexist with
+	// EgressComplete when the local bundle was captured but live logs could
+	// not be flushed.
 	EvidenceLost bool `json:"evidence_lost,omitempty"`
 
 	// Launched distinguishes "provisioned, agent never launched" (false)

@@ -656,6 +656,45 @@ func TestFaultStopSuite(t *testing.T) {
 		}
 	})
 
+	t.Run("shipper flush failure records evidence_lost before deregister", func(t *testing.T) {
+		l, srv := newTestLifecycle(t)
+		l.logShipper = logShipperConfig{Sink: "https://logs.example.internal/ingest"}
+		ctx := context.Background()
+		const session = "sess-shipper-flush-fail"
+
+		if err := l.opStart(ctx, session); err != nil {
+			t.Fatalf("start: %v", err)
+		}
+		b, ok, err := l.sidecar.load(session)
+		if err != nil || !ok {
+			t.Fatalf("sidecar.load(%q) = (%v, %v, %v)", session, b, ok, err)
+		}
+
+		// The first alloc-exec is the best-effort agent stop. The second is
+		// the shipper flush. Make that flush fail, then fail deregister so
+		// the binding remains inspectable for its evidence_lost marker.
+		allocs, _, err := l.client.listAllocsForJob(ctx, b.ChildJobID, 0, 0)
+		if err != nil || len(allocs) != 1 {
+			t.Fatalf("listAllocsForJob(%q) = (%v, %v), want one allocation", b.ChildJobID, allocs, err)
+		}
+		execPath := "/v1/client/allocation/" + allocs[0].ID + "/exec"
+		for i := 0; i < 2; i++ {
+			srv.FailNext("GET", execPath, 500, `{"error":"injected flush failure"}`)
+		}
+		srv.FailNext("DELETE", "/v1/job/"+b.ChildJobID, 500, `{"error":"injected deregister failure"}`)
+
+		if err := l.opStop(ctx, session); err == nil {
+			t.Fatalf("stop with a faulted shipper flush and deregister = nil, want failure")
+		}
+		after, ok, err := l.sidecar.load(session)
+		if err != nil || !ok {
+			t.Fatalf("sidecar.load(%q) after failed stop = (%+v, %v, %v)", session, after, ok, err)
+		}
+		if !after.EvidenceLost {
+			t.Fatalf("binding after failed shipper flush = %+v, want evidence_lost marker", after)
+		}
+	})
+
 	t.Run("stop during outage exits with a failure", func(t *testing.T) {
 		l, srv := newTestLifecycle(t)
 		ctx := context.Background()
