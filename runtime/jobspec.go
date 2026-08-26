@@ -1,6 +1,12 @@
 package main
 
-import "time"
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"time"
+)
 
 // killTimeout is sized to agent drain; the cluster's max_kill_timeout is the
 // cap (04 §4, e2a-kill-shutdown-timers).
@@ -33,7 +39,7 @@ const (
 // on a lab cluster's named pool (e.g. lab-session) — so a deployment that
 // needs non-default placement must set GC_NOMAD_NODE_POOL.
 func parentJobSpec(namespace, nodePool, parentID string) nomadJob {
-	return nomadJob{
+	job := nomadJob{
 		ID:        parentID,
 		Namespace: namespace,
 		NodePool:  nodePool,
@@ -60,6 +66,32 @@ func parentJobSpec(namespace, nodePool, parentID string) nomadJob {
 		},
 		TaskGroups: []nomadTaskGroup{sessionTaskGroup()},
 	}
+	// Stamp the jobspec's own fingerprint into its Meta (fnrt-t4l.9): a
+	// registered parent that still exists and still matches on NodePool can
+	// nonetheless carry a stale task (04 §3, e.g. t4l.7's supervisor-script
+	// swap) that a NodePool-only comparison can never see. Computed over job
+	// BEFORE this field is set, so the hash never includes itself.
+	job.Meta = map[string]string{jobspecHashMetaKey: jobspecHash(job)}
+	return job
+}
+
+// jobspecHashMetaKey is the parent job Meta key ensureParentRegistered reads
+// back via getJob to detect drift beyond NodePool (fnrt-t4l.9).
+const jobspecHashMetaKey = "gc_jobspec_hash"
+
+// jobspecHash returns a short, stable fingerprint of job's registerable
+// content. It must be called with job.Meta unset (parentJobSpec's only
+// caller) so the hash never depends on the very field it gets stamped into.
+func jobspecHash(job nomadJob) string {
+	b, err := json.Marshal(job)
+	if err != nil {
+		// job is built entirely from static Go types (no funcs/chans), so
+		// Marshal cannot fail here; a panic would only ever fire from a
+		// future edit that adds an unmarshalable field.
+		panic(fmt.Sprintf("jobspecHash: marshal parent job spec: %v", err))
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])[:16]
 }
 
 func sessionTaskGroup() nomadTaskGroup {
@@ -141,6 +173,12 @@ type nomadJob struct {
 	Constraints      []nomadConstraint      `json:"Constraints,omitempty"`
 	ParameterizedJob *nomadParameterizedJob `json:"ParameterizedJob,omitempty"`
 	TaskGroups       []nomadTaskGroup       `json:"TaskGroups"`
+	// Meta carries jobspecHashMetaKey (fnrt-t4l.9) — the parent job's own
+	// drift fingerprint, set by parentJobSpec and read back by
+	// ensureParentRegistered via getJob. Unlike ParameterizedJob.MetaOptional
+	// (the dispatch-time Meta keys a child MAY carry), this Meta rides the
+	// parent job itself and is fixed at register time.
+	Meta map[string]string `json:"Meta,omitempty"`
 }
 
 type nomadConstraint struct {

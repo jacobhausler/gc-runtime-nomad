@@ -434,12 +434,47 @@ func TestOpStartRegistersWhenNodePoolDrifted(t *testing.T) {
 	if n := countRegisterCalls(srv.Trace()); n != 2 {
 		t.Fatalf("register calls after start = %d, want 2 (the stale seed plus the drift-triggered re-register)", n)
 	}
-	nodePool, ok, err := l.client.getJob(ctx, l.parentJobID)
+	nodePool, _, ok, err := l.client.getJob(ctx, l.parentJobID)
 	if err != nil || !ok {
 		t.Fatalf("getJob after re-register = (%q, %v, %v), want (_, true, nil)", nodePool, ok, err)
 	}
 	if nodePool != "lab-a" {
 		t.Fatalf("parent node pool after re-register = %q, want %q", nodePool, "lab-a")
+	}
+}
+
+// TestOpStartDetectsJobspecDriftAndFailsClearlyWhenRegisterIsForbidden
+// confirms fnrt-t4l.9: a registered parent that matches this build's node
+// pool but carries a stale task (e.g. t4l.7's supervisor-script swap) must
+// still be recognized as drifted via the jobspec-hash Meta fingerprint, not
+// silently treated as a match — and when the dispatch-only token then 403s
+// on the resulting register attempt, the error must name the parent as
+// stale and point at the re-registration step, not just the bare
+// submit-job-capability message a first-time (never-registered) 403 gets.
+func TestOpStartDetectsJobspecDriftAndFailsClearlyWhenRegisterIsForbidden(t *testing.T) {
+	l, srv := newTestLifecycle(t)
+	ctx := context.Background()
+
+	// Register a parent matching this build's NodePool, but with a
+	// hand-set jobspec-hash Meta standing in for a task that predates a
+	// code change — NodePool alone can never see this kind of drift.
+	stale := parentJobSpec("default", l.nodePool, l.parentJobID)
+	stale.Meta = map[string]string{jobspecHashMetaKey: "stale-hash-from-prior-build"}
+	if err := l.client.registerJob(ctx, stale); err != nil {
+		t.Fatalf("registerJob (stale jobspec): %v", err)
+	}
+
+	// From here on the token this lifecycle uses 403s on register — the lab
+	// ACL model's dispatch-only token, discovering the drift at Start
+	// rather than via the one-time management-token setup.
+	srv.FailSticky("POST", "/v1/jobs", 403, `{"error":"Permission denied: missing submit-job capability"}`)
+
+	err := l.opStart(ctx, "sess-drifted-jobspec")
+	if err == nil {
+		t.Fatalf("start with drifted jobspec and register forbidden: got nil error, want failure")
+	}
+	if !strings.Contains(err.Error(), "stale") || !strings.Contains(err.Error(), "re-register") || !strings.Contains(err.Error(), "management token") {
+		t.Fatalf("start error = %v, want it to call the parent stale and name re-registration with a management token", err)
 	}
 }
 

@@ -493,8 +493,8 @@ func (l *lifecycle) dispatch(ctx context.Context, sessionName string) error {
 }
 
 // ensureParentRegistered makes sure the parent job dispatch's children come
-// from exists, in the current namespace, with the node pool this build is
-// configured for — the NRT-P2-06.1 fix for the lab ACL model (04 §4): the
+// from exists, in the current namespace, and matches the jobspec this build
+// is configured for — the NRT-P2-06.1 fix for the lab ACL model (04 §4): the
 // runtime token dispatch normally runs under may hold read-job and
 // dispatch-job but deliberately NOT submit-job, since registering the
 // parent is a one-time management-token setup step, not a per-Start action.
@@ -502,31 +502,41 @@ func (l *lifecycle) dispatch(ctx context.Context, sessionName string) error {
 // which a narrowed dispatch-only token could never satisfy.
 //
 // It looks the parent up first via a GET (dispatch-scoped tokens can always
-// read-job) and only calls register when the parent is missing or its node
-// pool has drifted from this build's config — the one parentJobSpec field
-// beyond namespace that varies at runtime (NRT-P2-05). A token that is
-// genuinely dispatch-only, against a parent that already matches, never
-// calls register at all. l.forbidRegistration skips the register attempt
-// entirely for a deployment that wants a config-time guarantee of that,
-// rather than discovering it from a 403 at the first drifted Start.
+// read-job) and only calls register when the parent is missing or has
+// drifted from this build's config on either signal getJob reports: NodePool
+// (the one parentJobSpec field beyond namespace that varies at runtime,
+// NRT-P2-05) or the jobspecHashMetaKey fingerprint (fnrt-t4l.9) — added
+// because a NodePool-only comparison missed a registered parent whose TASK
+// had gone stale (e.g. t4l.7's supervisor-script swap): the parent still
+// existed and still matched on NodePool, so Start silently kept dispatching
+// onto the old task instead of re-registering. A token that is genuinely
+// dispatch-only, against a parent that already matches on both signals,
+// never calls register at all. l.forbidRegistration skips the register
+// attempt entirely for a deployment that wants a config-time guarantee of
+// that, rather than discovering it from a 403 at the first drifted Start.
 func (l *lifecycle) ensureParentRegistered(ctx context.Context) error {
-	nodePool, ok, err := l.client.getJob(ctx, l.parentJobID)
+	spec := parentJobSpec(l.client.namespace, l.nodePool, l.parentJobID)
+
+	nodePool, meta, ok, err := l.client.getJob(ctx, l.parentJobID)
 	if err != nil {
 		return fmt.Errorf("looking up parent job %q: %w", l.parentJobID, err)
 	}
-	if ok && nodePool == l.nodePool {
+	if ok && nodePool == l.nodePool && meta[jobspecHashMetaKey] == spec.Meta[jobspecHashMetaKey] {
 		return nil
 	}
 
 	if l.forbidRegistration {
 		if ok {
-			return fmt.Errorf("parent job %q exists but its node pool has drifted (want %q, have %q), and GC_NOMAD_FORBID_REGISTER forbids registering to fix it: register it out-of-band with a token holding the submit-job capability", l.parentJobID, l.nodePool, nodePool)
+			return fmt.Errorf("parent job %q exists but has drifted from this build's jobspec (node pool and/or task spec), and GC_NOMAD_FORBID_REGISTER forbids registering to fix it: register it out-of-band with a token holding the submit-job capability", l.parentJobID)
 		}
 		return fmt.Errorf("parent job %q does not exist in namespace %q, and GC_NOMAD_FORBID_REGISTER forbids registering it: register it out-of-band with a token holding the submit-job capability", l.parentJobID, l.client.namespace)
 	}
 
-	if err := l.client.registerJob(ctx, parentJobSpec(l.client.namespace, l.nodePool, l.parentJobID)); err != nil {
+	if err := l.client.registerJob(ctx, spec); err != nil {
 		if errors.Is(err, errJobForbidden) {
+			if ok {
+				return fmt.Errorf("parent job %q is stale — re-register with a management token: the registered parent no longer matches this build's jobspec (node pool and/or task spec drifted) and the runtime token lacks the submit-job capability to fix it in place (04 §4 lab ACL model): %w", l.parentJobID, err)
+			}
 			return fmt.Errorf("registering parent job %q: token lacks the submit-job capability required to register jobs in namespace %q — register it once with a management token (04 §4 lab ACL model), or set GC_NOMAD_FORBID_REGISTER and do so out-of-band: %w", l.parentJobID, l.client.namespace, err)
 		}
 		return fmt.Errorf("registering parent job %q: %w", l.parentJobID, err)
