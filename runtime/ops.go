@@ -752,6 +752,64 @@ func (l *lifecycle) currentAlloc(ctx context.Context, sessionName string) (strin
 // R2b-04): evidence-best-effort beats a wedged fleet.
 const egressMaxAttempts = 3
 
+const (
+	// logShipperFlushTimeout bounds the wait for the vector process to finish
+	// its graceful shutdown after it has been signaled. It is deliberately
+	// the same bounded window Nomad gives the shipper after the agent task.
+	logShipperFlushTimeout = logShipperFlushWindow
+	logShipperPollInterval = 25 * time.Millisecond
+)
+
+// logShipperFlushCommand requests a graceful vector shutdown. The wrapper
+// owns the vector child and publishes its pid inside the shared allocation;
+// signaling that child lets vector flush its buffers while leaving the
+// session task alive long enough for this method to observe completion.
+const logShipperFlushCommand = `set -eu
+pid_file="$NOMAD_ALLOC_DIR/` + logShipperPIDFile + `"
+flush_request="$NOMAD_ALLOC_DIR/` + logShipperFlushRequest + `"
+if [ ! -s "$pid_file" ]; then
+  exit 1
+fi
+: >"$flush_request"
+kill -TERM "$(cat "$pid_file")"
+`
+
+const logShipperFlushProbe = `test -f "$NOMAD_ALLOC_DIR/` + logShipperFlushComplete + `"`
+
+// flushLogShipper requests and confirms the optional log-shipper's final
+// flush. A failed request, a non-zero request command, or a timeout waiting
+// for the wrapper's completion marker is a flush failure; callers record that
+// failure as evidence_lost and continue the stop path.
+func (l *lifecycle) flushLogShipper(ctx context.Context, allocID string) error {
+	if !l.logShipper.enabled() {
+		return nil
+	}
+	exitCode, out, err := l.client.execAlloc(ctx, allocID, logShipperTaskName, []string{"/bin/sh", "-c", logShipperFlushCommand})
+	if err != nil {
+		return fmt.Errorf("flushing log shipper: %w", err)
+	}
+	if exitCode != 0 {
+		return fmt.Errorf("flushing log shipper: request exited %d: %s", exitCode, out)
+	}
+
+	flushCtx, cancel := context.WithTimeout(ctx, logShipperFlushTimeout)
+	defer cancel()
+	for {
+		exitCode, _, err := l.client.execAlloc(flushCtx, allocID, execTaskName, []string{"/bin/sh", "-c", logShipperFlushProbe})
+		if err != nil {
+			return fmt.Errorf("flushing log shipper: waiting for completion: %w", err)
+		}
+		if exitCode == 0 {
+			return nil
+		}
+		select {
+		case <-flushCtx.Done():
+			return fmt.Errorf("flushing log shipper: completion timeout: %w", flushCtx.Err())
+		case <-time.After(logShipperPollInterval):
+		}
+	}
+}
+
 // opStop egresses sessionName's transcript/evidence files (if egress is
 // configured, NRT-P1-07), deregisters its child job without purge, confirms
 // terminal via a blocking read, and tombstones the sidecar binding. Stop on
@@ -781,6 +839,19 @@ func (l *lifecycle) opStop(ctx context.Context, sessionName string) error {
 	// deregister call below is what actually confirms terminal either way.
 	_ = l.runDrivingVerb(ctx, sessionName, "stop-kill-session", []string{"tmux", "kill-session", "-t", tmuxSessionName})
 
+	// Ask the optional log shipper to flush before egress makes the
+	// allocation's files unreachable. A failed flush is evidence loss, but
+	// it must not prevent the local egress attempt or the deregister below.
+	needEgress := !b.EgressComplete && !b.EvidenceLost
+	if l.logShipper.enabled() && !b.EvidenceLost {
+		allocID, err := l.currentAlloc(ctx, sessionName)
+		if err != nil {
+			b.EvidenceLost = true
+		} else if err := l.flushLogShipper(ctx, allocID); err != nil {
+			b.EvidenceLost = true
+		}
+	}
+
 	// Egress transcript/evidence before deregister makes them unreachable.
 	// A failing egress gets egressMaxAttempts bounded retries (R2b-04); if
 	// it still hasn't succeeded, stop PROCEEDS rather than wedging behind
@@ -789,7 +860,7 @@ func (l *lifecycle) opStop(ctx context.Context, sessionName string) error {
 	// before deregister, so a stop that then crashes before deregister
 	// retries idempotently: it neither re-attempts a marker that already
 	// gave up nor re-copies files it already egressed (NRT-P1-07).
-	if !b.EgressComplete && !b.EvidenceLost {
+	if needEgress {
 		var egressErr error
 		for attempt := 0; attempt < egressMaxAttempts; attempt++ {
 			if egressErr = l.egressAllocFiles(ctx, sessionName, b.ChildJobID); egressErr == nil {
@@ -801,6 +872,8 @@ func (l *lifecycle) opStop(ctx context.Context, sessionName string) error {
 		} else {
 			b.EvidenceLost = true
 		}
+	}
+	if b.EgressComplete || b.EvidenceLost {
 		if err := l.sidecar.save(*b); err != nil {
 			return err
 		}

@@ -1,6 +1,7 @@
 // Command gc-runtime-nomad is a Runtime Provider Protocol (RPP) v0
 // executable that runs Gas City sessions as dispatched Nomad jobs. It
-// answers the `protocol` handshake, the four lifecycle ops from NRT-P1-03
+// answers the `protocol` handshake, the pack-local `check` diagnostic, the
+// four lifecycle ops from NRT-P1-03
 // (start, stop, is-running, list-running), the provision/launch split plus
 // warm relaunch from NRT-P1-08 (provision, exec, relaunch), and — from
 // fnrt-szx — the driving verbs (nudge, peek, interrupt, send-keys,
@@ -12,8 +13,8 @@
 // classification into $NOMAD_SECRETS_DIR rather than argv or the job spec
 // (04 §5, E1a §4.5). Everything runs over Nomad job dispatch/deregister/
 // blocking-reads and the alloc-exec WebSocket (04 §3/§4/§6/§7). Every other
-// op exits 2, the RPP forward-compatibility signal a caller treats as a
-// no-op success.
+// op besides the pack-local `check` diagnostic exits 2, the RPP
+// forward-compatibility signal a caller treats as a no-op success.
 //
 // Calling convention (no shell wrapping — gc execs the binary directly):
 //
@@ -114,6 +115,12 @@ func run(args []string, stdin io.Reader, stdout, stderr *os.File) int {
 
 	if op == "protocol" {
 		fmt.Fprintln(stdout, protocolHandshakeJSON)
+		return exitOK
+	}
+	if op == "check" {
+		if os.Getenv(envLogSink) == "" {
+			fmt.Fprintln(stderr, "warning: session logs will not be shipped (GC_NOMAD_LOG_SINK unset)")
+		}
 		return exitOK
 	}
 	if !lifecycleOps[op] {

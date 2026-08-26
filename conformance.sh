@@ -49,6 +49,8 @@ export GC_NOMAD_TOKEN=""
 export GC_NOMAD_NAMESPACE="default"
 export GC_NOMAD_SIDECAR_DIR="$sidecar_dir"
 
+"$bindir/gc-runtime-nomad" check
+
 echo "conformance: gc runtime check"
 "$gc_bin" runtime check "$bindir/gc-runtime-nomad"
 
