@@ -79,6 +79,7 @@ Token custody is by path: token values live in custody files (mode 0600, owner r
 
 ## Ownership
 
-- Repo: `github.com/jacobhausler/gascity-packs` (fork of `gastownhall/gascity-packs`); the pack lives at `runtime-nomad/`.
-- Issue tracker: that repository's issues.
+- Repo: `github.com/jacobhausler/gc-runtime-nomad` (extracted, with history, from the `runtime-nomad/` subtree of the `jacobhausler/gascity-packs` fork on 2026-08-26; self-serve registry publish per `gascity#5606` needs its own repo, not a subtree of a fork).
+- Registry name: `jacobhausler/runtime-nomad`. Co-maintainers: Jacob Hausler (repo owner) and atbrace, per the maintenance-ownership offer accepted upstream in `gascity#5606` Q1 -- offline conformance runs in this repo's own CI against a fake Nomad API; no `gascity-packs` PR.
+- Issue tracker: this repository's issues.
 - The `nomad-runtime-debug` skill, once it exists, is the entry point for debugging the pack and the cluster.

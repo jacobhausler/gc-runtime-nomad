@@ -1,0 +1,4 @@
+# Build artifacts from ad-hoc `go build`/`go install` runs; the pack's own
+# install path is `go install .` into GOBIN, never a repo-relative binary.
+/runtime/gc-runtime-nomad
+/fakenomad/cmd/fakenomad/fakenomad
