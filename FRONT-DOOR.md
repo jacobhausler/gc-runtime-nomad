@@ -58,7 +58,7 @@ owner-unit: runtime-nomad
 
 2. `./install.sh` (puts `gc-runtime-nomad` on PATH), then `gc doctor`.
 3. On the runtime host export `GC_NOMAD_ADDR`, `GC_NOMAD_SIDECAR_DIR`, and the runtime token in `GC_NOMAD_TOKEN`, sourced from its custody file path — never typed in or pasted.
-4. Register the parent once with the management token: `GC_NOMAD_TOKEN=<management token> gc-runtime-nomad provision` (or the first `start`); it registers `gc-sessions`, stamped with the `gc_jobspec_hash` fingerprint.
+4. Register the parent once with the management token: `GC_NOMAD_TOKEN=<management token> gc-runtime-nomad provision <session-name>` (or the first `start <session-name>` — the session name is the first positional argument of every named op); it registers `gc-sessions`, stamped with the `gc_jobspec_hash` fingerprint.
 5. To ship session logs set `GC_NOMAD_LOG_SINK` (plus `GC_NOMAD_LOG_SINK_TOKEN_FILE` / `GC_NOMAD_LOG_LABELS`); confirm `gc-runtime-nomad check` prints no warning.
 6. Start sessions; `stop` deregisters the child and copies transcript/evidence to `GC_NOMAD_EGRESS_DIR` when it is set.
 
