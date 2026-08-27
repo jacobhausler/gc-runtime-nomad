@@ -1,5 +1,7 @@
 # runtime-nomad
 
+**Front door:** [FRONT-DOOR.md](FRONT-DOOR.md) — the single page for install, configure, integrate, upgrade, and the invariants that break the pack.
+
 A Gas City **runtime pack**: it ships a runtime *executable*, not a service.
 The executable `gc-runtime-nomad` speaks the Runtime Provider Protocol
 (RPP v0). It answers the `protocol` handshake, the four session lifecycle
