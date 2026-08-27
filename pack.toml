@@ -1,6 +1,7 @@
 [pack]
 name = "jacobhausler/runtime-nomad"
-version = "0.1.0"
+version = "1.0.0"
+description = "Nomad runtime for Gas City: run gc sessions as Nomad allocations with offline-conformance-proven lifecycle, log shipping to a durable sink, and orphan-safe reconciliation. Maintained by Jacob Hausler; conformance runs offline against a fake Nomad API."
 schema = 2
 
 # Pack-declared runtime (Gas City RUNTIME-SEL-011). gc resolves
