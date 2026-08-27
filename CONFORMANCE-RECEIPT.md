@@ -15,3 +15,9 @@ scope for this receipt — bounce back to the owning bead.
 | env probes | PASS | `go test -run TestM3StagingReceiptWorkspaceProbe ./runtime` |
 | L0-L2 | PASS | `go vet ./... && go test ./...` — runtime + fakenomad modules |
 | secrets-grep | PASS | `go test -run TestM3StagingReceiptNoCanaryLeak ./runtime` |
+
+This receipt file is committed at one or more commits later than `2f74be3`
+above; each later commit changes no code — it only commits or amends this
+receipt file itself — so the ladder result at `2f74be3` still applies to
+the tree at every later commit, including the `v1.0.0` tag (`083e754`) and
+the current `release/v1.0.0` branch tip.
