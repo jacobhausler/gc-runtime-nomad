@@ -43,6 +43,7 @@
 //	GC_NOMAD_LOG_SINK     optional: HTTP JSON-lines endpoint for the session task group's log-shipper task (fnrt-t4l.13); unset disables the task entirely — session logs are not shipped
 //	GC_NOMAD_LOG_SINK_TOKEN_FILE  optional: in-box path the log-shipper task reads its Authorization bearer token's value from; unset means an unauthenticated sink
 //	GC_NOMAD_LOG_LABELS   optional: "k=v,k=v" labels merged onto every shipped log line alongside the fixed session_name/alloc_id/node/runtime=nomad set
+//	GC_NOMAD_LOG_SHIPPER_ARTIFACT  optional: URL or local path for the pinned Vector archive; unset uses the upstream release URL
 package main
 
 import (
@@ -54,17 +55,18 @@ import (
 )
 
 const (
-	envAddr       = "GC_NOMAD_ADDR"
-	envToken      = "GC_NOMAD_TOKEN"
-	envNamespace  = "GC_NOMAD_NAMESPACE"
-	envNodePool   = "GC_NOMAD_NODE_POOL"
-	envParentJob  = "GC_NOMAD_PARENT_JOB"
-	envSidecarDir = "GC_NOMAD_SIDECAR_DIR"
-	envEgressDir  = "GC_NOMAD_EGRESS_DIR"
-	envForbidReg  = "GC_NOMAD_FORBID_REGISTER"
-	envLogSink    = "GC_NOMAD_LOG_SINK"
-	envLogTokFile = "GC_NOMAD_LOG_SINK_TOKEN_FILE"
-	envLogLabels  = "GC_NOMAD_LOG_LABELS"
+	envAddr        = "GC_NOMAD_ADDR"
+	envToken       = "GC_NOMAD_TOKEN"
+	envNamespace   = "GC_NOMAD_NAMESPACE"
+	envNodePool    = "GC_NOMAD_NODE_POOL"
+	envParentJob   = "GC_NOMAD_PARENT_JOB"
+	envSidecarDir  = "GC_NOMAD_SIDECAR_DIR"
+	envEgressDir   = "GC_NOMAD_EGRESS_DIR"
+	envForbidReg   = "GC_NOMAD_FORBID_REGISTER"
+	envLogSink     = "GC_NOMAD_LOG_SINK"
+	envLogTokFile  = "GC_NOMAD_LOG_SINK_TOKEN_FILE"
+	envLogLabels   = "GC_NOMAD_LOG_LABELS"
+	envLogArtifact = "GC_NOMAD_LOG_SHIPPER_ARTIFACT"
 
 	defaultParentJob = "gc-sessions"
 
@@ -120,6 +122,8 @@ func run(args []string, stdin io.Reader, stdout, stderr *os.File) int {
 	if op == "check" {
 		if os.Getenv(envLogSink) == "" {
 			fmt.Fprintln(stderr, "warning: session logs will not be shipped (GC_NOMAD_LOG_SINK unset)")
+		} else if os.Getenv(envLogArtifact) == "" {
+			fmt.Fprintln(stderr, "warning: log-shipper artifact source will use network default (GC_NOMAD_LOG_SHIPPER_ARTIFACT unset)")
 		}
 		return exitOK
 	}
@@ -361,6 +365,7 @@ func newLifecycle() (*lifecycle, error) {
 			Sink:      os.Getenv(envLogSink),
 			TokenFile: os.Getenv(envLogTokFile),
 			Labels:    os.Getenv(envLogLabels),
+			Artifact:  os.Getenv(envLogArtifact),
 		},
 	}, nil
 }

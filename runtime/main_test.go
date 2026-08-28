@@ -96,6 +96,7 @@ func TestRunCheckWarnsWhenLogSinkUnset(t *testing.T) {
 
 func TestRunCheckOmitsWarningWhenLogSinkConfigured(t *testing.T) {
 	t.Setenv(envLogSink, "https://logs.example.internal/ingest")
+	t.Setenv(envLogArtifact, "/var/lib/vector/vector.tar.gz")
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
@@ -109,6 +110,45 @@ func TestRunCheckOmitsWarningWhenLogSinkConfigured(t *testing.T) {
 	}
 	if strings.Contains(string(out), "session logs will not be shipped") {
 		t.Fatalf("run(check) output = %q, want no unset-sink warning", out)
+	}
+}
+
+func TestRunCheckWarnsWhenLogShipperArtifactUnset(t *testing.T) {
+	t.Setenv(envLogSink, "http://127.0.0.1:18081/ingest")
+	t.Setenv(envLogArtifact, "")
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := run([]string{"check"}, strings.NewReader(""), w, w)
+	w.Close()
+	out, _ := io.ReadAll(r)
+	r.Close()
+	if got != exitOK {
+		t.Fatalf("run(check) = %d, want %d", got, exitOK)
+	}
+	want := "warning: log-shipper artifact source will use network default (GC_NOMAD_LOG_SHIPPER_ARTIFACT unset)"
+	if !strings.Contains(string(out), want) {
+		t.Fatalf("run(check) output = %q, want warning %q", out, want)
+	}
+}
+
+func TestNewLifecycleReadsLogShipperArtifact(t *testing.T) {
+	srv := fakenomad.NewServer()
+	t.Cleanup(srv.Close)
+
+	t.Setenv(envAddr, srv.URL())
+	t.Setenv(envSidecarDir, t.TempDir())
+	t.Setenv(envLogSink, "http://127.0.0.1:18081/ingest")
+	const artifact = "/var/lib/nrt-p3-02/vector-http/vector.tar.gz"
+	t.Setenv(envLogArtifact, artifact)
+
+	l, err := newLifecycle()
+	if err != nil {
+		t.Fatalf("newLifecycle: %v", err)
+	}
+	if l.logShipper.Artifact != artifact {
+		t.Fatalf("logShipper.Artifact = %q, want %q", l.logShipper.Artifact, artifact)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -30,6 +31,11 @@ type logShipperConfig struct {
 	// every shipped log line alongside the fixed session_name/alloc_id/
 	// node/runtime=nomad set (vectorConfigTOML's "label" transform).
 	Labels string
+	// Artifact is the URL or local path for the pinned Vector archive
+	// (GC_NOMAD_LOG_SHIPPER_ARTIFACT). Empty keeps the upstream release URL
+	// for deployments that have network access; offline deployments should
+	// point this at a pre-staged archive on the Nomad client.
+	Artifact string
 }
 
 // enabled reports whether the log-shipper task should be added to the
@@ -273,6 +279,7 @@ if [ -n "${GC_LOG_SINK_TOKEN_FILE:-}" ]; then
   GC_LOG_SINK_TOKEN="$(cat "$GC_LOG_SINK_TOKEN_FILE")"
   export GC_LOG_SINK_TOKEN
 fi
+mkdir -p /var/lib/vector
 ` + vectorBinPath + ` --config local/vector.toml &
 vector_pid=$!
 printf '%s\n' "$vector_pid" >"$pid_file"
@@ -296,9 +303,9 @@ func logShipperTask(cfg logShipperConfig) nomadTask {
 		"GC_LOG_LABELS": cfg.Labels,
 		// node.unique.name is Nomad's own job-spec-level interpolation
 		// (resolved once at placement, into a literal env var) — distinct
-		// from vector's OWN "${VAR}" substitution inside vector.toml,
-		// which resolves from this task's real runtime environment
-		// instead (vectorConfigTOML's doc comment has the full split).
+		// from the Nomad TEMPLATE `env` function vectorConfigTOML uses to
+		// read this var back out of the task's environment when it renders
+		// vector.toml (vectorConfigTOML's doc comment has the full split).
 		"GC_LOG_NODE_NAME": "${node.unique.name}",
 	}
 	if cfg.TokenFile != "" {
@@ -308,13 +315,18 @@ func logShipperTask(cfg logShipperConfig) nomadTask {
 	return nomadTask{
 		Name:   logShipperTaskName,
 		Driver: "exec",
+		// A failed log shipper is an observability failure, not an agent
+		// lifecycle failure. Keep it as a poststart sidecar and make the
+		// agent the explicit group leader so Nomad does not tear the agent
+		// down when this task cannot fetch or start Vector.
+		Lifecycle: &nomadTaskLifecycle{Hook: "poststart", Sidecar: true},
 		Config: map[string]any{
 			"command": "/bin/sh",
-			"args":    []string{"-c", logShipperWrapperScript},
+			"args":    []string{"-c", strings.ReplaceAll(logShipperWrapperScript, "${", "$${")},
 		},
 		Env: env,
 		Artifacts: []nomadArtifact{{
-			GetterSource:  vectorURL,
+			GetterSource:  cfg.artifactSource(),
 			GetterOptions: map[string]string{"checksum": "sha256:" + vectorSHA256},
 			RelativeDest:  "local/",
 		}},
@@ -331,34 +343,73 @@ func logShipperTask(cfg logShipperConfig) nomadTask {
 	}
 }
 
-// vectorConfigTOML builds the log-shipper task's own vector config. It is
-// assembled here, in Go, at parent-jobspec-build time — NOT via Nomad's
-// consul-template EmbeddedTmpl interpolation ("{{ ... }}" syntax), which
-// this pack never invokes. The Template stanza (logShipperTask) only uses
-// EmbeddedTmpl as a plain "write this literal file into local/" delivery
-// mechanism: every "${VAR}" placeholder below passes through consul-template
-// unresolved (it isn't "{{ }}" syntax) and is instead resolved by VECTOR
-// ITSELF, from its own process environment, when it starts — some of those
-// vars come from Nomad automatically (NOMAD_META_GC_SESSION from the
-// dispatch payload's gc_session Meta key, NOMAD_ALLOC_ID, NOMAD_ALLOC_DIR,
-// NOMAD_PORT_metrics), and some from this task's own Env block above
-// (GC_LOG_SINK, GC_LOG_LABELS, GC_LOG_NODE_NAME) plus
-// logShipperWrapperScript's GC_LOG_SINK_TOKEN export. The auth block is
-// only emitted when cfg.TokenFile is set — vector has no bearer-token-file
-// primitive of its own, so an unset token file means an unauthenticated
-// sink rather than a literal empty bearer token.
+func (c logShipperConfig) artifactSource() string {
+	if c.Artifact != "" {
+		return c.Artifact
+	}
+	return vectorURL
+}
+
+// vectorConfigTOML builds the log-shipper task's own vector config, rendered
+// as a Nomad Template stanza (EmbeddedTmpl) BEFORE vector ever starts. Every
+// value Nomad's own consul-template `env` function can see at render time —
+// NOMAD_ALLOC_DIR, NOMAD_ALLOC_ID, NOMAD_META_GC_SESSION (from the dispatch
+// payload's gc_session Meta key), and this task's own Env block values
+// (GC_LOG_SINK, GC_LOG_LABELS, GC_LOG_NODE_NAME) — is written here as real
+// Nomad template interpolation ("{{ env "VAR" }}"), the same mechanism
+// fnrt-t4l.24 proved for the prom_exporter sink's address. fnrt-3bvg
+// extended that fix to the rest of the config after a live-Nomad proof
+// (ops/receipts/nrt-t4l-20-lab-proof.md) hit the sibling defect at the
+// gc_log_sink URI: relying on VECTOR'S OWN "${VAR}" substitution, resolved
+// from its own process environment when it starts, does not reliably work
+// inside the exec-driver task's environment on real Nomad — GC_LOG_SINK
+// rendered as the literal string "${GC_LOG_SINK}", which Vector rejected as
+// an invalid URI, the same Exit 78 failure class t4l.24 already fixed for
+// the port. Baking the real value into the file at Nomad render time removes
+// the dependency on Vector's own env-substitution for every one of these
+// fields.
+//
+// Two placeholders are the deliberate, narrower exception and stay on
+// Vector's own "${VAR}" substitution, because neither value exists yet at
+// Nomad's template-render time (which happens before the task's own command
+// runs):
+//   - "${GC_LOG_SINK_TOKEN}" (in the auth block) is only exported into
+//     Vector's process environment by logShipperWrapperScript, immediately
+//     before it execs vector — the export and the vector invocation share
+//     the same shell, so the value is provably present when Vector starts.
+//   - "${HOME}" is neither a Nomad-injected runtime variable nor a value
+//     this task's Env block declares, so there is nothing for `env` to read
+//     at render time; it relies on the exec driver populating a normal
+//     POSIX process environment for Vector's own user, same as any other
+//     command.
+//
+// Nomad's outer template pass consumes "${...}" expressions unless the
+// dollar is doubled, so the returned template escapes both remaining
+// placeholders for that pass; Vector receives the single-dollar form and
+// resolves it from its own runtime environment. The "{{ env ... }}" calls
+// above use Nomad's own delimiter rather than a dollar sign, so the escaping
+// ReplaceAll below leaves them untouched (Nomad's template pass is meant to
+// consume them).
+//
+// The auth block is only emitted when cfg.TokenFile is set — vector has no
+// bearer-token-file primitive of its own, so an unset token file means an
+// unauthenticated sink rather than a literal empty bearer token.
 func vectorConfigTOML(cfg logShipperConfig) string {
 	var authBlock string
 	if cfg.TokenFile != "" {
 		authBlock = "\n\n[sinks.gc_log_sink.auth]\nstrategy = \"bearer\"\ntoken = \"${GC_LOG_SINK_TOKEN}\"\n"
 	}
-	return `[sources.session_jsonl]
+	config := `[sources.session_jsonl]
 type = "file"
-include = ["${HOME}/.claude/projects/**/*.jsonl"]
+include = ["{{ env "NOMAD_ALLOC_DIR" }}/data/*.jsonl", "${HOME}/.claude/projects/**/*.jsonl"]
+read_from = "beginning"
+ignore_checkpoints = true
 
 [sources.session_stdout]
 type = "file"
-include = ["${NOMAD_ALLOC_DIR}/logs/agent.stdout.*"]
+include = ["{{ env "NOMAD_ALLOC_DIR" }}/logs/agent.stdout.*"]
+read_from = "beginning"
+ignore_checkpoints = true
 
 [sources.internal_metrics]
 type = "internal_metrics"
@@ -367,11 +418,11 @@ type = "internal_metrics"
 type = "remap"
 inputs = ["session_jsonl", "session_stdout"]
 source = '''
-.session_name = "${NOMAD_META_GC_SESSION}"
-.alloc_id = "${NOMAD_ALLOC_ID}"
-.node = "${GC_LOG_NODE_NAME}"
+.session_name = "{{ env "NOMAD_META_GC_SESSION" }}"
+.alloc_id = "{{ env "NOMAD_ALLOC_ID" }}"
+.node = "{{ env "GC_LOG_NODE_NAME" }}"
 .runtime = "nomad"
-extra, err = parse_key_value("${GC_LOG_LABELS}", key_value_delimiter: "=", field_delimiter: ",")
+extra, err = parse_key_value("{{ env "GC_LOG_LABELS" }}", key_value_delimiter: "=", field_delimiter: ",")
 if err == null {
   . = merge!(., extra)
 }
@@ -380,15 +431,16 @@ if err == null {
 [sinks.gc_log_sink]
 type = "http"
 inputs = ["label"]
-uri = "${GC_LOG_SINK}"
+uri = "{{ env "GC_LOG_SINK" }}"
 encoding.codec = "json"
-framing.method = "newline_delimited"` + authBlock + `
+framing.method = "newline_delimited"
 
 [sinks.prom_exporter]
 type = "prometheus_exporter"
 inputs = ["internal_metrics"]
-address = "0.0.0.0:${NOMAD_PORT_metrics}"
+address = "0.0.0.0:{{ env "NOMAD_PORT_metrics" }}"
 `
+	return strings.ReplaceAll(config+authBlock+"\n", "${", "$${")
 }
 
 func boolPtr(b bool) *bool { return &b }
@@ -474,13 +526,23 @@ type nomadTask struct {
 	// only after this task exits (fnrt-t4l.13's "kill_timeout ordering" —
 	// see sessionTaskGroup). Only ever set on the agent task, and only
 	// when a log-shipper task exists to order against.
-	Leader      bool              `json:"Leader,omitempty"`
-	Config      map[string]any    `json:"Config,omitempty"`
-	Env         map[string]string `json:"Env,omitempty"`
-	Artifacts   []nomadArtifact   `json:"Artifacts,omitempty"`
-	Templates   []nomadTemplate   `json:"Templates,omitempty"`
-	Resources   nomadResources    `json:"Resources"`
-	KillTimeout int64             `json:"KillTimeout,omitempty"`
+	Leader      bool                `json:"Leader,omitempty"`
+	Lifecycle   *nomadTaskLifecycle `json:"Lifecycle,omitempty"`
+	Config      map[string]any      `json:"Config,omitempty"`
+	Env         map[string]string   `json:"Env,omitempty"`
+	Artifacts   []nomadArtifact     `json:"Artifacts,omitempty"`
+	Templates   []nomadTemplate     `json:"Templates,omitempty"`
+	Resources   nomadResources      `json:"Resources"`
+	KillTimeout int64               `json:"KillTimeout,omitempty"`
+}
+
+// nomadTaskLifecycle is the task lifecycle subset needed to keep the
+// log-shipper failure domain separate from the agent task. Nomad's
+// poststart+sidecar form starts the shipper after the group leader and does
+// not make the sidecar's own failure a reason to stop the leader.
+type nomadTaskLifecycle struct {
+	Hook    string `json:"Hook,omitempty"`
+	Sidecar bool   `json:"Sidecar,omitempty"`
 }
 
 type nomadResources struct {

@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -19,6 +20,15 @@ import (
 // call is not visibly delayed once the lock frees up; long enough not to
 // spin.
 const sessionLockPollInterval = 20 * time.Millisecond
+
+const (
+	// allocExecReadyAttempts and allocExecReadyDelay bound the small window
+	// between Nomad dispatch returning and the allocation's exec endpoint
+	// becoming usable. This is deliberately a short readiness retry, not a
+	// general retry for provider or command failures.
+	allocExecReadyAttempts = 20
+	allocExecReadyDelay    = 250 * time.Millisecond
+)
 
 // lifecycle implements the RPP ops this pack scopes so far: the four
 // dispatch/deregister/blocking-read lifecycle ops (start, stop, is-running,
@@ -155,7 +165,17 @@ func (l *lifecycle) egressAllocFiles(ctx context.Context, sessionName, childJobI
 
 // execTaskName is the name of the single task in sessionTaskGroup (jobspec.go)
 // -- every alloc-exec call targets it.
-const execTaskName = "agent"
+var execTaskName = "agent"
+
+func init() {
+	configureExecTaskName()
+}
+
+func configureExecTaskName() {
+	if task := os.Getenv("GC_NOMAD_EXEC_TASK"); task != "" {
+		execTaskName = task
+	}
+}
 
 // tmuxSessionName is the wire-contract constant in-box tmux session name
 // (04 §5 R1a-08/-09): every carrier verb and the launch command target
@@ -574,18 +594,20 @@ func (l *lifecycle) findOrphanByNonce(ctx context.Context, sessionName, nonce st
 // the detached tmux-client call that starts the agent (04 §3 provision row
 // launch invariant).
 func (l *lifecycle) launch(ctx context.Context, sessionName string, env map[string]string) error {
-	allocID, err := l.currentAlloc(ctx, sessionName)
-	if err != nil {
-		return err
-	}
-	exitCode, dbgOut, err := l.client.execAlloc(ctx, allocID, execTaskName, buildLaunchCommand(env))
-	if err != nil {
-		return fmt.Errorf("launching session %q: %w", sessionName, err)
-	}
-	if exitCode != 0 {
-		return fmt.Errorf("launching session %q: launch command exited %d DEBUGOUT=%q", sessionName, exitCode, string(dbgOut))
-	}
-	return nil
+	return retryAllocExecReady(ctx, func() error {
+		allocID, err := l.currentAlloc(ctx, sessionName)
+		if err != nil {
+			return err
+		}
+		exitCode, dbgOut, err := l.client.execAlloc(ctx, allocID, execTaskName, buildLaunchCommand(env))
+		if err != nil {
+			return fmt.Errorf("launching session %q: %w", sessionName, err)
+		}
+		if exitCode != 0 {
+			return fmt.Errorf("launching session %q: launch command exited %d DEBUGOUT=%q", sessionName, exitCode, string(dbgOut))
+		}
+		return nil
+	})
 }
 
 // capturePanePID reads back the pid tmux assigned the pane launch just
@@ -703,18 +725,49 @@ func (l *lifecycle) stage(ctx context.Context, sessionName string, cfg stageConf
 // stderr/stdout (out) is safe to surface, but stdin here may carry secret
 // content the error path must never leak.
 func (l *lifecycle) execStage(ctx context.Context, sessionName string, command []string, stdin []byte) error {
-	allocID, err := l.currentAlloc(ctx, sessionName)
-	if err != nil {
-		return err
+	return retryAllocExecReady(ctx, func() error {
+		allocID, err := l.currentAlloc(ctx, sessionName)
+		if err != nil {
+			return err
+		}
+		exitCode, out, err := l.client.execAllocStdin(ctx, allocID, execTaskName, command, stdin)
+		if err != nil {
+			return err
+		}
+		if exitCode != 0 {
+			return fmt.Errorf("tar exited %d: %s", exitCode, out)
+		}
+		return nil
+	})
+}
+
+// retryAllocExecReady retries only the two failures that are expected while a
+// freshly dispatched allocation becomes exec-ready: no allocation is visible
+// yet, or Nomad closes the exec stream before the task is ready. Command exit
+// failures and other provider errors are returned immediately so a real fault
+// is not hidden behind a retry delay.
+func retryAllocExecReady(ctx context.Context, operation func() error) error {
+	var lastErr error
+	for attempt := 0; attempt < allocExecReadyAttempts; attempt++ {
+		err := operation()
+		if err == nil || !allocReadyRetryable(err) || attempt == allocExecReadyAttempts-1 {
+			return err
+		}
+		lastErr = err
+
+		timer := time.NewTimer(allocExecReadyDelay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
 	}
-	exitCode, out, err := l.client.execAllocStdin(ctx, allocID, execTaskName, command, stdin)
-	if err != nil {
-		return err
-	}
-	if exitCode != 0 {
-		return fmt.Errorf("tar exited %d: %s", exitCode, out)
-	}
-	return nil
+	return lastErr
+}
+
+func allocReadyRetryable(err error) bool {
+	return errors.Is(err, errAllocNotReady) || errors.Is(err, io.EOF)
 }
 
 // errSessionNotFound marks a currentAlloc failure caused by the session
@@ -724,6 +777,12 @@ func (l *lifecycle) execStage(ctx context.Context, sessionName string, command [
 // provider.md "Best-effort interrupt/nudge: Return 0 even if the session
 // doesn't exist").
 var errSessionNotFound = errors.New("session not found")
+
+// errAllocNotReady marks the narrow post-dispatch window where the sidecar
+// binding exists but Nomad has not exposed its allocation yet. It is joined
+// with errSessionNotFound below so callers that need the existing
+// not-found/best-effort semantics keep seeing that classification.
+var errAllocNotReady = errors.New("allocation not ready")
 
 // currentAlloc resolves the non-terminal Nomad alloc ID backing
 // sessionName's current child job, sidecar-binding-primary (04 §2.1 rule 1).
@@ -738,6 +797,9 @@ func (l *lifecycle) currentAlloc(ctx context.Context, sessionName string) (strin
 	allocs, _, err := l.client.listAllocsForJob(ctx, b.ChildJobID, 0, 0)
 	if err != nil {
 		return "", fmt.Errorf("resolving alloc for session %q: %w", sessionName, err)
+	}
+	if len(allocs) == 0 {
+		return "", fmt.Errorf("session %q has no allocation yet: %w; %w", sessionName, errSessionNotFound, errAllocNotReady)
 	}
 	for _, a := range allocs {
 		if !isTerminalStatus(a.ClientStatus) {

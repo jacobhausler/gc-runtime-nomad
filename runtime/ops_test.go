@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,6 +28,73 @@ func newTestLifecycle(t *testing.T) (*lifecycle, *fakenomad.Server) {
 		t.Fatalf("newSidecar: %v", err)
 	}
 	return &lifecycle{client: c, sidecar: sc, parentJobID: "gc-sessions"}, srv
+}
+
+func TestConfigureExecTaskNameUsesEnvironment(t *testing.T) {
+	original := execTaskName
+	t.Cleanup(func() { execTaskName = original })
+	execTaskName = "agent"
+	t.Setenv("GC_NOMAD_EXEC_TASK", "custom-agent")
+	configureExecTaskName()
+	if execTaskName != "custom-agent" {
+		t.Fatalf("execTaskName = %q, want environment override %q", execTaskName, "custom-agent")
+	}
+}
+
+// TestOpStartRetriesProvisionReadinessRace covers the real Nomad transition
+// where dispatch has returned an allocation, but alloc-exec closes before the
+// task is ready to accept a command. Both staging and launch must tolerate
+// that transient readiness failure; otherwise a start with secrets fails
+// before the agent can be launched.
+func TestOpStartRetriesProvisionReadinessRace(t *testing.T) {
+	l, srv := newTestLifecycle(t)
+	srv.FailExecNext(2) // secret staging, then launch
+
+	if err := l.opStartWithConfig(context.Background(), "sess-readiness", stageConfig{
+		Env: map[string]string{"OPENAI_API_KEY": "transient-readiness-secret"},
+	}); err != nil {
+		t.Fatalf("start after transient provision readiness failures: %v", err)
+	}
+	running, err := l.opIsRunning(context.Background(), "sess-readiness")
+	if err != nil || !running {
+		t.Fatalf("is-running after readiness retry = (%v, %v), want (true, nil)", running, err)
+	}
+	exitCode, out, err := l.opExec(context.Background(), "sess-readiness", []string{"/bin/sh", "-c", `cat "$NOMAD_SECRETS_DIR/OPENAI_API_KEY"`})
+	if err != nil || exitCode != 0 || !strings.Contains(string(out), "transient-readiness-secret") {
+		t.Fatalf("staged secret after readiness retry = (exit %d, out %q, err %v), want the secret", exitCode, out, err)
+	}
+}
+
+func TestRetryAllocExecReadyDoesNotRetryCommandFailure(t *testing.T) {
+	attempts := 0
+	want := errors.New("tar exited 2: permission denied")
+	err := retryAllocExecReady(context.Background(), func() error {
+		attempts++
+		return want
+	})
+	if !errors.Is(err, want) {
+		t.Fatalf("retryAllocExecReady error = %v, want %v", err, want)
+	}
+	if attempts != 1 {
+		t.Fatalf("command failure attempts = %d, want 1", attempts)
+	}
+}
+
+func TestRetryAllocExecReadyRetriesMissingAllocation(t *testing.T) {
+	attempts := 0
+	err := retryAllocExecReady(context.Background(), func() error {
+		attempts++
+		if attempts < 3 {
+			return errAllocNotReady
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("retryAllocExecReady: %v", err)
+	}
+	if attempts != 3 {
+		t.Fatalf("allocation readiness attempts = %d, want 3", attempts)
+	}
 }
 
 // TestLifecycleRoundTrip exercises the exact shape `gc runtime check`'s
