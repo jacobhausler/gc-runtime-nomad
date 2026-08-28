@@ -11,6 +11,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -368,10 +370,10 @@ func TestTaskLifetimeReflectsRealProcess(t *testing.T) {
 // TestSideTaskCrashLeavesAllocRunning drives fnrt-t4l.13's N-task group
 // modeling and its failure-injection scope line directly: a second
 // (non-main) task in the group — standing in for the log-shipper sidecar —
-// crashes immediately, and the alloc's ClientStatus must stay "running" the
-// whole time the main (session) task is still alive, exactly matching real
-// Nomad's per-task-state aggregation. TestTaskLifetimeReflectsRealProcess
-// covers the single-task case this generalizes.
+// fails, and the alloc's ClientStatus must stay "running" the whole time the
+// main (session) task is still alive, exactly matching real Nomad's
+// per-task-state aggregation. TestTaskLifetimeReflectsRealProcess covers the
+// single-task case this generalizes.
 func TestSideTaskCrashLeavesAllocRunning(t *testing.T) {
 	srv := NewServer()
 	defer srv.Close()
@@ -382,11 +384,13 @@ func TestSideTaskCrashLeavesAllocRunning(t *testing.T) {
 			"Tasks": []map[string]any{
 				{
 					"Name":   "agent",
+					"Leader": true,
 					"Config": map[string]any{"command": "sh", "args": []string{"-c", "sleep 5"}},
 				},
 				{
-					"Name":   "log-shipper",
-					"Config": map[string]any{"command": "sh", "args": []string{"-c", "exit 1"}},
+					"Name":      "log-shipper",
+					"Lifecycle": map[string]any{"Hook": "poststart", "Sidecar": true},
+					"Config":    map[string]any{"command": "sh", "args": []string{"-c", "printf started > log-shipper.started; sleep 0.1; exit 1"}},
 				},
 			},
 		}},
@@ -412,11 +416,44 @@ func TestSideTaskCrashLeavesAllocRunning(t *testing.T) {
 		t.Fatalf("ClientStatus immediately after dispatch = %q, want %q", got, "running")
 	}
 
-	// Give the side task (log-shipper) time to crash and exit — well
-	// beyond its own near-instant "exit 1" — and confirm the alloc is
-	// still "running" throughout, driven only by the still-alive main
-	// (agent) task.
+	// Prove the fake actually started the side task. Without this assertion,
+	// a fake that silently ignored every task after the leader would still
+	// pass the liveness assertion below.
+	allocDir := srv.allocScratchDir(allocs[0]["ID"].(string))
+	started := filepath.Join(allocDir, "log-shipper.started")
 	deadline := time.Now().Add(1 * time.Second)
+	for {
+		if _, err := os.Stat(started); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("log-shipper task did not start: marker %q was not created", started)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Confirm the side task really exited before checking the aggregate state;
+	// otherwise a side task that started but hung forever would look like a
+	// successful failure-isolation test.
+	allocID, _ := allocs[0]["ID"].(string)
+	srv.mu.Lock()
+	if len(srv.taskProcs[allocID]) != 2 {
+		got := len(srv.taskProcs[allocID])
+		srv.mu.Unlock()
+		t.Fatalf("recorded task processes = %d, want leader plus side task", got)
+	}
+	sideDone := srv.taskProcs[allocID][1].done
+	srv.mu.Unlock()
+	select {
+	case <-sideDone:
+	case <-time.After(1 * time.Second):
+		t.Fatal("log-shipper task did not exit within 1s")
+	}
+
+	// Confirm the alloc is still "running" after the side task failed and
+	// throughout the rest of the leader's lifetime, driven only by the
+	// still-alive leader (agent) task.
+	deadline = time.Now().Add(1 * time.Second)
 	for time.Now().Before(deadline) {
 		httpJSON(t, http.MethodGet, srv.URL()+"/v1/job/"+childID+"/allocations", nil, &allocs)
 		if got, _ := allocs[0]["ClientStatus"].(string); got != "running" {

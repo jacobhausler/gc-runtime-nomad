@@ -101,6 +101,9 @@ func (s *Server) handleExecWS(w http.ResponseWriter, r *http.Request, allocID st
 			continue
 		}
 		if frame.Stdin.Close {
+			if s.takeExecFailure() {
+				return
+			}
 			exitCode, output := s.runCommand(allocID, command, stdin.Bytes())
 			stdout, _ := json.Marshal(map[string]any{
 				"stdout": map[string]string{"data": base64.StdEncoding.EncodeToString(output)},

@@ -36,6 +36,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"text/template"
 	"time"
 )
 
@@ -47,6 +48,12 @@ const (
 	defaultWait = 5 * time.Second
 	maxWait     = 10 * time.Second
 )
+
+// basePort anchors this fake's dynamic-port assignment (fnrt-t4l.24):
+// each label declared in a job's Networks[0].DynamicPorts gets
+// basePort+portSeq on every dispatch, standing in for the real port number
+// a live Nomad client would bind and inject as NOMAD_PORT_<Label>.
+const basePort = 21000
 
 // Job is the fake's minimal record of a registered or dispatched job.
 type Job struct {
@@ -70,14 +77,44 @@ type Job struct {
 	// task is still running, so a non-main task (e.g. a log-shipper
 	// sidecar) crashing must never flip ClientStatus away from "running".
 	Tasks []TaskSpec
+
+	// PortLabels are the group's Networks[0].DynamicPorts labels (e.g.
+	// "metrics" for the log-shipper's prometheus_exporter sink,
+	// fnrt-t4l.13) — real Nomad assigns each one a real port number per
+	// allocation and injects it into every task's environment as
+	// NOMAD_PORT_<Label>. A dispatched child inherits its parent's
+	// PortLabels (dispatch requests never carry their own Networks).
+	PortLabels []string
 }
 
 // TaskSpec is one task within a dispatched job's single task group — the
 // subset fakenomad needs to run each task as a real subprocess
-// (fnrt-t4l.13 N-task group modeling).
+// (fnrt-t4l.13 N-task group modeling) and render its template stanzas
+// (fnrt-t4l.24).
 type TaskSpec struct {
 	Name    string
 	Command []string
+	// Env is the task's own Env block — part of the env a template stanza
+	// renders against (fnrt-t4l.24), alongside NOMAD_PORT_<Label> and
+	// NOMAD_ALLOC_DIR/NOMAD_TASK_DIR.
+	Env map[string]string
+	// Templates are the task's Nomad template stanzas (EmbeddedTmpl+
+	// DestPath), rendered into the alloc's scratch dir before the task's
+	// command starts (fnrt-t4l.24 — a live-Nomad proof showed a job spec
+	// that relies on Nomad's own `{{ env "NOMAD_PORT_metrics" }}`
+	// interpolation needs that rendering pass actually exercised, not just
+	// escaped/string-matched by a test-local simulator).
+	Templates []TemplateSpec
+}
+
+// TemplateSpec mirrors the subset of Nomad's template stanza fakenomad
+// renders: EmbeddedTmpl is parsed and executed with Go's text/template
+// package — the same "{{ }}" delimiter syntax and `env` function Nomad's
+// own template stanza exposes — and the result is written to DestPath
+// under the task's alloc dir.
+type TemplateSpec struct {
+	EmbeddedTmpl string
+	DestPath     string
 }
 
 // Allocation is the fake's minimal record of a placed allocation.
@@ -88,6 +125,24 @@ type Allocation struct {
 	DesiredStatus string
 	ClientStatus  string
 	ModifyIndex   uint64
+
+	// Ports is this allocation's own dynamic-port assignment, label ->
+	// port number (fnrt-t4l.24) — the real per-allocation value every
+	// task's NOMAD_PORT_<Label> env var (and any template stanza's
+	// `env "NOMAD_PORT_<Label>"` call) resolves to.
+	Ports map[string]int
+
+	// TaskStates is the fake's per-task record, task name -> "running" /
+	// "complete" / "failed" (fnrt-t4l.24). The main task's entry tracks its
+	// real live state exactly like ClientStatus (startMainTask). A
+	// non-main task's entry is set once, to "running", the moment its
+	// command starts and is never updated again — mirroring this fake's
+	// existing choice (startSideTask) that a side task's own crash or exit
+	// is invisible to the alloc's aggregate state; a caller asking whether
+	// that task ever reached running gets a stable answer instead of one
+	// that can flip out from under it depending on how fast the task's own
+	// process happens to exit.
+	TaskStates map[string]string
 }
 
 // defaultAllocFiles seeds every dispatched allocation with the two files a
@@ -141,7 +196,9 @@ type Server struct {
 	execDirs   map[string]string            // allocID -> its exec scratch dir (lazy)
 	taskProcs  map[string][]*taskProc       // allocID -> its running task-command subprocesses, main task first (lazy)
 	faults     []fault
+	execFails  int // transient alloc-exec streams to close after stdin
 	dispSeq    uint64
+	portSeq    uint64 // dynamic-port assignment counter (fnrt-t4l.24)
 	trace      []string
 
 	execRoot string // parent of every per-alloc exec scratch dir
@@ -286,6 +343,29 @@ func (s *Server) ClearFault(method, path string) {
 // FailNext's scripted failure response.
 func (s *Server) DelayNext(method, path string, delay time.Duration) {
 	s.queueFault(fault{method: method, path: path, delay: delay, passthrough: true})
+}
+
+// FailExecNext makes the next count alloc-exec WebSocket calls close after
+// receiving the client's stdin-close frame, before sending a command result.
+// This models the transient EOF Nomad can return while a freshly dispatched
+// allocation is not ready for exec yet.
+func (s *Server) FailExecNext(count int) {
+	if count <= 0 {
+		return
+	}
+	s.mu.Lock()
+	s.execFails += count
+	s.mu.Unlock()
+}
+
+func (s *Server) takeExecFailure() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.execFails == 0 {
+		return false
+	}
+	s.execFails--
+	return true
 }
 
 func (s *Server) queueFault(f fault) {
@@ -464,9 +544,19 @@ func (s *Server) registerJob(w http.ResponseWriter, r *http.Request, pathID stri
 			NodePool   string            `json:"NodePool"`
 			Meta       map[string]string `json:"Meta"`
 			TaskGroups []struct {
+				Networks []struct {
+					DynamicPorts []struct {
+						Label string `json:"Label"`
+					} `json:"DynamicPorts"`
+				} `json:"Networks"`
 				Tasks []struct {
-					Name   string         `json:"Name"`
-					Config map[string]any `json:"Config"`
+					Name      string            `json:"Name"`
+					Config    map[string]any    `json:"Config"`
+					Env       map[string]string `json:"Env"`
+					Templates []struct {
+						EmbeddedTmpl string `json:"EmbeddedTmpl"`
+						DestPath     string `json:"DestPath"`
+					} `json:"Templates"`
 				} `json:"Tasks"`
 			} `json:"TaskGroups"`
 		} `json:"Job"`
@@ -485,15 +575,26 @@ func (s *Server) registerJob(w http.ResponseWriter, r *http.Request, pathID stri
 		ns = "default"
 	}
 	var tasks []TaskSpec
+	var portLabels []string
 	if len(req.Job.TaskGroups) > 0 {
-		for _, t := range req.Job.TaskGroups[0].Tasks {
-			tasks = append(tasks, TaskSpec{Name: t.Name, Command: taskCommand(t.Config)})
+		group := req.Job.TaskGroups[0]
+		for _, t := range group.Tasks {
+			var templates []TemplateSpec
+			for _, tmpl := range t.Templates {
+				templates = append(templates, TemplateSpec{EmbeddedTmpl: tmpl.EmbeddedTmpl, DestPath: tmpl.DestPath})
+			}
+			tasks = append(tasks, TaskSpec{Name: t.Name, Command: taskCommand(t.Config), Env: t.Env, Templates: templates})
+		}
+		for _, n := range group.Networks {
+			for _, p := range n.DynamicPorts {
+				portLabels = append(portLabels, p.Label)
+			}
 		}
 	}
 
 	s.mu.Lock()
 	idx := s.bumpIndexLocked()
-	s.jobs[id] = &Job{ID: id, Namespace: ns, NodePool: req.Job.NodePool, Meta: req.Job.Meta, Tasks: tasks, ModifyIndex: idx}
+	s.jobs[id] = &Job{ID: id, Namespace: ns, NodePool: req.Job.NodePool, Meta: req.Job.Meta, Tasks: tasks, PortLabels: portLabels, ModifyIndex: idx}
 	s.mu.Unlock()
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -587,7 +688,21 @@ func (s *Server) dispatchJob(w http.ResponseWriter, r *http.Request, parentID st
 	childID := fmt.Sprintf("%s/dispatch-%d-%06x", parentID, time.Now().UTC().Unix(), s.dispSeq)
 	idx := s.bumpIndexLocked()
 	tasks := parent.Tasks
-	s.jobs[childID] = &Job{ID: childID, Namespace: parent.Namespace, NodePool: parent.NodePool, ParentID: parentID, Dispatched: true, Meta: req.Meta, Tasks: tasks, ModifyIndex: idx}
+	s.jobs[childID] = &Job{ID: childID, Namespace: parent.Namespace, NodePool: parent.NodePool, ParentID: parentID, Dispatched: true, Meta: req.Meta, Tasks: tasks, PortLabels: parent.PortLabels, ModifyIndex: idx}
+
+	// Assign this allocation its own dynamic ports (fnrt-t4l.24) — real
+	// Nomad picks a real port per allocation and injects it into every
+	// task's environment as NOMAD_PORT_<Label>, which is exactly what a
+	// template stanza's `env "NOMAD_PORT_<Label>"` call resolves against
+	// (startAllTasks, renderTemplates).
+	ports := make(map[string]int, len(parent.PortLabels))
+	portEnv := make(map[string]string, len(parent.PortLabels))
+	for _, label := range parent.PortLabels {
+		s.portSeq++
+		port := basePort + int(s.portSeq)
+		ports[label] = port
+		portEnv["NOMAD_PORT_"+label] = strconv.Itoa(port)
+	}
 
 	allocID := fmt.Sprintf("alloc-%06x", s.dispSeq)
 	allocIdx := s.bumpIndexLocked()
@@ -598,9 +713,20 @@ func (s *Server) dispatchJob(w http.ResponseWriter, r *http.Request, parentID st
 		DesiredStatus: "run",
 		ClientStatus:  "pending",
 		ModifyIndex:   allocIdx,
+		Ports:         ports,
 	}
 	s.allocFiles[allocID] = defaultAllocFiles(allocID)
 	s.mu.Unlock()
+
+	// NOMAD_ALLOC_ID and NOMAD_META_<KEY> are real Nomad runtime env vars
+	// injected into every task alongside the dynamic ports above — a
+	// template stanza's `env "NOMAD_ALLOC_ID"` or `env "NOMAD_META_GC_SESSION"`
+	// call resolves against these the same way `env "NOMAD_PORT_<Label>"`
+	// resolves against portEnv (fnrt-3bvg, sibling of the t4l.24 port fix).
+	portEnv["NOMAD_ALLOC_ID"] = allocID
+	for k, v := range req.Meta {
+		portEnv["NOMAD_META_"+strings.ToUpper(k)] = v
+	}
 
 	// Actually run each task's own command as a real subprocess so the
 	// alloc's ClientStatus reflects its real lifetime (task-lifetime
@@ -611,8 +737,9 @@ func (s *Server) dispatchJob(w http.ResponseWriter, r *http.Request, parentID st
 	// dispatch response never races ahead of it: by the time this call
 	// returns, it has either started (ClientStatus "running") or failed to
 	// start (ClientStatus "failed"). Every other task starts in the
-	// background — see startAllTasks.
-	s.startAllTasks(allocID, tasks)
+	// background — see startAllTasks. Each task's template stanzas (if any)
+	// render before its command starts (fnrt-t4l.24).
+	s.startAllTasks(allocID, tasks, portEnv)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"DispatchedJobID": childID,
@@ -671,13 +798,33 @@ func (s *Server) readJob(w http.ResponseWriter, r *http.Request, id string) {
 	})
 }
 
+// copyAlloc snapshots *a's fields, including a fresh copy of its
+// TaskStates map, for use outside s.mu. TaskStates (unlike Ports, which is
+// set once at dispatch and never touched again) is mutated by a background
+// task-lifetime goroutine at any time (startMainTask), so sharing the map
+// reference itself into a value that escapes the lock would be a genuine
+// data race (caught by `go test -race`), the same concern
+// listAllocsForJob's own doc comment already covers for the Allocation
+// pointer.
+func copyAlloc(a *Allocation) Allocation {
+	out := *a
+	if a.TaskStates != nil {
+		out.TaskStates = make(map[string]string, len(a.TaskStates))
+		for k, v := range a.TaskStates {
+			out.TaskStates[k] = v
+		}
+	}
+	return out
+}
+
 // listAllocsForJob and its siblings below copy each matched Allocation by
-// value while still holding s.mu, rather than letting a *Allocation escape
-// the lock into writeJSON's later JSON-encode: task-lifetime modeling
-// (startTask) now mutates a live Allocation's ClientStatus/ModifyIndex from
-// a background goroutine at any time, so a pointer read here without the
-// lock held is a genuine data race (caught by `go test -race` once a
-// dispatched job's task actually runs), not just a theoretical one.
+// value (via copyAlloc) while still holding s.mu, rather than letting a
+// *Allocation escape the lock into writeJSON's later JSON-encode:
+// task-lifetime modeling (startTask) now mutates a live Allocation's
+// ClientStatus/ModifyIndex/TaskStates from a background goroutine at any
+// time, so a pointer read here without the lock held is a genuine data race
+// (caught by `go test -race` once a dispatched job's task actually runs),
+// not just a theoretical one.
 func (s *Server) listAllocsForJob(w http.ResponseWriter, r *http.Request, jobID string) {
 	if since, wait, blocking := blockingParams(r); blocking {
 		s.blockUntil(since, wait)
@@ -687,7 +834,7 @@ func (s *Server) listAllocsForJob(w http.ResponseWriter, r *http.Request, jobID 
 	var out []Allocation
 	for _, a := range s.allocs {
 		if a.JobID == jobID {
-			out = append(out, *a)
+			out = append(out, copyAlloc(a))
 		}
 	}
 	s.mu.Unlock()
@@ -703,7 +850,7 @@ func (s *Server) listAllocs(w http.ResponseWriter, r *http.Request) {
 	idx := s.index
 	out := make([]Allocation, 0, len(s.allocs))
 	for _, a := range s.allocs {
-		out = append(out, *a)
+		out = append(out, copyAlloc(a))
 	}
 	s.mu.Unlock()
 	w.Header().Set("X-Nomad-Index", strconv.FormatUint(idx, 10))
@@ -718,7 +865,7 @@ func (s *Server) readAlloc(w http.ResponseWriter, r *http.Request, id string) {
 	a, ok := s.allocs[id]
 	var alloc Allocation
 	if ok {
-		alloc = *a
+		alloc = copyAlloc(a)
 	}
 	idx := s.index
 	s.mu.Unlock()
@@ -735,6 +882,8 @@ func (s *Server) readAlloc(w http.ResponseWriter, r *http.Request, id string) {
 		"DesiredStatus": alloc.DesiredStatus,
 		"ClientStatus":  alloc.ClientStatus,
 		"ModifyIndex":   alloc.ModifyIndex,
+		"Ports":         alloc.Ports,
+		"TaskStates":    alloc.TaskStates,
 	})
 }
 
@@ -924,35 +1073,108 @@ func taskCommand(cfg map[string]any) []string {
 // as ANY task is still running). A task with an empty Command (no task
 // Config, e.g. every pre-existing bare `{"ID": ...}` caller) is skipped
 // entirely — for tasks[0] that keeps ClientStatus "pending" exactly as
-// before this modeling existed.
-func (s *Server) startAllTasks(allocID string, tasks []TaskSpec) {
+// before this modeling existed. portEnv carries this allocation's own
+// NOMAD_PORT_<Label> assignments (dispatchJob), which — together with each
+// task's own Env and the alloc's NOMAD_ALLOC_DIR/NOMAD_TASK_DIR — is what
+// that task's template stanzas (if any) render against before its command
+// starts (fnrt-t4l.24).
+func (s *Server) startAllTasks(allocID string, tasks []TaskSpec, portEnv map[string]string) {
 	for i, t := range tasks {
 		if len(t.Command) == 0 {
 			continue
 		}
 		if i == 0 {
-			s.startMainTask(allocID, t.Command)
+			s.startMainTask(allocID, t, portEnv)
 		} else {
-			s.startSideTask(allocID, t.Command)
+			s.startSideTask(allocID, t, portEnv)
 		}
 	}
 }
 
-// startMainTask runs command as a real subprocess standing in for Nomad's
-// exec driver actually running a dispatched job's main task (task-lifetime
-// modeling, NRT-P2-06.1) and drives allocID's ClientStatus accordingly:
-// "running" once it starts, "failed" if it never starts, and
-// "complete"/"failed" once it exits — the model a fixed-status alloc cannot
-// express, and the one NRT-P2-06.1 needs to catch a task command (like the
-// placeholder /bin/true this pack used to dispatch) that exits before
-// launch's alloc-exec call can ever reach the box. Starting is synchronous
-// (the caller — dispatchJob, via startAllTasks — blocks on it) so the
-// dispatch response is never observed before the alloc's ClientStatus
-// reflects whether the task actually started; only the exit wait runs in
-// the background.
-func (s *Server) startMainTask(allocID string, command []string) {
+// renderTemplates writes each of specs' EmbeddedTmpl through Go's
+// text/template package — the same "{{ }}" delimiter syntax and `env`
+// function Nomad's own template stanza exposes — into DestPath under dir,
+// backed by env (fnrt-t4l.24: a live-Nomad proof showed a job spec that
+// relies on Nomad's own `{{ env "NOMAD_PORT_metrics" }}` interpolation
+// needs that rendering pass actually exercised, not just escaped/
+// string-matched by a test-local simulator). Every EmbeddedTmpl this pack's
+// production job specs build only ever uses Nomad's own "{{ }}" syntax for
+// real Nomad interpolation; any "${...}" placeholders they also carry are a
+// distinct substitution a task's own process resolves itself at runtime, so
+// Go's text/template — which only ever recognizes its own "{{ }}"
+// delimiters — correctly leaves them untouched.
+func renderTemplates(dir string, specs []TemplateSpec, env map[string]string) error {
+	for _, spec := range specs {
+		tmpl, err := template.New(spec.DestPath).Funcs(template.FuncMap{
+			"env": func(name string) string { return env[name] },
+		}).Parse(spec.EmbeddedTmpl)
+		if err != nil {
+			return fmt.Errorf("parse template %s: %w", spec.DestPath, err)
+		}
+		var buf bytes.Buffer
+		if err := tmpl.Execute(&buf, nil); err != nil {
+			return fmt.Errorf("render template %s: %w", spec.DestPath, err)
+		}
+		dest := filepath.Join(dir, spec.DestPath)
+		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+			return fmt.Errorf("create directory for template %s: %w", spec.DestPath, err)
+		}
+		if err := os.WriteFile(dest, buf.Bytes(), 0o644); err != nil {
+			return fmt.Errorf("write template %s: %w", spec.DestPath, err)
+		}
+	}
+	return nil
+}
+
+// taskTemplateEnv builds the env a task's template stanzas render against
+// (fnrt-t4l.24): the task's own Env block, the allocation's dynamic ports as
+// NOMAD_PORT_<Label> (real Nomad's own env-injection contract), and
+// NOMAD_ALLOC_DIR/NOMAD_TASK_DIR pointing at the alloc's shared scratch dir
+// — this fake keeps every task's directory the same rather than modeling
+// real Nomad's separate per-task local/ subdirectory, since no template
+// stanza this pack renders needs that distinction.
+func taskTemplateEnv(dir string, taskEnv, portEnv map[string]string) map[string]string {
+	env := map[string]string{
+		"NOMAD_ALLOC_DIR": dir,
+		"NOMAD_TASK_DIR":  dir,
+	}
+	for k, v := range taskEnv {
+		env[k] = v
+	}
+	for k, v := range portEnv {
+		env[k] = v
+	}
+	return env
+}
+
+// startMainTask renders task's template stanzas (if any) and then runs its
+// command as a real subprocess standing in for Nomad's exec driver actually
+// running a dispatched job's main task (task-lifetime modeling,
+// NRT-P2-06.1) and drives allocID's ClientStatus accordingly: "running"
+// once it starts, "failed" if a template fails to render or the command
+// never starts, and "complete"/"failed" once it exits — the model a
+// fixed-status alloc cannot express, and the one NRT-P2-06.1 needs to catch
+// a task command (like the placeholder /bin/true this pack used to
+// dispatch) that exits before launch's alloc-exec call can ever reach the
+// box. Both the render and the start are synchronous (the caller —
+// dispatchJob, via startAllTasks — blocks on them) so the dispatch response
+// is never observed before the alloc's ClientStatus reflects whether the
+// task actually started; only the exit wait runs in the background.
+func (s *Server) startMainTask(allocID string, task TaskSpec, portEnv map[string]string) {
 	dir := s.allocScratchDir(allocID)
-	cmd := exec.Command(command[0], command[1:]...)
+
+	if err := renderTemplates(dir, task.Templates, taskTemplateEnv(dir, task.Env, portEnv)); err != nil {
+		s.mu.Lock()
+		if a, ok := s.allocs[allocID]; ok {
+			a.ClientStatus = "failed"
+			setTaskStateLocked(a, task.Name, "failed")
+			a.ModifyIndex = s.bumpIndexLocked()
+		}
+		s.mu.Unlock()
+		return
+	}
+
+	cmd := exec.Command(task.Command[0], task.Command[1:]...)
 	cmd.Dir = dir
 	cmd.Env = isolatedTmuxEnv(dir, "")
 
@@ -963,6 +1185,7 @@ func (s *Server) startMainTask(allocID string, command []string) {
 	if err != nil {
 		if ok {
 			a.ClientStatus = "failed"
+			setTaskStateLocked(a, task.Name, "failed")
 			a.ModifyIndex = s.bumpIndexLocked()
 		}
 		s.mu.Unlock()
@@ -972,6 +1195,7 @@ func (s *Server) startMainTask(allocID string, command []string) {
 	s.taskProcs[allocID] = append(s.taskProcs[allocID], &taskProc{cmd: cmd, done: done})
 	if ok {
 		a.ClientStatus = "running"
+		setTaskStateLocked(a, task.Name, "running")
 		a.ModifyIndex = s.bumpIndexLocked()
 	}
 	s.mu.Unlock()
@@ -982,8 +1206,10 @@ func (s *Server) startMainTask(allocID string, command []string) {
 		if a, ok := s.allocs[allocID]; ok && !terminalAllocStatus(a.ClientStatus) {
 			if waitErr == nil {
 				a.ClientStatus = "complete"
+				setTaskStateLocked(a, task.Name, "complete")
 			} else {
 				a.ClientStatus = "failed"
+				setTaskStateLocked(a, task.Name, "failed")
 			}
 			a.ModifyIndex = s.bumpIndexLocked()
 		}
@@ -992,22 +1218,38 @@ func (s *Server) startMainTask(allocID string, command []string) {
 	}()
 }
 
-// startSideTask runs command as a real subprocess standing in for a
-// non-main task in the group (e.g. fnrt-t4l.13's log-shipper) — best
-// effort, and deliberately never touches allocID's ClientStatus: a side
-// task that fails to start, crashes, or exits is invisible to the alloc's
-// aggregate state, matching real Nomad (an alloc stays "running" as long as
-// its main task is). It is still recorded in s.taskProcs so Close and
+// startSideTask renders task's template stanzas (if any) and then runs its
+// command as a real subprocess standing in for a non-main task in the group
+// (e.g. fnrt-t4l.13's log-shipper) — best effort, and deliberately never
+// touches allocID's ClientStatus: a side task that fails to render, fails
+// to start, crashes, or exits is invisible to the alloc's aggregate state,
+// matching real Nomad (an alloc stays "running" as long as its main task
+// is). Its own TaskStates entry is set once, to "running", the moment its
+// command starts, and — like ClientStatus — is never updated again by this
+// function: a caller asking whether this task ever reached running gets a
+// stable answer rather than one that can flip out from under it depending
+// on how fast the task's own process happens to exit (fnrt-t4l.24). A
+// render or start failure is recorded as "failed" and the command is never
+// started. A started task is still recorded in s.taskProcs so Close and
 // deregisterJob's kill sweep reap it like any other task subprocess.
-func (s *Server) startSideTask(allocID string, command []string) {
+func (s *Server) startSideTask(allocID string, task TaskSpec, portEnv map[string]string) {
 	dir := s.allocScratchDir(allocID)
-	cmd := exec.Command(command[0], command[1:]...)
+
+	if err := renderTemplates(dir, task.Templates, taskTemplateEnv(dir, task.Env, portEnv)); err != nil {
+		s.setTaskState(allocID, task.Name, "failed")
+		return
+	}
+
+	cmd := exec.Command(task.Command[0], task.Command[1:]...)
 	cmd.Dir = dir
 	cmd.Env = isolatedTmuxEnv(dir, "")
 
 	if err := cmd.Start(); err != nil {
+		s.setTaskState(allocID, task.Name, "failed")
 		return
 	}
+	s.setTaskState(allocID, task.Name, "running")
+
 	done := make(chan struct{})
 	s.mu.Lock()
 	s.taskProcs[allocID] = append(s.taskProcs[allocID], &taskProc{cmd: cmd, done: done})
@@ -1017,6 +1259,58 @@ func (s *Server) startSideTask(allocID string, command []string) {
 		_ = cmd.Wait()
 		close(done)
 	}()
+}
+
+// setTaskStateLocked records taskName's state on a — the caller must
+// already hold s.mu (mirrors bumpIndexLocked's naming convention).
+func setTaskStateLocked(a *Allocation, taskName, state string) {
+	if a.TaskStates == nil {
+		a.TaskStates = map[string]string{}
+	}
+	a.TaskStates[taskName] = state
+}
+
+// setTaskState is setTaskStateLocked's lock-acquiring counterpart, for
+// callers (startSideTask) that don't already hold s.mu and have no other
+// alloc field to update alongside it.
+func (s *Server) setTaskState(allocID, taskName, state string) {
+	s.mu.Lock()
+	if a, ok := s.allocs[allocID]; ok {
+		setTaskStateLocked(a, taskName, state)
+		a.ModifyIndex = s.bumpIndexLocked()
+	}
+	s.mu.Unlock()
+}
+
+// AssignedPort returns the dynamic port fakenomad assigned to label on
+// allocID's own allocation (fnrt-t4l.24's NOMAD_PORT_<Label> env-injection
+// contract), and whether that allocation/label combination exists — so a
+// test asserting a rendered template's port value has something real to
+// compare it against instead of a hardcoded constant.
+func (s *Server) AssignedPort(allocID, label string) (int, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a, ok := s.allocs[allocID]
+	if !ok {
+		return 0, false
+	}
+	port, ok := a.Ports[label]
+	return port, ok
+}
+
+// TaskState returns the fake's last-known state for taskName within
+// allocID's allocation ("running"/"complete"/"failed"), and whether that
+// task has ever been recorded at all. See Allocation.TaskStates for what
+// "state" means for a non-main task.
+func (s *Server) TaskState(allocID, taskName string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a, ok := s.allocs[allocID]
+	if !ok {
+		return "", false
+	}
+	state, ok := a.TaskStates[taskName]
+	return state, ok
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {
