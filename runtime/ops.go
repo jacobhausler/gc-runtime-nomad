@@ -210,12 +210,38 @@ exec "$@"`
 // this file stays agent-agnostic (Codex today, anything else tomorrow).
 var agentLaunchScript string
 
+// extraSecretKeys is the parsed name list from GC_NOMAD_EXTRA_SECRET_KEYS
+// (comma-separated), read once at init like agentLaunchScript's seam above
+// — a deployment-configured bridge letting the supervisor's own process env
+// (e.g. via ~/.gc/secrets.env passthrough) deliver a named secret into a
+// session's staged environment when gc's own city.toml provider env map has
+// no way to interpolate it (cr-u4plc.2). Unset/empty means no extra keys,
+// so stage() behaves exactly as before this seam landed — the rollback
+// path.
+var extraSecretKeys []string
+
 func init() {
 	configureAgentLaunchScript()
+	configureExtraSecretKeys()
 }
 
 func configureAgentLaunchScript() {
 	agentLaunchScript = os.Getenv("GC_NOMAD_AGENT_LAUNCH_SCRIPT")
+}
+
+func configureExtraSecretKeys() {
+	extraSecretKeys = parseExtraSecretKeys(os.Getenv("GC_NOMAD_EXTRA_SECRET_KEYS"))
+}
+
+func parseExtraSecretKeys(raw string) []string {
+	var keys []string
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			keys = append(keys, part)
+		}
+	}
+	return keys
 }
 
 // buildLaunchCommand is the detached tmux-client command that turns a
@@ -734,17 +760,19 @@ func (l *lifecycle) stage(ctx context.Context, sessionName string, cfg stageConf
 		}
 	}
 
+	secretEnv, extraKeys := mergeExtraSecretEnv(cfg.Env, extraSecretKeys)
+
 	var secretFiles []stageFile
-	for k, v := range cfg.Env {
-		if envArgvSafe(k) {
+	for k, v := range secretEnv {
+		if !extraKeys[k] && envArgvSafe(k) {
 			continue
 		}
 		secretFiles = append(secretFiles, stageFile{Path: k, Content: []byte(v), Mode: 0o600})
 	}
-	if len(cfg.Env) > 0 {
+	if len(secretEnv) > 0 {
 		secretFiles = append(secretFiles, stageFile{
 			Path:    stagedEnvScriptName,
-			Content: buildEnvScript(cfg.Env),
+			Content: buildEnvScript(secretEnv),
 			Mode:    0o600,
 		})
 	}

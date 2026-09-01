@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -91,6 +92,40 @@ var envArgvSafeNames = map[string]bool{
 // delivery. See envArgvSafeNames.
 func envArgvSafe(key string) bool {
 	return envArgvSafeNames[key]
+}
+
+// mergeExtraSecretEnv builds the staging-only env stage() uses to
+// materialize secret files: base (cfg.Env) plus, for each name in keys not
+// already present in base, that name's value read from this process's own
+// environment — the supervisor's process env, set via ~/.gc/secrets.env
+// passthrough, bridging a value gc's own city.toml provider env map has no
+// way to interpolate (GC_NOMAD_EXTRA_SECRET_KEYS, cr-u4plc.2).
+// Caller-supplied base always wins on collision. The returned set marks
+// which keys came from this merge so stage() can always route them to the
+// secrets dir even if their name coincidentally matches envArgvSafeNames —
+// an extra secret key is always secret by declaration, never by lucky
+// allow-listing. This merge is local to stage() and never mutates base
+// itself, so an extra-sourced value can never reach buildLaunchCommand's
+// argv (buildLaunchCommand is only ever called with cfg.Env, untouched by
+// this function).
+func mergeExtraSecretEnv(base map[string]string, keys []string) (map[string]string, map[string]bool) {
+	merged := make(map[string]string, len(base)+len(keys))
+	for k, v := range base {
+		merged[k] = v
+	}
+	extra := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		if _, ok := merged[k]; ok {
+			continue
+		}
+		v, ok := os.LookupEnv(k)
+		if !ok {
+			continue
+		}
+		merged[k] = v
+		extra[k] = true
+	}
+	return merged, extra
 }
 
 const stagedEnvScriptName = "env.sh"

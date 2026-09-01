@@ -84,6 +84,186 @@ func TestStagingWritesSourceableEnvironmentScript(t *testing.T) {
 	}
 }
 
+// withExtraSecretKeys sets the package-level extraSecretKeys seam for the
+// duration of one test and restores it afterward, mirroring
+// withAgentLaunchScript above — stage() has no lifecycle handle to this
+// config, so tests must not leak it across each other.
+func withExtraSecretKeys(t *testing.T, keys []string) {
+	t.Helper()
+	prev := extraSecretKeys
+	extraSecretKeys = keys
+	t.Cleanup(func() { extraSecretKeys = prev })
+}
+
+// TestParseExtraSecretKeys is a focused unit check on
+// GC_NOMAD_EXTRA_SECRET_KEYS's init-time parsing: comma-separated names,
+// trimmed, blanks dropped.
+func TestParseExtraSecretKeys(t *testing.T) {
+	got := parseExtraSecretKeys(" CODEX_AUTH_JSON, OTHER_KEY ,,SPACED_OUT  ")
+	want := []string{"CODEX_AUTH_JSON", "OTHER_KEY", "SPACED_OUT"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("parseExtraSecretKeys = %v, want %v", got, want)
+	}
+	if got := parseExtraSecretKeys(""); got != nil {
+		t.Fatalf("parseExtraSecretKeys(\"\") = %v, want nil", got)
+	}
+}
+
+// TestExtraSecretKeysStagedFromProcessEnv is the GREEN half of
+// GC_NOMAD_EXTRA_SECRET_KEYS (cr-u4plc.2): a key named in that list and
+// present in this process's own env (standing in for the supervisor's
+// ~/.gc/secrets.env passthrough, which gc's own city.toml provider env map
+// has no way to interpolate) lands in NOMAD_SECRETS_DIR exactly like an
+// explicit cfg.Env secret would, even though the caller's stageConfig never
+// mentioned it.
+func TestExtraSecretKeysStagedFromProcessEnv(t *testing.T) {
+	const secretValue = "codex-auth-json-bytes-do-not-leak"
+	t.Setenv("CODEX_AUTH_JSON", secretValue)
+	withExtraSecretKeys(t, []string{"CODEX_AUTH_JSON"})
+
+	l, _ := newTestLifecycle(t)
+	ctx := context.Background()
+	const session = "sess-extra-secret"
+
+	cfg := stageConfig{Env: map[string]string{"GC_SESSION": "safe-value"}}
+	if err := l.opStartWithConfig(ctx, session, cfg); err != nil {
+		t.Fatalf("start with extra secret key configured: %v", err)
+	}
+
+	exitCode, out, err := l.opExec(ctx, session, []string{"/bin/sh", "-c", `cat "$NOMAD_SECRETS_DIR/CODEX_AUTH_JSON"`})
+	if err != nil || exitCode != 0 {
+		t.Fatalf("reading extra-secret file back: exit=%d err=%v out=%s", exitCode, err, out)
+	}
+	if strings.TrimSpace(string(out)) != secretValue {
+		t.Fatalf("staged CODEX_AUTH_JSON = %q, want %q", out, secretValue)
+	}
+
+	// It must also never ride the launch command's argv, regardless of the
+	// fact that it was sourced outside cfg.Env — an extra secret key is
+	// always secret by declaration.
+	cmd := buildLaunchCommand(cfg.Env)
+	if strings.Contains(strings.Join(cmd, " "), secretValue) {
+		t.Fatalf("launch command %v carries the extra secret value", cmd)
+	}
+}
+
+// TestExtraSecretKeysCallerEnvWins proves caller-supplied cfg.Env beats the
+// process-env value on a key collision — the explicit judgment call this
+// bead's diff must document.
+func TestExtraSecretKeysCallerEnvWins(t *testing.T) {
+	t.Setenv("CODEX_AUTH_JSON", "process-env-value-must-not-win")
+	withExtraSecretKeys(t, []string{"CODEX_AUTH_JSON"})
+
+	l, _ := newTestLifecycle(t)
+	ctx := context.Background()
+	const session = "sess-extra-secret-collision"
+
+	cfg := stageConfig{Env: map[string]string{"CODEX_AUTH_JSON": "caller-supplied-value"}}
+	if err := l.opStartWithConfig(ctx, session, cfg); err != nil {
+		t.Fatalf("start with colliding extra secret key: %v", err)
+	}
+
+	exitCode, out, err := l.opExec(ctx, session, []string{"/bin/sh", "-c", `cat "$NOMAD_SECRETS_DIR/CODEX_AUTH_JSON"`})
+	if err != nil || exitCode != 0 {
+		t.Fatalf("reading staged secret back: exit=%d err=%v out=%s", exitCode, err, out)
+	}
+	if strings.TrimSpace(string(out)) != "caller-supplied-value" {
+		t.Fatalf("staged CODEX_AUTH_JSON = %q, want caller-supplied value to win", out)
+	}
+}
+
+// TestExtraSecretKeysUnsetIsNoop is the RED-becomes-rollback half: with
+// GC_NOMAD_EXTRA_SECRET_KEYS unset (the default, extraSecretKeys nil),
+// staging behaves exactly as before this seam existed — a key present only
+// in the process env and never named in cfg.Env is not staged at all, same
+// pattern as GC_NOMAD_AGENT_LAUNCH_SCRIPT's own rollback
+// (TestBuildLaunchCommandDefaultIsBareTmuxPlaceholder).
+func TestExtraSecretKeysUnsetIsNoop(t *testing.T) {
+	t.Setenv("UNCONFIGURED_SECRET", "should-never-be-staged")
+	withExtraSecretKeys(t, nil)
+
+	l, _ := newTestLifecycle(t)
+	ctx := context.Background()
+	const session = "sess-extra-secret-unset"
+
+	cfg := stageConfig{Env: map[string]string{"GC_SESSION": "safe-value"}}
+	if err := l.opStartWithConfig(ctx, session, cfg); err != nil {
+		t.Fatalf("start with no extra secret keys configured: %v", err)
+	}
+
+	exitCode, out, err := l.opExec(ctx, session, []string{"/bin/sh", "-c", `[ -f "$NOMAD_SECRETS_DIR/UNCONFIGURED_SECRET" ] && echo present || echo absent`})
+	if err != nil || exitCode != 0 {
+		t.Fatalf("probing for unconfigured secret file: exit=%d err=%v out=%s", exitCode, err, out)
+	}
+	if strings.TrimSpace(string(out)) != "absent" {
+		t.Fatalf("UNCONFIGURED_SECRET was staged though GC_NOMAD_EXTRA_SECRET_KEYS never named it: %s", out)
+	}
+}
+
+// TestExtraSecretKeysNoCanaryLeak extends TestM3StagingReceiptNoCanaryLeak's
+// style to the extra-secret-key path: the value never appears in any Nomad
+// API request, sidecar file, or CLI stderr — only the declared KEY name
+// (CODEX_AUTH_JSON) is referenced anywhere in this test, never the value.
+func TestExtraSecretKeysNoCanaryLeak(t *testing.T) {
+	const canary = "CANARY-EXTRA-SECRET-4c1a9f-do-not-leak"
+
+	srv := fakenomad.NewServer()
+	t.Cleanup(srv.Close)
+	sidecarDir := t.TempDir()
+
+	c, err := newClient(srv.URL(), "", "default")
+	if err != nil {
+		t.Fatalf("newClient: %v", err)
+	}
+	rec := &requestRecorder{}
+	c.http.Transport = rec
+	sc, err := newSidecar(sidecarDir)
+	if err != nil {
+		t.Fatalf("newSidecar: %v", err)
+	}
+	l := &lifecycle{client: c, sidecar: sc, parentJobID: "gc-sessions"}
+	ctx := context.Background()
+	const session = "sess-extra-secret-canary"
+
+	t.Setenv("CODEX_AUTH_JSON", canary)
+	withExtraSecretKeys(t, []string{"CODEX_AUTH_JSON"})
+
+	cfg := stageConfig{Env: map[string]string{"GC_SESSION": "safe-value-not-a-secret"}}
+	if err := l.opStartWithConfig(ctx, session, cfg); err != nil {
+		t.Fatalf("start with extra secret key configured: %v", err)
+	}
+
+	// Positive control: it really landed.
+	exitCode, out, err := l.opExec(ctx, session, []string{"/bin/sh", "-c", `cat "$NOMAD_SECRETS_DIR/CODEX_AUTH_JSON"`})
+	if err != nil || exitCode != 0 {
+		t.Fatalf("reading staged extra secret back: exit=%d err=%v out=%s", exitCode, err, out)
+	}
+	if !strings.Contains(string(out), canary) {
+		t.Fatalf("staged extra secret did not land in NOMAD_SECRETS_DIR: %s", out)
+	}
+
+	if dump := rec.dump(); strings.Contains(dump, canary) {
+		t.Fatalf("canary leaked into a Nomad API request (job spec/dispatch payload):\n%s", dump)
+	}
+
+	entries, err := os.ReadDir(sidecarDir)
+	if err != nil {
+		t.Fatalf("reading sidecar dir: %v", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(sidecarDir, e.Name()))
+		if err != nil {
+			t.Fatalf("reading sidecar file %s: %v", e.Name(), err)
+		}
+		if bytes.Contains(data, []byte(canary)) {
+			t.Fatalf("canary leaked into sidecar file %s:\n%s", e.Name(), data)
+		}
+	}
+}
+
 // TestM3StagingReceiptNoCanaryLeak is the second half of the M3 staging
 // receipt: zero planted-canary hits across job specs, request logs, stderr,
 // and sidecar files (R2c-07's single-receipt claim; the rollback trigger is
