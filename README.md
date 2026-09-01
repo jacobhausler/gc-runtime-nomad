@@ -79,6 +79,22 @@ Lifecycle ops need Nomad API configuration on the environment:
 | `GC_NOMAD_LOG_SINK_TOKEN_FILE` | no | In-box path the `log-shipper` task reads its `Authorization: Bearer` token's value from; unset ⇒ an unauthenticated sink |
 | `GC_NOMAD_LOG_LABELS` | no | `k=v,k=v` labels merged onto every shipped log line alongside the fixed `session_name`/`alloc_id`/`node`/`runtime=nomad` set |
 
+### Allocation environment contract
+
+Each session allocation receives its runtime environment in three explicit
+layers:
+
+| Layer | Delivery contract |
+|---|---|
+| Workspace/secrets | `stageConfig.Env` is staged through the existing `env.workspace` tar channel into `$NOMAD_SECRETS_DIR`, including the sourceable `env.sh` file. |
+| Toolchain | `gc`, Codex, tmux, `sh`, and `tar` are expected in the allocation toolchain. The pinned Linux `gc` artifact is mounted read-only from the client host volume `nomad` at `/mnt/nomad`; remaining host-assumed binaries are node checklist items. |
+| Identity/config | `GC_CITY_URL`, `GC_CITY_CONTEXT`, and session identity values arrive through the secrets environment channel. Remote sessions must receive `GC_CITY_URL`; the gc-side remote-worker guard fails closed when it is absent or unreachable. |
+
+The Cloudflare pack's bundle is the environment boundary for pack-provided
+tools; the exec driver otherwise retains its host-binary assumptions. The
+runtime sources `$NOMAD_SECRETS_DIR/env.sh` before starting tmux, while local
+mode remains valid when no environment script is staged.
+
 Enable live session-log continuity with the recommended one-line setup:
 
 ```bash
@@ -131,7 +147,7 @@ bead.
 | `check` | Pack-local diagnostic. Emits `warning: session logs will not be shipped (GC_NOMAD_LOG_SINK unset)` to stderr when the optional log sink is unset; does not require Nomad configuration. |
 | `protocol` | `{"version":0,"capabilities":["proc.provision","proc.exec","env.workspace"]}` |
 | `provision` | Registers the parent job (idempotent upsert) if needed, then dispatches a tmux-only child for the session — no agent launched, sidecar launched marker stays unset. Rejects a session with a live child with an "already exists" error (04 §6 wire-contract constant). Reads an optional staging config (JSON) on stdin and materializes it (see `start`'s staging row) before returning. |
-| `start` | `provision` + launch: dispatches, stages an optional workspace/secrets config read as JSON from stdin (`staging.go`'s `stageConfig`, NRT-P1-06 — workspace files land under `WorkDir` and non-`envArgvSafe` env entries land as files under `$NOMAD_SECRETS_DIR`, both via tar-over-exec-stdin, 04 §5), then execs the launch command (`tmux new-session -d -s main`, plus `-e KEY=VALUE` for any `envArgvSafe`-classified env entries) into the alloc, then sets the launched marker. Empty/absent stdin is a no-op config — pre-staging callers are unaffected. Same "already exists" rejection as `provision`. |
+| `start` | `provision` + launch: dispatches, stages an optional workspace/secrets config read as JSON from stdin (`staging.go`'s `stageConfig`, NRT-P1-06 — workspace files land under `WorkDir` and env entries land as individual files plus a sourceable `env.sh` under `$NOMAD_SECRETS_DIR`, both via tar-over-exec-stdin, 04 §5), then sources that script and execs the launch command (`tmux new-session -d -s main`, plus `-e KEY=VALUE` for any `envArgvSafe`-classified env entries) into the alloc, then sets the launched marker. Empty/absent stdin is a no-op config — pre-staging callers are unaffected. Same "already exists" rejection as `provision`. |
 | `exec` | Runs a command inside the session's current alloc over the Nomad alloc-exec WebSocket and streams its stdout; **the op's own exit code is the remote command's exit code** (04 §3 exec row, RPP-CONN-001) — not the 0/1/2 lifecycle-op convention. Works regardless of the launched marker — a provisioned-but-not-launched box already answers exec (RPP-PROVISION-001). |
 | `relaunch` | Re-execs the launch command into the SAME alloc — no fresh dispatch, no fresh env — then sets the launched marker (04 §7 warm relaunch, launch-only fingerprint drift). Fails if the session has no live alloc to relaunch into. |
 | `nudge` / `peek` / `interrupt` / `send-keys` / `clear-scrollback` | The driving verbs (NRT-P1-05), realized as tmux commands sent into the session's tmux pane over the same exec mechanism. `nudge`/`interrupt` are best-effort — a not-found session answers success rather than an error, per the RPP's best-effort convention. |
@@ -176,8 +192,8 @@ token cannot fix the drift in place.
   only; it is a distinct mechanism from the log-shipper's live streaming.)
 - Remote artifact blocks and the env.ledger tunnel (`NRT-P1-06`) — staging
   only materializes what a caller sends inline on stdin; the launch command
-  is still a bare `tmux new-session` (plus `-e` flags), not a real agent
-  command line. The session task's own command (`jobspec.go`'s
+  starts a bare `tmux new-session` (plus `-e` flags) after sourcing the
+  staged environment, not a real agent command line. The session task's own command (`jobspec.go`'s
   `sessionSupervisorScript`, NRT-P2-06.1) is a real long-lived
   trap-and-loop that keeps the alloc alive until stop — no longer the
   `/bin/true` placeholder that used to exit immediately on a real client —

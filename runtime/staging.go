@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -90,6 +91,58 @@ var envArgvSafeNames = map[string]bool{
 // delivery. See envArgvSafeNames.
 func envArgvSafe(key string) bool {
 	return envArgvSafeNames[key]
+}
+
+const stagedEnvScriptName = "env.sh"
+
+// validShellEnvName accepts the portable shell identifier form used by
+// `export NAME=value`. Invalid names remain available through their existing
+// individual secret file, but are not emitted into env.sh where they could
+// turn a value into shell syntax.
+func validShellEnvName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_' {
+			continue
+		}
+		if i == 0 || c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// shellQuote returns a single-quoted shell word. The generated env.sh is
+// sourced inside an allocation, so values must remain data even when they
+// contain spaces, quotes, substitutions, or command separators.
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+}
+
+// buildEnvScript creates the sourceable environment contract staged into
+// NOMAD_SECRETS_DIR. Keys are sorted for deterministic receipts and only
+// valid shell identifiers are exported.
+func buildEnvScript(env map[string]string) []byte {
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		if validShellEnvName(key) {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+
+	var b strings.Builder
+	for _, key := range keys {
+		b.WriteString("export ")
+		b.WriteString(key)
+		b.WriteByte('=')
+		b.WriteString(shellQuote(env[key]))
+		b.WriteByte('\n')
+	}
+	return []byte(b.String())
 }
 
 // errStagePathInvalid marks a stageFile whose Path is absolute or escapes

@@ -155,6 +155,17 @@ func sessionTaskGroup(logShipper logShipperConfig) nomadTaskGroup {
 	return nomadTaskGroup{
 		Name:  "session",
 		Count: 1,
+		// The shared host volume is the only supported delivery point for
+		// the pinned Linux gc artifact. It is declared at group scope and
+		// mounted read-only by the agent task below; the client must have a
+		// host volume named "nomad" configured at /mnt/nomad.
+		Volumes: map[string]nomadVolume{
+			gcArtifactVolumeName: {
+				Type:     "host",
+				Source:   gcArtifactVolumeSource,
+				ReadOnly: true,
+			},
+		},
 		// GC is the only self-healer for session jobs (04 §4): a dead
 		// agent must produce a terminal alloc that STAYS terminal, so both
 		// in-place restart and reschedule are disabled here.
@@ -198,6 +209,11 @@ func sessionTask() nomadTask {
 	return nomadTask{
 		Name:   "agent",
 		Driver: "exec",
+		VolumeMounts: []nomadVolumeMount{{
+			Volume:      gcArtifactVolumeName,
+			Destination: gcArtifactMountPath,
+			ReadOnly:    true,
+		}},
 		Config: map[string]any{
 			"command": "/bin/sh",
 			"args":    []string{"-c", sessionSupervisorScript},
@@ -213,6 +229,12 @@ func sessionTask() nomadTask {
 		// is declared here.
 	}
 }
+
+const (
+	gcArtifactVolumeName   = "gc-artifacts"
+	gcArtifactVolumeSource = "nomad"
+	gcArtifactMountPath    = "/mnt/nomad"
+)
 
 // --- log-shipper task (fnrt-t4l.13) ---
 
@@ -477,13 +499,24 @@ type nomadParameterizedJob struct {
 }
 
 type nomadTaskGroup struct {
-	Name             string                `json:"Name"`
-	Count            int                   `json:"Count"`
-	RestartPolicy    nomadRestartPolicy    `json:"RestartPolicy"`
-	ReschedulePolicy nomadReschedulePolicy `json:"ReschedulePolicy"`
-	Disconnect       *nomadDisconnect      `json:"Disconnect,omitempty"`
-	Networks         []nomadNetwork        `json:"Networks,omitempty"`
-	Tasks            []nomadTask           `json:"Tasks"`
+	Name             string                 `json:"Name"`
+	Count            int                    `json:"Count"`
+	RestartPolicy    nomadRestartPolicy     `json:"RestartPolicy"`
+	ReschedulePolicy nomadReschedulePolicy  `json:"ReschedulePolicy"`
+	Disconnect       *nomadDisconnect       `json:"Disconnect,omitempty"`
+	Networks         []nomadNetwork         `json:"Networks,omitempty"`
+	Volumes          map[string]nomadVolume `json:"Volumes,omitempty"`
+	Tasks            []nomadTask            `json:"Tasks"`
+}
+
+// nomadVolume is the group-level host volume declaration used by the agent
+// to access the shared artifact store. ReadOnly is explicit in both the
+// declaration and the task mount so a future caller cannot accidentally
+// widen the allocation's access.
+type nomadVolume struct {
+	Type     string `json:"Type"`
+	Source   string `json:"Source"`
+	ReadOnly bool   `json:"ReadOnly"`
 }
 
 type nomadRestartPolicy struct {
@@ -520,8 +553,9 @@ type nomadPort struct {
 }
 
 type nomadTask struct {
-	Name   string `json:"Name"`
-	Driver string `json:"Driver"`
+	Name         string             `json:"Name"`
+	Driver       string             `json:"Driver"`
+	VolumeMounts []nomadVolumeMount `json:"VolumeMounts,omitempty"`
 	// Leader, when true, makes Nomad stop every OTHER task in the group
 	// only after this task exits (fnrt-t4l.13's "kill_timeout ordering" —
 	// see sessionTaskGroup). Only ever set on the agent task, and only
@@ -534,6 +568,14 @@ type nomadTask struct {
 	Templates   []nomadTemplate     `json:"Templates,omitempty"`
 	Resources   nomadResources      `json:"Resources"`
 	KillTimeout int64               `json:"KillTimeout,omitempty"`
+}
+
+// nomadVolumeMount binds one group volume into a task's allocation
+// filesystem. The agent sees the shared artifact store at /mnt/nomad.
+type nomadVolumeMount struct {
+	Volume      string `json:"Volume"`
+	Destination string `json:"Destination"`
+	ReadOnly    bool   `json:"ReadOnly"`
 }
 
 // nomadTaskLifecycle is the task lifecycle subset needed to keep the

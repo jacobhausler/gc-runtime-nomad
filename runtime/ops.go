@@ -182,6 +182,15 @@ func configureExecTaskName() {
 // exactly this session.
 const tmuxSessionName = "main"
 
+// launchEnvScript is the small POSIX wrapper around the detached tmux-client
+// command. The environment script is optional so an empty/legacy allocation
+// remains a valid local-mode session.
+const launchEnvScript = `set -eu
+if [ -f "$NOMAD_SECRETS_DIR/env.sh" ]; then
+	. "$NOMAD_SECRETS_DIR/env.sh"
+fi
+exec "$@"`
+
 // buildLaunchCommand is the detached tmux-client command that turns a
 // provisioned (tmux-only) box into a launched one (04 §3 provision row +
 // R1c-04 launch invariant): it returns immediately, and the agent it starts
@@ -193,14 +202,10 @@ const tmuxSessionName = "main"
 // env's argvSafe-classified entries (envArgvSafe, NRT-P1-06) ride as `-e
 // KEY=VALUE` on this argv — safe by construction, since envArgvSafe's whole
 // job is excluding anything credential-shaped from ever reaching argv
-// (E1a §4.5). Everything else in env was already routed to the secrets dir
-// by stage before launch runs; it never appears here. Keys are sorted so
-// the command is deterministic across calls with the same env.
+// (E1a §4.5). The wrapper sources the value-safe env.sh produced by stage
+// before invoking tmux; keys are sorted so the command is deterministic.
 func buildLaunchCommand(env map[string]string) []string {
-	cmd := []string{"tmux", "new-session", "-d", "-s", tmuxSessionName}
-	if len(env) == 0 {
-		return cmd
-	}
+	cmd := []string{"/bin/sh", "-c", launchEnvScript, "gc-runtime-nomad-launch", "tmux", "new-session", "-d", "-s", tmuxSessionName}
 	keys := make([]string, 0, len(env))
 	for k := range env {
 		if envArgvSafe(k) {
@@ -667,13 +672,13 @@ func (l *lifecycle) markLaunched(ctx context.Context, sessionName string, env ma
 // stage materializes cfg's workspace files and secret env vars into
 // sessionName's current alloc (NRT-P1-06, 04 §5 data contract) over two
 // tar-over-exec-stdin calls: cfg.Files (the CopyFiles/workspace-in analog)
-// extracted under cfg.WorkDir, and cfg.Env's non-argvSafe entries (the
-// secret ones — envArgvSafe's whole point, E1a §4.5) extracted as individual
-// files under $NOMAD_SECRETS_DIR. Neither channel ever touches the job spec,
-// argv, or the sidecar — the only place secret BYTES appear is the
-// alloc-exec WebSocket stream itself (accepted residual, 05 §7 R9). A
-// zero-value cfg is a no-op, so start/provision behave exactly as before
-// staging landed when a caller sends no config.
+// extracted under cfg.WorkDir, and cfg.Env's values extracted under
+// $NOMAD_SECRETS_DIR both as individual files (legacy/value-specific access)
+// and as a sourceable env.sh contract for the launched process. Neither
+// channel ever touches the job spec, argv, or the sidecar — the only place
+// secret BYTES appear is the alloc-exec WebSocket stream itself (accepted
+// residual, 05 §7 R9). A zero-value cfg is a no-op, so start/provision behave
+// exactly as before staging landed when a caller sends no config.
 func (l *lifecycle) stage(ctx context.Context, sessionName string, cfg stageConfig) error {
 	if len(cfg.Files) > 0 {
 		data, err := buildTar(cfg.Files)
@@ -700,6 +705,13 @@ func (l *lifecycle) stage(ctx context.Context, sessionName string, cfg stageConf
 			continue
 		}
 		secretFiles = append(secretFiles, stageFile{Path: k, Content: []byte(v), Mode: 0o600})
+	}
+	if len(cfg.Env) > 0 {
+		secretFiles = append(secretFiles, stageFile{
+			Path:    stagedEnvScriptName,
+			Content: buildEnvScript(cfg.Env),
+			Mode:    0o600,
+		})
 	}
 	if len(secretFiles) > 0 {
 		data, err := buildTar(secretFiles)
