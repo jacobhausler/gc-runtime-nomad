@@ -32,6 +32,54 @@ func TestParentJobSpecLogShipperDisabledByDefault(t *testing.T) {
 	}
 }
 
+// TestParentJobSpecMountsGCArtifactsReadOnly is the allocation contract for
+// the shared Linux gc artifact: the agent must see the Nomad client host
+// volume at /mnt/nomad, and neither the group declaration nor the task mount
+// may permit writes.
+func TestParentJobSpecMountsGCArtifactsReadOnly(t *testing.T) {
+	spec := parentJobSpec("default", "", "gc-sessions", logShipperConfig{})
+	data, err := json.Marshal(spec.TaskGroups[0])
+	if err != nil {
+		t.Fatalf("marshal task group: %v", err)
+	}
+
+	var group map[string]any
+	if err := json.Unmarshal(data, &group); err != nil {
+		t.Fatalf("decode task group: %v", err)
+	}
+	volumes, ok := group["Volumes"].(map[string]any)
+	if !ok {
+		t.Fatalf("Volumes = %#v, want gc-artifacts host volume", group["Volumes"])
+	}
+	volume, ok := volumes["gc-artifacts"].(map[string]any)
+	if !ok {
+		t.Fatalf("Volumes[gc-artifacts] = %#v, want host volume", volumes["gc-artifacts"])
+	}
+	if volume["Type"] != "host" || volume["Source"] != "nomad" || volume["ReadOnly"] != true {
+		t.Fatalf("gc-artifacts volume = %#v, want Type=host Source=nomad ReadOnly=true", volume)
+	}
+
+	tasks, ok := group["Tasks"].([]any)
+	if !ok || len(tasks) == 0 {
+		t.Fatalf("Tasks = %#v, want agent task", group["Tasks"])
+	}
+	agent, ok := tasks[0].(map[string]any)
+	if !ok {
+		t.Fatalf("Tasks[0] = %#v, want object", tasks[0])
+	}
+	mounts, ok := agent["VolumeMounts"].([]any)
+	if !ok || len(mounts) != 1 {
+		t.Fatalf("agent VolumeMounts = %#v, want one mount", agent["VolumeMounts"])
+	}
+	mount, ok := mounts[0].(map[string]any)
+	if !ok {
+		t.Fatalf("agent VolumeMounts[0] = %#v, want object", mounts[0])
+	}
+	if mount["Volume"] != "gc-artifacts" || mount["Destination"] != "/mnt/nomad" || mount["ReadOnly"] != true {
+		t.Fatalf("agent volume mount = %#v, want gc-artifacts at /mnt/nomad ReadOnly=true", mount)
+	}
+}
+
 // TestParentJobSpecAddsLogShipperTask confirms the full shape fnrt-t4l.13
 // scopes: a second "log-shipper" task, driver exec, the agent task promoted
 // to Leader (kill_timeout ordering), a poststart+sidecar lifecycle, a

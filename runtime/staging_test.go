@@ -55,6 +55,34 @@ func TestM3StagingReceiptWorkspaceProbe(t *testing.T) {
 	}
 }
 
+// TestStagingWritesSourceableEnvironmentScript proves that allocation
+// environment values delivered through the secrets channel can be loaded by
+// the launched process, including shell metacharacters that must remain data.
+func TestStagingWritesSourceableEnvironmentScript(t *testing.T) {
+	l, _ := newTestLifecycle(t)
+	ctx := context.Background()
+	const session = "sess-stage-env-script"
+
+	cfg := stageConfig{Env: map[string]string{
+		"GC_CITY_URL":     "https://relay.example:8443",
+		"GC_CITY_CONTEXT": "westlands",
+		"GC_SESSION_ID":   "worker-123",
+		"ENV_WITH_QUOTES": "value with spaces; $(echo must-not-run) 'quoted'",
+	}}
+	if err := l.opStartWithConfig(ctx, session, cfg); err != nil {
+		t.Fatalf("start with staged environment: %v", err)
+	}
+
+	exitCode, out, err := l.opExec(ctx, session, []string{"/bin/sh", "-c", `set -eu; . "$NOMAD_SECRETS_DIR/env.sh"; printf '%s\n' "$GC_CITY_URL|$GC_CITY_CONTEXT|$GC_SESSION_ID|$ENV_WITH_QUOTES"`})
+	if err != nil || exitCode != 0 {
+		t.Fatalf("source staged environment: exit=%d err=%v out=%s", exitCode, err, out)
+	}
+	want := "https://relay.example:8443|westlands|worker-123|value with spaces; $(echo must-not-run) 'quoted'\n"
+	if string(out) != want {
+		t.Fatalf("sourced environment = %q, want %q", out, want)
+	}
+}
+
 // TestM3StagingReceiptNoCanaryLeak is the second half of the M3 staging
 // receipt: zero planted-canary hits across job specs, request logs, stderr,
 // and sidecar files (R2c-07's single-receipt claim; the rollback trigger is
@@ -199,6 +227,16 @@ func TestBuildLaunchCommandClassifiesEnv(t *testing.T) {
 	}
 	if strings.Contains(joined, "must-not-appear-on-argv") {
 		t.Fatalf("launch command %v carries a non-argvSafe env value", cmd)
+	}
+}
+
+// TestBuildLaunchCommandSourcesStagedEnvironment ensures launch imports the
+// values staged under NOMAD_SECRETS_DIR before creating tmux.
+func TestBuildLaunchCommandSourcesStagedEnvironment(t *testing.T) {
+	cmd := buildLaunchCommand(nil)
+	joined := strings.Join(cmd, " ")
+	if !strings.Contains(joined, `NOMAD_SECRETS_DIR/env.sh`) {
+		t.Fatalf("launch command %v does not source staged environment", cmd)
 	}
 }
 
