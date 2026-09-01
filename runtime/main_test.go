@@ -78,6 +78,7 @@ func TestProtocolHandshakeDeclaresProvisionAndExec(t *testing.T) {
 
 func TestRunCheckWarnsWhenLogSinkUnset(t *testing.T) {
 	t.Setenv(envLogSink, "")
+	t.Setenv(envArtifactVolume, "")
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
@@ -92,11 +93,15 @@ func TestRunCheckWarnsWhenLogSinkUnset(t *testing.T) {
 	if want := "warning: session logs will not be shipped (GC_NOMAD_LOG_SINK unset)"; !strings.Contains(string(out), want) {
 		t.Fatalf("run(check) output = %q, want warning %q", out, want)
 	}
+	if want := "warning: gc artifact volume is not configured (GC_NOMAD_ARTIFACT_VOLUME unset)"; !strings.Contains(string(out), want) {
+		t.Fatalf("run(check) output = %q, want warning %q", out, want)
+	}
 }
 
-func TestRunCheckOmitsWarningWhenLogSinkConfigured(t *testing.T) {
+func TestRunCheckOmitsWarningsWhenOptionalInputsConfigured(t *testing.T) {
 	t.Setenv(envLogSink, "https://logs.example.internal/ingest")
 	t.Setenv(envLogArtifact, "/var/lib/vector/vector.tar.gz")
+	t.Setenv(envArtifactVolume, "test-nomad-shared")
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
@@ -110,6 +115,9 @@ func TestRunCheckOmitsWarningWhenLogSinkConfigured(t *testing.T) {
 	}
 	if strings.Contains(string(out), "session logs will not be shipped") {
 		t.Fatalf("run(check) output = %q, want no unset-sink warning", out)
+	}
+	if strings.Contains(string(out), "gc artifact volume is not configured") {
+		t.Fatalf("run(check) output = %q, want no unset-volume warning", out)
 	}
 }
 
