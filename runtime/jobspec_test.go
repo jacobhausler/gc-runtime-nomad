@@ -55,8 +55,8 @@ func TestParentJobSpecMountsGCArtifactsReadOnly(t *testing.T) {
 	if !ok {
 		t.Fatalf("Volumes[gc-artifacts] = %#v, want host volume", volumes["gc-artifacts"])
 	}
-	if volume["Type"] != "host" || volume["Source"] != "nomad" || volume["ReadOnly"] != true {
-		t.Fatalf("gc-artifacts volume = %#v, want Type=host Source=nomad ReadOnly=true", volume)
+	if volume["Type"] != "host" || volume["Source"] != "p6-16-nomad-shared" || volume["ReadOnly"] != true {
+		t.Fatalf("gc-artifacts volume = %#v, want Type=host Source=p6-16-nomad-shared ReadOnly=true", volume)
 	}
 
 	tasks, ok := group["Tasks"].([]any)
