@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/gastownhall/gc-runtime-nomad/fakenomad"
@@ -48,7 +50,7 @@ func TestConfigureExecTaskNameUsesEnvironment(t *testing.T) {
 // before the agent can be launched.
 func TestOpStartRetriesProvisionReadinessRace(t *testing.T) {
 	l, srv := newTestLifecycle(t)
-	srv.FailExecNext(2) // secret staging, then launch
+	srv.ResetExecNext(2) // secret staging, then launch
 
 	if err := l.opStartWithConfig(context.Background(), "sess-readiness", stageConfig{
 		Env: map[string]string{"OPENAI_API_KEY": "transient-readiness-secret"},
@@ -94,6 +96,41 @@ func TestRetryAllocExecReadyRetriesMissingAllocation(t *testing.T) {
 	}
 	if attempts != 3 {
 		t.Fatalf("allocation readiness attempts = %d, want 3", attempts)
+	}
+}
+
+func TestRetryAllocExecReadyRetriesConnectionReset(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{
+			name: "wrapped errno",
+			err:  fmt.Errorf("reading exec frame: %w", syscall.ECONNRESET),
+		},
+		{
+			name: "websocket transport text",
+			err:  errors.New("read tcp 127.0.0.1:50650->127.0.0.1:18647: read: connection reset by peer"),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			attempts := 0
+			err := retryAllocExecReady(context.Background(), func() error {
+				attempts++
+				if attempts < 3 {
+					return tc.err
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("retryAllocExecReady: %v", err)
+			}
+			if attempts != 3 {
+				t.Fatalf("connection reset attempts = %d, want 3", attempts)
+			}
+		})
 	}
 }
 

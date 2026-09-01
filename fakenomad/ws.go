@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 )
 
@@ -101,6 +102,12 @@ func (s *Server) handleExecWS(w http.ResponseWriter, r *http.Request, allocID st
 			continue
 		}
 		if frame.Stdin.Close {
+			if s.takeExecReset() {
+				if tcpConn, ok := conn.(*net.TCPConn); ok {
+					_ = tcpConn.SetLinger(0)
+				}
+				return
+			}
 			if s.takeExecFailure() {
 				return
 			}

@@ -197,6 +197,7 @@ type Server struct {
 	taskProcs  map[string][]*taskProc       // allocID -> its running task-command subprocesses, main task first (lazy)
 	faults     []fault
 	execFails  int // transient alloc-exec streams to close after stdin
+	execResets int // transient alloc-exec streams to reset after stdin
 	dispSeq    uint64
 	portSeq    uint64 // dynamic-port assignment counter (fnrt-t4l.24)
 	trace      []string
@@ -358,6 +359,19 @@ func (s *Server) FailExecNext(count int) {
 	s.mu.Unlock()
 }
 
+// ResetExecNext makes the next count alloc-exec WebSocket calls reset their
+// TCP stream after receiving the client's stdin-close frame, before sending a
+// command result. This models the ECONNRESET Nomad can surface through an
+// HTTP bridge while a freshly dispatched allocation is not ready for exec.
+func (s *Server) ResetExecNext(count int) {
+	if count <= 0 {
+		return
+	}
+	s.mu.Lock()
+	s.execResets += count
+	s.mu.Unlock()
+}
+
 func (s *Server) takeExecFailure() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -365,6 +379,16 @@ func (s *Server) takeExecFailure() bool {
 		return false
 	}
 	s.execFails--
+	return true
+}
+
+func (s *Server) takeExecReset() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.execResets == 0 {
+		return false
+	}
+	s.execResets--
 	return true
 }
 

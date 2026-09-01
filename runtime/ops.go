@@ -767,7 +767,10 @@ func retryAllocExecReady(ctx context.Context, operation func() error) error {
 }
 
 func allocReadyRetryable(err error) bool {
-	return errors.Is(err, errAllocNotReady) || errors.Is(err, io.EOF)
+	return err != nil && (errors.Is(err, errAllocNotReady) ||
+		errors.Is(err, io.EOF) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		strings.Contains(err.Error(), "connection reset by peer"))
 }
 
 // errSessionNotFound marks a currentAlloc failure caused by the session
