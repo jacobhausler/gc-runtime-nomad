@@ -62,7 +62,7 @@ provider = "nomad"
 ```bash
 ./install.sh   # put gc-runtime-nomad on PATH
 gc doctor      # the pack-runtimes check verifies install + handshake
-gc-runtime-nomad check  # warn when session-log shipping is not configured
+gc-runtime-nomad check  # warn when session-log shipping or artifact delivery is not configured
 ```
 
 Lifecycle ops need Nomad API configuration on the environment:
@@ -78,6 +78,7 @@ Lifecycle ops need Nomad API configuration on the environment:
 | `GC_NOMAD_LOG_SINK` | no | HTTP JSON-lines endpoint for the session group's `log-shipper` task (`fnrt-t4l.13`) — the one env var that turns log shipping on; unset ⇒ session logs are not shipped |
 | `GC_NOMAD_LOG_SINK_TOKEN_FILE` | no | In-box path the `log-shipper` task reads its `Authorization: Bearer` token's value from; unset ⇒ an unauthenticated sink |
 | `GC_NOMAD_LOG_LABELS` | no | `k=v,k=v` labels merged onto every shipped log line alongside the fixed `session_name`/`alloc_id`/`node`/`runtime=nomad` set |
+| `GC_NOMAD_ARTIFACT_VOLUME` | no | Nomad client host-volume name mounted read-only at `/mnt/nomad` for the pinned Linux `gc` artifact; unset ⇒ no artifact volume mount |
 
 ### Allocation environment contract
 
@@ -87,7 +88,7 @@ layers:
 | Layer | Delivery contract |
 |---|---|
 | Workspace/secrets | `stageConfig.Env` is staged through the existing `env.workspace` tar channel into `$NOMAD_SECRETS_DIR`, including the sourceable `env.sh` file. |
-| Toolchain | `gc`, Codex, tmux, `sh`, and `tar` are expected in the allocation toolchain. The pinned Linux `gc` artifact is mounted read-only from the admitted client host volume `p6-16-nomad-shared` at `/mnt/nomad`; remaining host-assumed binaries are node checklist items. |
+| Toolchain | `gc`, Codex, tmux, `sh`, and `tar` are expected in the allocation toolchain. When `GC_NOMAD_ARTIFACT_VOLUME` is set, the pinned Linux `gc` artifact is mounted read-only from that client host volume at `/mnt/nomad`; remaining host-assumed binaries are node checklist items. |
 | Identity/config | `GC_CITY_URL`, `GC_CITY_CONTEXT`, and session identity values arrive through the secrets environment channel. Remote sessions must receive `GC_CITY_URL`; the gc-side remote-worker guard fails closed when it is absent or unreachable. |
 
 The Cloudflare pack's bundle is the environment boundary for pack-provided
@@ -144,7 +145,7 @@ bead.
 
 | Op | Notes |
 |----|-------|
-| `check` | Pack-local diagnostic. Emits `warning: session logs will not be shipped (GC_NOMAD_LOG_SINK unset)` to stderr when the optional log sink is unset; does not require Nomad configuration. |
+| `check` | Pack-local diagnostic. Emits warnings when the optional log sink or artifact volume is unset; does not require Nomad configuration. |
 | `protocol` | `{"version":0,"capabilities":["proc.provision","proc.exec","env.workspace"]}` |
 | `provision` | Registers the parent job (idempotent upsert) if needed, then dispatches a tmux-only child for the session — no agent launched, sidecar launched marker stays unset. Rejects a session with a live child with an "already exists" error (04 §6 wire-contract constant). Reads an optional staging config (JSON) on stdin and materializes it (see `start`'s staging row) before returning. |
 | `start` | `provision` + launch: dispatches, stages an optional workspace/secrets config read as JSON from stdin (`staging.go`'s `stageConfig`, NRT-P1-06 — workspace files land under `WorkDir` and env entries land as individual files plus a sourceable `env.sh` under `$NOMAD_SECRETS_DIR`, both via tar-over-exec-stdin, 04 §5), then sources that script and execs the launch command (`tmux new-session -d -s main`, plus `-e KEY=VALUE` for any `envArgvSafe`-classified env entries) into the alloc, then sets the launched marker. Empty/absent stdin is a no-op config — pre-staging callers are unaffected. Same "already exists" rejection as `provision`. |

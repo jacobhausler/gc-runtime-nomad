@@ -71,6 +71,11 @@ type lifecycle struct {
 	// unaffected. It only ever rides the parent job body parentJobSpec
 	// builds, same as nodePool above.
 	logShipper logShipperConfig
+
+	// artifactVolumeSource is the optional Nomad client host-volume name used
+	// to deliver the pinned Linux gc artifact. It is deployment input, never a
+	// host name hard-coded into the runtime pack; empty means no mount.
+	artifactVolumeSource string
 }
 
 // lockSession acquires an exclusive, cross-process advisory file lock for
@@ -547,7 +552,7 @@ func (l *lifecycle) dispatch(ctx context.Context, sessionName string) error {
 // attempt entirely for a deployment that wants a config-time guarantee of
 // that, rather than discovering it from a 403 at the first drifted Start.
 func (l *lifecycle) ensureParentRegistered(ctx context.Context) error {
-	spec := parentJobSpec(l.client.namespace, l.nodePool, l.parentJobID, l.logShipper)
+	spec := parentJobSpecWithArtifactVolume(l.client.namespace, l.nodePool, l.parentJobID, l.logShipper, l.artifactVolumeSource)
 
 	nodePool, meta, ok, err := l.client.getJob(ctx, l.parentJobID)
 	if err != nil {

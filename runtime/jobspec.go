@@ -73,6 +73,14 @@ const (
 // on a lab cluster's named pool (e.g. lab-session) — so a deployment that
 // needs non-default placement must set GC_NOMAD_NODE_POOL.
 func parentJobSpec(namespace, nodePool, parentID string, logShipper logShipperConfig) nomadJob {
+	return parentJobSpecWithArtifactVolume(namespace, nodePool, parentID, logShipper, "")
+}
+
+// parentJobSpecWithArtifactVolume is the deployment-configured variant of
+// parentJobSpec. An empty artifactVolumeSource deliberately produces no
+// volume declaration or task mount, preserving compatibility for deployments
+// that provide their toolchain through another mechanism.
+func parentJobSpecWithArtifactVolume(namespace, nodePool, parentID string, logShipper logShipperConfig, artifactVolumeSource string) nomadJob {
 	job := nomadJob{
 		ID:        parentID,
 		Namespace: namespace,
@@ -98,7 +106,7 @@ func parentJobSpec(namespace, nodePool, parentID string, logShipper logShipperCo
 			MetaOptional: []string{"gc_session", "gc_nonce"},
 			Payload:      "forbidden",
 		},
-		TaskGroups: []nomadTaskGroup{sessionTaskGroup(logShipper)},
+		TaskGroups: []nomadTaskGroup{sessionTaskGroup(logShipper, artifactVolumeSource)},
 	}
 	// Stamp the jobspec's own fingerprint into its Meta (fnrt-t4l.9): a
 	// registered parent that still exists and still matches on NodePool can
@@ -128,8 +136,8 @@ func jobspecHash(job nomadJob) string {
 	return hex.EncodeToString(sum[:])[:16]
 }
 
-func sessionTaskGroup(logShipper logShipperConfig) nomadTaskGroup {
-	agent := sessionTask()
+func sessionTaskGroup(logShipper logShipperConfig, artifactVolumeSource string) nomadTaskGroup {
+	agent := sessionTask(artifactVolumeSource)
 	tasks := []nomadTask{agent}
 	// bridge networking so the host-network fatal-rule constraint above
 	// has a placement to fail closed against (04 §4, R2a-05).
@@ -152,20 +160,9 @@ func sessionTaskGroup(logShipper logShipperConfig) nomadTaskGroup {
 		networks[0].DynamicPorts = []nomadPort{{Label: logShipperMetricsPortLabel}}
 	}
 
-	return nomadTaskGroup{
+	group := nomadTaskGroup{
 		Name:  "session",
 		Count: 1,
-		// The shared host volume is the only supported delivery point for
-		// the pinned Linux gc artifact. It is declared at group scope and
-		// mounted read-only by the agent task below; the client must have a
-		// host volume named "nomad" configured at /mnt/nomad.
-		Volumes: map[string]nomadVolume{
-			gcArtifactVolumeName: {
-				Type:     "host",
-				Source:   gcArtifactVolumeSource,
-				ReadOnly: true,
-			},
-		},
 		// GC is the only self-healer for session jobs (04 §4): a dead
 		// agent must produce a terminal alloc that STAYS terminal, so both
 		// in-place restart and reschedule are disabled here.
@@ -186,6 +183,19 @@ func sessionTaskGroup(logShipper logShipperConfig) nomadTaskGroup {
 		Networks: networks,
 		Tasks:    tasks,
 	}
+	if artifactVolumeSource != "" {
+		// The pinned Linux gc artifact is an optional deployment input. Keep
+		// both the group declaration and task mount read-only; an unset
+		// source must not invent a client host-volume name.
+		group.Volumes = map[string]nomadVolume{
+			gcArtifactVolumeName: {
+				Type:     "host",
+				Source:   artifactVolumeSource,
+				ReadOnly: true,
+			},
+		}
+	}
+	return group
 }
 
 // sessionSupervisorScript is the session task's own long-lived command (04
@@ -205,15 +215,10 @@ func sessionTaskGroup(logShipper logShipperConfig) nomadTaskGroup {
 // than needing Nomad's SIGKILL fallback once kill_timeout elapses.
 const sessionSupervisorScript = `trap 'exit 0' TERM; while :; do sleep 5 & wait "$!"; done`
 
-func sessionTask() nomadTask {
-	return nomadTask{
+func sessionTask(artifactVolumeSource string) nomadTask {
+	task := nomadTask{
 		Name:   "agent",
 		Driver: "exec",
-		VolumeMounts: []nomadVolumeMount{{
-			Volume:      gcArtifactVolumeName,
-			Destination: gcArtifactMountPath,
-			ReadOnly:    true,
-		}},
 		Config: map[string]any{
 			"command": "/bin/sh",
 			"args":    []string{"-c", sessionSupervisorScript},
@@ -228,14 +233,19 @@ func sessionTask() nomadTask {
 		// keeps it that way as a named control (04 §4, R2a-05) — so nothing
 		// is declared here.
 	}
+	if artifactVolumeSource != "" {
+		task.VolumeMounts = []nomadVolumeMount{{
+			Volume:      gcArtifactVolumeName,
+			Destination: gcArtifactMountPath,
+			ReadOnly:    true,
+		}}
+	}
+	return task
 }
 
 const (
-	gcArtifactVolumeName   = "gc-artifacts"
-	// p6-16-nomad-shared is the admitted Nomad client host-volume name for
-	// the shared /mnt/nomad NFS mount across the production service pool.
-	gcArtifactVolumeSource = "p6-16-nomad-shared"
-	gcArtifactMountPath    = "/mnt/nomad"
+	gcArtifactVolumeName = "gc-artifacts"
+	gcArtifactMountPath  = "/mnt/nomad"
 )
 
 // --- log-shipper task (fnrt-t4l.13) ---

@@ -44,6 +44,7 @@
 //	GC_NOMAD_LOG_SINK_TOKEN_FILE  optional: in-box path the log-shipper task reads its Authorization bearer token's value from; unset means an unauthenticated sink
 //	GC_NOMAD_LOG_LABELS   optional: "k=v,k=v" labels merged onto every shipped log line alongside the fixed session_name/alloc_id/node/runtime=nomad set
 //	GC_NOMAD_LOG_SHIPPER_ARTIFACT  optional: URL or local path for the pinned Vector archive; unset uses the upstream release URL
+//	GC_NOMAD_ARTIFACT_VOLUME  optional: Nomad client host-volume name mounted read-only at /mnt/nomad for the pinned Linux gc artifact; unset declares no artifact mount
 package main
 
 import (
@@ -55,18 +56,19 @@ import (
 )
 
 const (
-	envAddr        = "GC_NOMAD_ADDR"
-	envToken       = "GC_NOMAD_TOKEN"
-	envNamespace   = "GC_NOMAD_NAMESPACE"
-	envNodePool    = "GC_NOMAD_NODE_POOL"
-	envParentJob   = "GC_NOMAD_PARENT_JOB"
-	envSidecarDir  = "GC_NOMAD_SIDECAR_DIR"
-	envEgressDir   = "GC_NOMAD_EGRESS_DIR"
-	envForbidReg   = "GC_NOMAD_FORBID_REGISTER"
-	envLogSink     = "GC_NOMAD_LOG_SINK"
-	envLogTokFile  = "GC_NOMAD_LOG_SINK_TOKEN_FILE"
-	envLogLabels   = "GC_NOMAD_LOG_LABELS"
-	envLogArtifact = "GC_NOMAD_LOG_SHIPPER_ARTIFACT"
+	envAddr           = "GC_NOMAD_ADDR"
+	envToken          = "GC_NOMAD_TOKEN"
+	envNamespace      = "GC_NOMAD_NAMESPACE"
+	envNodePool       = "GC_NOMAD_NODE_POOL"
+	envParentJob      = "GC_NOMAD_PARENT_JOB"
+	envSidecarDir     = "GC_NOMAD_SIDECAR_DIR"
+	envEgressDir      = "GC_NOMAD_EGRESS_DIR"
+	envForbidReg      = "GC_NOMAD_FORBID_REGISTER"
+	envLogSink        = "GC_NOMAD_LOG_SINK"
+	envLogTokFile     = "GC_NOMAD_LOG_SINK_TOKEN_FILE"
+	envLogLabels      = "GC_NOMAD_LOG_LABELS"
+	envLogArtifact    = "GC_NOMAD_LOG_SHIPPER_ARTIFACT"
+	envArtifactVolume = "GC_NOMAD_ARTIFACT_VOLUME"
 
 	defaultParentJob = "gc-sessions"
 
@@ -124,6 +126,9 @@ func run(args []string, stdin io.Reader, stdout, stderr *os.File) int {
 			fmt.Fprintln(stderr, "warning: session logs will not be shipped (GC_NOMAD_LOG_SINK unset)")
 		} else if os.Getenv(envLogArtifact) == "" {
 			fmt.Fprintln(stderr, "warning: log-shipper artifact source will use network default (GC_NOMAD_LOG_SHIPPER_ARTIFACT unset)")
+		}
+		if os.Getenv(envArtifactVolume) == "" {
+			fmt.Fprintln(stderr, "warning: gc artifact volume is not configured (GC_NOMAD_ARTIFACT_VOLUME unset)")
 		}
 		return exitOK
 	}
@@ -367,6 +372,7 @@ func newLifecycle() (*lifecycle, error) {
 			Labels:    os.Getenv(envLogLabels),
 			Artifact:  os.Getenv(envLogArtifact),
 		},
+		artifactVolumeSource: os.Getenv(envArtifactVolume),
 	}, nil
 }
 
