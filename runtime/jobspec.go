@@ -232,7 +232,9 @@ func sessionTask() nomadTask {
 
 const (
 	gcArtifactVolumeName   = "gc-artifacts"
-	gcArtifactVolumeSource = "nomad"
+	// p6-16-nomad-shared is the admitted Nomad client host-volume name for
+	// the shared /mnt/nomad NFS mount across the production service pool.
+	gcArtifactVolumeSource = "p6-16-nomad-shared"
 	gcArtifactMountPath    = "/mnt/nomad"
 )
 

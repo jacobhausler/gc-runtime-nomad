@@ -87,7 +87,7 @@ layers:
 | Layer | Delivery contract |
 |---|---|
 | Workspace/secrets | `stageConfig.Env` is staged through the existing `env.workspace` tar channel into `$NOMAD_SECRETS_DIR`, including the sourceable `env.sh` file. |
-| Toolchain | `gc`, Codex, tmux, `sh`, and `tar` are expected in the allocation toolchain. The pinned Linux `gc` artifact is mounted read-only from the client host volume `nomad` at `/mnt/nomad`; remaining host-assumed binaries are node checklist items. |
+| Toolchain | `gc`, Codex, tmux, `sh`, and `tar` are expected in the allocation toolchain. The pinned Linux `gc` artifact is mounted read-only from the admitted client host volume `p6-16-nomad-shared` at `/mnt/nomad`; remaining host-assumed binaries are node checklist items. |
 | Identity/config | `GC_CITY_URL`, `GC_CITY_CONTEXT`, and session identity values arrive through the secrets environment channel. Remote sessions must receive `GC_CITY_URL`; the gc-side remote-worker guard fails closed when it is absent or unreachable. |
 
 The Cloudflare pack's bundle is the environment boundary for pack-provided
