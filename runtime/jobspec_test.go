@@ -95,6 +95,14 @@ func TestParentJobSpecOmitsGCArtifactsWhenVolumeUnset(t *testing.T) {
 	}
 }
 
+func TestJobspecHashChangesWhenArtifactVolumeToggled(t *testing.T) {
+	off := parentJobSpec("default", "", "gc-sessions", logShipperConfig{})
+	on := parentJobSpecWithArtifactVolume("default", "", "gc-sessions", logShipperConfig{}, "test-nomad-shared")
+	if off.Meta[jobspecHashMetaKey] == on.Meta[jobspecHashMetaKey] {
+		t.Fatalf("jobspec hash unchanged after enabling the artifact volume")
+	}
+}
+
 // TestParentJobSpecAddsLogShipperTask confirms the full shape fnrt-t4l.13
 // scopes: a second "log-shipper" task, driver exec, the agent task promoted
 // to Leader (kill_timeout ordering), a poststart+sidecar lifecycle, a
