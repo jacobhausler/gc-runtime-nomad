@@ -33,11 +33,12 @@ func TestParentJobSpecLogShipperDisabledByDefault(t *testing.T) {
 }
 
 // TestParentJobSpecMountsGCArtifactsReadOnly is the allocation contract for
-// the shared Linux gc artifact: the agent must see the Nomad client host
-// volume at /mnt/nomad, and neither the group declaration nor the task mount
-// may permit writes.
+// the shared Linux gc artifact: when configured, the agent must see the
+// requested Nomad client host volume at /mnt/nomad, and neither the group
+// declaration nor the task mount may permit writes.
 func TestParentJobSpecMountsGCArtifactsReadOnly(t *testing.T) {
-	spec := parentJobSpec("default", "", "gc-sessions", logShipperConfig{})
+	const volumeSource = "test-nomad-shared"
+	spec := parentJobSpecWithArtifactVolume("default", "", "gc-sessions", logShipperConfig{}, volumeSource)
 	data, err := json.Marshal(spec.TaskGroups[0])
 	if err != nil {
 		t.Fatalf("marshal task group: %v", err)
@@ -55,8 +56,8 @@ func TestParentJobSpecMountsGCArtifactsReadOnly(t *testing.T) {
 	if !ok {
 		t.Fatalf("Volumes[gc-artifacts] = %#v, want host volume", volumes["gc-artifacts"])
 	}
-	if volume["Type"] != "host" || volume["Source"] != "p6-16-nomad-shared" || volume["ReadOnly"] != true {
-		t.Fatalf("gc-artifacts volume = %#v, want Type=host Source=p6-16-nomad-shared ReadOnly=true", volume)
+	if volume["Type"] != "host" || volume["Source"] != volumeSource || volume["ReadOnly"] != true {
+		t.Fatalf("gc-artifacts volume = %#v, want Type=host Source=%s ReadOnly=true", volume, volumeSource)
 	}
 
 	tasks, ok := group["Tasks"].([]any)
@@ -77,6 +78,20 @@ func TestParentJobSpecMountsGCArtifactsReadOnly(t *testing.T) {
 	}
 	if mount["Volume"] != "gc-artifacts" || mount["Destination"] != "/mnt/nomad" || mount["ReadOnly"] != true {
 		t.Fatalf("agent volume mount = %#v, want gc-artifacts at /mnt/nomad ReadOnly=true", mount)
+	}
+}
+
+// TestParentJobSpecOmitsGCArtifactsWhenVolumeUnset protects the backward-
+// compatible optional-volume contract: an unset source must produce neither a
+// group host-volume declaration nor an agent mount.
+func TestParentJobSpecOmitsGCArtifactsWhenVolumeUnset(t *testing.T) {
+	spec := parentJobSpec("default", "", "gc-sessions", logShipperConfig{})
+	group := spec.TaskGroups[0]
+	if len(group.Volumes) != 0 {
+		t.Fatalf("group Volumes = %#v, want no host-volume declaration when source is unset", group.Volumes)
+	}
+	if got := group.Tasks[0].VolumeMounts; len(got) != 0 {
+		t.Fatalf("agent VolumeMounts = %#v, want no mount when source is unset", got)
 	}
 }
 

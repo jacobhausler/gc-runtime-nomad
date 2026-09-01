@@ -133,6 +133,27 @@ func TestRunCheckWarnsWhenLogShipperArtifactUnset(t *testing.T) {
 	}
 }
 
+func TestRunCheckWarnsWhenArtifactVolumeUnset(t *testing.T) {
+	t.Setenv(envLogSink, "http://127.0.0.1:18081/ingest")
+	t.Setenv(envLogArtifact, "/var/lib/vector/vector.tar.gz")
+	t.Setenv(envArtifactVolume, "")
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := run([]string{"check"}, strings.NewReader(""), w, w)
+	w.Close()
+	out, _ := io.ReadAll(r)
+	r.Close()
+	if got != exitOK {
+		t.Fatalf("run(check) = %d, want %d", got, exitOK)
+	}
+	want := "warning: gc artifact volume is not configured (GC_NOMAD_ARTIFACT_VOLUME unset)"
+	if !strings.Contains(string(out), want) {
+		t.Fatalf("run(check) output = %q, want warning %q", out, want)
+	}
+}
+
 func TestNewLifecycleReadsLogShipperArtifact(t *testing.T) {
 	srv := fakenomad.NewServer()
 	t.Cleanup(srv.Close)
@@ -149,6 +170,24 @@ func TestNewLifecycleReadsLogShipperArtifact(t *testing.T) {
 	}
 	if l.logShipper.Artifact != artifact {
 		t.Fatalf("logShipper.Artifact = %q, want %q", l.logShipper.Artifact, artifact)
+	}
+}
+
+func TestNewLifecycleReadsArtifactVolume(t *testing.T) {
+	srv := fakenomad.NewServer()
+	t.Cleanup(srv.Close)
+
+	t.Setenv(envAddr, srv.URL())
+	t.Setenv(envSidecarDir, t.TempDir())
+	const volumeSource = "test-nomad-shared"
+	t.Setenv(envArtifactVolume, volumeSource)
+
+	l, err := newLifecycle()
+	if err != nil {
+		t.Fatalf("newLifecycle: %v", err)
+	}
+	if l.artifactVolumeSource != volumeSource {
+		t.Fatalf("artifactVolumeSource = %q, want %q", l.artifactVolumeSource, volumeSource)
 	}
 }
 
