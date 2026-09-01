@@ -196,19 +196,46 @@ if [ -f "$NOMAD_SECRETS_DIR/env.sh" ]; then
 fi
 exec "$@"`
 
+// agentLaunchScript is the POSIX shell script the launch command execs
+// inside the tmux pane once the staged environment is sourced — the bounded
+// seam a deployment uses to turn the placeholder session into a real agent
+// bootstrap (PATH prepend to a pinned toolchain, an agent-specific HOME
+// pointed inside $NOMAD_SECRETS_DIR, installing a staged auth file, then
+// exec-ing the agent). Empty means no real agent command line is configured:
+// buildLaunchCommand keeps the legacy bare-tmux placeholder session, which
+// is both the generic-command-execution default and this seam's rollback —
+// unsetting GC_NOMAD_AGENT_LAUNCH_SCRIPT reverts every alloc to the prior
+// behavior with no code change. The pack never hardcodes an agent's PATH,
+// HOME variable, or auth filename; those are entirely deployment config, so
+// this file stays agent-agnostic (Codex today, anything else tomorrow).
+var agentLaunchScript string
+
+func init() {
+	configureAgentLaunchScript()
+}
+
+func configureAgentLaunchScript() {
+	agentLaunchScript = os.Getenv("GC_NOMAD_AGENT_LAUNCH_SCRIPT")
+}
+
 // buildLaunchCommand is the detached tmux-client command that turns a
 // provisioned (tmux-only) box into a launched one (04 §3 provision row +
 // R1c-04 launch invariant): it returns immediately, and the agent it starts
 // is parented to the tmux server inside the task cgroup, never to the exec
-// session that issued it. The command itself is still a placeholder tmux
-// session, not a real agent bootstrap command line — replacing it is out of
-// scope here (jobspec.go's sessionTask has the same caveat).
+// session that issued it. When agentLaunchScript is configured, the tmux
+// pane's initial command execs that script (a real agent bootstrap command
+// line); otherwise the session stays the placeholder tmux shell it always
+// was (jobspec.go's sessionTask has the same rollback shape).
 //
 // env's argvSafe-classified entries (envArgvSafe, NRT-P1-06) ride as `-e
 // KEY=VALUE` on this argv — safe by construction, since envArgvSafe's whole
 // job is excluding anything credential-shaped from ever reaching argv
 // (E1a §4.5). The wrapper sources the value-safe env.sh produced by stage
 // before invoking tmux; keys are sorted so the command is deterministic.
+// agentLaunchScript itself never carries credential values — it is
+// deployment-owned shell logic (PATH/HOME wiring) that reads secret bytes
+// out of the already-staged $NOMAD_SECRETS_DIR files at pane-start time, so
+// nothing secret ever rides this argv either.
 func buildLaunchCommand(env map[string]string) []string {
 	cmd := []string{"/bin/sh", "-c", launchEnvScript, "gc-runtime-nomad-launch", "tmux", "new-session", "-d", "-s", tmuxSessionName}
 	keys := make([]string, 0, len(env))
@@ -220,6 +247,9 @@ func buildLaunchCommand(env map[string]string) []string {
 	sort.Strings(keys)
 	for _, k := range keys {
 		cmd = append(cmd, "-e", k+"="+env[k])
+	}
+	if agentLaunchScript != "" {
+		cmd = append(cmd, "/bin/sh", "-c", agentLaunchScript)
 	}
 	return cmd
 }

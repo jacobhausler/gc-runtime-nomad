@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -237,6 +238,63 @@ func TestBuildLaunchCommandSourcesStagedEnvironment(t *testing.T) {
 	joined := strings.Join(cmd, " ")
 	if !strings.Contains(joined, `NOMAD_SECRETS_DIR/env.sh`) {
 		t.Fatalf("launch command %v does not source staged environment", cmd)
+	}
+}
+
+// withAgentLaunchScript sets the package-level agentLaunchScript seam for
+// the duration of one test and restores it afterward — cr-zwjsi's bounded
+// launch contract is a global (buildLaunchCommand has no lifecycle handle),
+// so tests must not leak configuration across each other.
+func withAgentLaunchScript(t *testing.T, script string) {
+	t.Helper()
+	prev := agentLaunchScript
+	agentLaunchScript = script
+	t.Cleanup(func() { agentLaunchScript = prev })
+}
+
+// TestBuildLaunchCommandDefaultIsBareTmuxPlaceholder is the RED half of the
+// bounded launch seam (cr-zwjsi): with GC_NOMAD_AGENT_LAUNCH_SCRIPT unset,
+// the tmux pane's initial command must stay unspecified (the legacy
+// placeholder shell) — this is both the generic-command-execution default
+// and the seam's rollback path.
+func TestBuildLaunchCommandDefaultIsBareTmuxPlaceholder(t *testing.T) {
+	withAgentLaunchScript(t, "")
+	cmd := buildLaunchCommand(nil)
+	if got, want := cmd[len(cmd)-1], tmuxSessionName; got != want {
+		t.Fatalf("launch command %v ends with %q, want tmux session name %q as the last argv (no configured pane command)", cmd, got, want)
+	}
+}
+
+// TestBuildLaunchCommandRunsConfiguredAgentScript is the GREEN half: with
+// GC_NOMAD_AGENT_LAUNCH_SCRIPT configured to a Codex-shaped bootstrap
+// (PATH prepend to the pinned artifact toolchain plus CODEX_HOME inside
+// $NOMAD_SECRETS_DIR, per cr-u4plc.1's wiring recipe), the tmux new-session
+// call must carry that exact script as its initial pane command — the
+// configured agent command line, not the bare placeholder.
+func TestBuildLaunchCommandRunsConfiguredAgentScript(t *testing.T) {
+	const script = `export PATH="/mnt/nomad/codex/bin/current:/mnt/nomad/gc/bin/current:$PATH"
+export CODEX_HOME="$NOMAD_SECRETS_DIR/codex-home"
+mkdir -p "$CODEX_HOME"
+if [ -f "$NOMAD_SECRETS_DIR/CODEX_AUTH_JSON" ]; then
+	install -m 600 "$NOMAD_SECRETS_DIR/CODEX_AUTH_JSON" "$CODEX_HOME/auth.json"
+fi
+exec codex`
+	withAgentLaunchScript(t, script)
+
+	cmd := buildLaunchCommand(map[string]string{"GC_SESSION": "safe-value"})
+	joined := strings.Join(cmd, " ")
+
+	if !strings.Contains(joined, "/mnt/nomad/codex/bin/current") {
+		t.Fatalf("launch command %v does not resolve PATH to the pinned codex toolchain", cmd)
+	}
+	if !strings.Contains(joined, `CODEX_HOME="$NOMAD_SECRETS_DIR/codex-home"`) {
+		t.Fatalf("launch command %v does not point CODEX_HOME inside the per-session secrets directory", cmd)
+	}
+	if strings.Contains(joined, "must-not-appear") {
+		t.Fatalf("launch command %v unexpectedly carries credential-shaped content", cmd)
+	}
+	if got, want := cmd[len(cmd)-3:], []string{"/bin/sh", "-c", script}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("launch command %v does not exec the configured agent script as the tmux pane's initial command", cmd)
 	}
 }
 

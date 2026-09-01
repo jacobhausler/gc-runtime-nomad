@@ -45,6 +45,7 @@
 //	GC_NOMAD_LOG_LABELS   optional: "k=v,k=v" labels merged onto every shipped log line alongside the fixed session_name/alloc_id/node/runtime=nomad set
 //	GC_NOMAD_LOG_SHIPPER_ARTIFACT  optional: URL or local path for the pinned Vector archive; unset uses the upstream release URL
 //	GC_NOMAD_ARTIFACT_VOLUME  optional: Nomad client host-volume name mounted read-only at /mnt/nomad for the pinned Linux gc artifact; unset declares no artifact mount
+//	GC_NOMAD_AGENT_LAUNCH_SCRIPT  optional: POSIX shell script the launch command execs inside the tmux pane after sourcing the staged environment (ops.go's buildLaunchCommand) — deployment-owned, so PATH prepends and HOME-style secrets-dir wiring for a specific agent (e.g. Codex) live in configuration, never in this pack; unset preserves the legacy bare-tmux placeholder session
 package main
 
 import (

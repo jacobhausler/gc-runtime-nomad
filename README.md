@@ -194,7 +194,13 @@ token cannot fix the drift in place.
 - Remote artifact blocks and the env.ledger tunnel (`NRT-P1-06`) — staging
   only materializes what a caller sends inline on stdin; the launch command
   starts a bare `tmux new-session` (plus `-e` flags) after sourcing the
-  staged environment, not a real agent command line. The session task's own command (`jobspec.go`'s
+  staged environment. As of the `GC_NOMAD_AGENT_LAUNCH_SCRIPT` seam
+  (`ops.go`'s `buildLaunchCommand`), a deployment can configure that tmux
+  pane's initial command to be a real agent bootstrap script (PATH prepend,
+  an agent HOME pointed inside `$NOMAD_SECRETS_DIR`, staged-auth install,
+  then exec the agent) instead of the bare placeholder shell — the pack
+  itself stays agent-agnostic; unset, the placeholder session is unchanged.
+  The session task's own command (`jobspec.go`'s
   `sessionSupervisorScript`, NRT-P2-06.1) is a real long-lived
   trap-and-loop that keeps the alloc alive until stop — no longer the
   `/bin/true` placeholder that used to exit immediately on a real client —
