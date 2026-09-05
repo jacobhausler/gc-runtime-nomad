@@ -32,6 +32,17 @@ func TestParentJobSpecLogShipperDisabledByDefault(t *testing.T) {
 	}
 }
 
+// TestSessionTaskReservesSecretsSpace protects the in-memory CODEX_HOME used
+// by the deployment bootstrap. Nomad's unset default is only 1 MiB; Codex
+// creates its state database there before it can begin a session.
+func TestSessionTaskReservesSecretsSpace(t *testing.T) {
+	spec := parentJobSpec("default", "", "gc-sessions", logShipperConfig{})
+	got := spec.TaskGroups[0].Tasks[0].Resources.SecretsMB
+	if got != sessionSecretsMB {
+		t.Fatalf("agent SecretsMB = %d, want %d", got, sessionSecretsMB)
+	}
+}
+
 // TestParentJobSpecMountsGCArtifactsReadOnly is the allocation contract for
 // the shared Linux gc artifact: when configured, the agent must see the
 // requested Nomad client host volume at /mnt/nomad, and neither the group
