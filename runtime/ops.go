@@ -464,8 +464,20 @@ func (l *lifecycle) opRelaunch(ctx context.Context, sessionName string) error {
 // RPP-CONN-001). It works regardless of the launched marker — this is
 // exactly the "box exec-able" half of the provision contract
 // (RPP-PROVISION-001): a provisioned-but-not-launched box still answers
-// exec.
+// exec. The one stateful exception is gc's canonical separable-transport
+// tmux launch: after that exact command succeeds, the pack must confirm the
+// launch in its private sidecar just as opStart does, or its own is-running
+// operation immediately reports the newly launched session missing.
 func (l *lifecycle) opExec(ctx context.Context, sessionName string, command []string) (int, []byte, error) {
+	transportLaunch := isSeparableTransportLaunch(command)
+	if transportLaunch {
+		unlock, err := l.lockSession(ctx, sessionName)
+		if err != nil {
+			return 0, nil, err
+		}
+		defer unlock()
+	}
+
 	allocID, err := l.currentAlloc(ctx, sessionName)
 	if err != nil {
 		return 0, nil, err
@@ -474,7 +486,23 @@ func (l *lifecycle) opExec(ctx context.Context, sessionName string, command []st
 	if err != nil {
 		return 0, nil, fmt.Errorf("exec on session %q: %w", sessionName, err)
 	}
+	if transportLaunch && exitCode == 0 {
+		if err := l.confirmLaunched(ctx, sessionName); err != nil {
+			return 0, stdout, fmt.Errorf("recording transport launch for session %q: %w", sessionName, err)
+		}
+	}
 	return exitCode, stdout, nil
+}
+
+// isSeparableTransportLaunch recognizes only the two canonical tmux argv
+// forms gc's exec transport emits from launchAgent. Ordinary exec remains
+// stateless, including unrelated tmux commands.
+func isSeparableTransportLaunch(command []string) bool {
+	if len(command) != 6 || command[0] != "tmux" || command[4] != tmuxSessionName || command[5] == "" {
+		return false
+	}
+	return (command[1] == "new-session" && command[2] == "-d" && command[3] == "-s") ||
+		(command[1] == "respawn-pane" && command[2] == "-k" && command[3] == "-t")
 }
 
 // opNudge sends text into sessionName's tmux session as if typed at the
@@ -753,6 +781,13 @@ func (l *lifecycle) markLaunched(ctx context.Context, sessionName string, env ma
 	if err := l.launch(ctx, sessionName, env); err != nil {
 		return err
 	}
+	return l.confirmLaunched(ctx, sessionName)
+}
+
+// confirmLaunched records a launch that has already succeeded. Its caller
+// holds sessionName's lock: opStart/markLaunched hold it end-to-end, while
+// opExec acquires it only for gc's canonical transport-launch command.
+func (l *lifecycle) confirmLaunched(ctx context.Context, sessionName string) error {
 	// Best-effort: a failure recording the pid does not fail the launch
 	// itself, since the tmux session already exists and answers exec — it
 	// just leaves the probe without a pid to kill -0 (falls back to a
