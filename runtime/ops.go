@@ -498,11 +498,60 @@ func (l *lifecycle) opExec(ctx context.Context, sessionName string, command []st
 // forms gc's exec transport emits from launchAgent. Ordinary exec remains
 // stateless, including unrelated tmux commands.
 func isSeparableTransportLaunch(command []string) bool {
+	// RPP v0's exec op carries argv as one shellQuote-produced string on
+	// stdin. main preserves that contract by invoking /bin/sh -c, so unwrap
+	// only that exact, single-quoted grammar before matching the launch argv.
+	if len(command) == 3 && command[0] == "/bin/sh" && command[1] == "-c" {
+		parsed, ok := parseExecWireArgv(command[2])
+		if !ok {
+			return false
+		}
+		command = parsed
+	}
 	if len(command) != 6 || command[0] != "tmux" || command[4] != tmuxSessionName || command[5] == "" {
 		return false
 	}
 	return (command[1] == "new-session" && command[2] == "-d" && command[3] == "-s") ||
 		(command[1] == "respawn-pane" && command[2] == "-k" && command[3] == "-t")
+}
+
+// parseExecWireArgv decodes the deliberately tiny grammar produced by gc's
+// exec shellQuote: every argument is single-quoted, spaces separate arguments,
+// and an embedded quote is encoded as '\'' . It is not a general shell
+// parser; rejecting anything outside that grammar keeps launch recognition
+// narrower than the command the shell itself will accept.
+func parseExecWireArgv(command string) ([]string, bool) {
+	var argv []string
+	for command != "" {
+		if command[0] != '\'' {
+			return nil, false
+		}
+		command = command[1:]
+		var arg strings.Builder
+		for {
+			end := strings.IndexByte(command, '\'')
+			if end < 0 {
+				return nil, false
+			}
+			arg.WriteString(command[:end])
+			command = command[end+1:]
+			if strings.HasPrefix(command, `\''`) {
+				arg.WriteByte('\'')
+				command = command[3:]
+				continue
+			}
+			argv = append(argv, arg.String())
+			break
+		}
+		if command == "" {
+			return argv, true
+		}
+		if command[0] != ' ' {
+			return nil, false
+		}
+		command = command[1:]
+	}
+	return argv, true
 }
 
 // opNudge sends text into sessionName's tmux session as if typed at the
