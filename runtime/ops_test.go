@@ -462,7 +462,9 @@ esac
 	if err := l.opProvision(ctx, session); err != nil {
 		t.Fatalf("provision: %v", err)
 	}
-	launch := []string{"tmux", "new-session", "-d", "-s", tmuxSessionName, "sleep 60"}
+	// The v0 exec wire carries gc's argv as a POSIX-quoted command string;
+	// main's exec handler runs that string through /bin/sh -c.
+	launch := []string{"/bin/sh", "-c", `'tmux' 'new-session' '-d' '-s' 'main' 'sleep 60'`}
 	if code, out, err := l.opExec(ctx, session, launch); err != nil || code != 0 {
 		t.Fatalf("exec transport launch = (%d, %q, %v), want (0, _, nil)", code, out, err)
 	}
