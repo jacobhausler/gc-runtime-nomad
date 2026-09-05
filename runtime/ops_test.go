@@ -451,7 +451,7 @@ func TestOpExecConfirmsASeparableTransportLaunch(t *testing.T) {
 	if err := os.WriteFile(fakeTmux, []byte(`#!/bin/sh
 case "$1" in
 new-session|has-session) exit 0 ;;
-list-panes) printf '4242\n'; exit 0 ;;
+list-panes) exit 1 ;;
 *) exit 1 ;;
 esac
 `), 0o700); err != nil {
