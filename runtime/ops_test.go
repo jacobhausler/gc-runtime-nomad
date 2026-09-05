@@ -446,6 +446,18 @@ func TestOpExecConfirmsASeparableTransportLaunch(t *testing.T) {
 	l, _ := newTestLifecycle(t)
 	ctx := context.Background()
 	const session = "sess-separable-launch"
+	fakeBin := t.TempDir()
+	fakeTmux := filepath.Join(fakeBin, "tmux")
+	if err := os.WriteFile(fakeTmux, []byte(`#!/bin/sh
+case "$1" in
+new-session|has-session) exit 0 ;;
+list-panes) printf '4242\n'; exit 0 ;;
+*) exit 1 ;;
+esac
+`), 0o700); err != nil {
+		t.Fatalf("write fake tmux: %v", err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	if err := l.opProvision(ctx, session); err != nil {
 		t.Fatalf("provision: %v", err)
