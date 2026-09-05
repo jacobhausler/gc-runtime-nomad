@@ -1,7 +1,7 @@
 # Phase-1 conformance receipt (NRT-P1-90)
 
-Commit: `192222089c1ce539425ef06e0f1a8965e0510376`
-Generated: 2026-09-05T18:51:03Z
+Commit: `4a08d088334ed96c6aeefbb4e9042fa06d22af87`
+Generated: 2026-09-05T19:06:27Z
 
 Full offline ladder — no live Nomad cluster or network required. A row
 reading FAIL means the ladder is red at this commit; re-run `./receipt.sh`
