@@ -187,20 +187,21 @@ type taskProc struct {
 // Server is a fake Nomad API server. Zero value is not usable; construct
 // with NewServer. Safe for concurrent use.
 type Server struct {
-	mu         sync.Mutex
-	index      uint64
-	waitCh     chan struct{}
-	jobs       map[string]*Job
-	allocs     map[string]*Allocation
-	allocFiles map[string]map[string]string // allocID -> path -> content
-	execDirs   map[string]string            // allocID -> its exec scratch dir (lazy)
-	taskProcs  map[string][]*taskProc       // allocID -> its running task-command subprocesses, main task first (lazy)
-	faults     []fault
-	execFails  int // transient alloc-exec streams to close after stdin
-	execResets int // transient alloc-exec streams to reset after stdin
-	dispSeq    uint64
-	portSeq    uint64 // dynamic-port assignment counter (fnrt-t4l.24)
-	trace      []string
+	mu          sync.Mutex
+	index       uint64
+	waitCh      chan struct{}
+	jobs        map[string]*Job
+	allocs      map[string]*Allocation
+	allocFiles  map[string]map[string]string // allocID -> path -> content
+	execDirs    map[string]string            // allocID -> its exec scratch dir (lazy)
+	taskProcs   map[string][]*taskProc       // allocID -> its running task-command subprocesses, main task first (lazy)
+	faults      []fault
+	execFails   int // transient alloc-exec streams to close after stdin
+	execResets  int // transient alloc-exec streams to reset after stdin
+	execHangups int // transient alloc-exec streams to reset before stdin
+	dispSeq     uint64
+	portSeq     uint64 // dynamic-port assignment counter (fnrt-t4l.24)
+	trace       []string
 
 	execRoot string // parent of every per-alloc exec scratch dir
 	httpSrv  *httptest.Server
@@ -370,6 +371,33 @@ func (s *Server) ResetExecNext(count int) {
 	s.mu.Lock()
 	s.execResets += count
 	s.mu.Unlock()
+}
+
+// HangupExecNext makes the next count alloc-exec WebSocket calls reset their
+// TCP stream immediately after the handshake — before consuming any stdin
+// frame — so the caller is still writing when the stream dies. This models
+// the mid-stdin half-close observed on the lab (fnrt-t4l.18), where the
+// mTLS bridge's upgrade tunnel collapsed while a staging tar was being
+// written and the runtime saw "writing exec stdin-close frame: broken pipe".
+// It is the write-side twin of ResetExecNext, which only breaks the stream
+// once the client has finished writing.
+func (s *Server) HangupExecNext(count int) {
+	if count <= 0 {
+		return
+	}
+	s.mu.Lock()
+	s.execHangups += count
+	s.mu.Unlock()
+}
+
+func (s *Server) takeExecHangup() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.execHangups == 0 {
+		return false
+	}
+	s.execHangups--
+	return true
 }
 
 func (s *Server) takeExecFailure() bool {

@@ -70,6 +70,17 @@ func (s *Server) handleExecWS(w http.ResponseWriter, r *http.Request, allocID st
 		"Connection: Upgrade\r\n"+
 		"Sec-WebSocket-Accept: "+accept+"\r\n\r\n")
 
+	// A hangup fault kills the stream before a single stdin frame is read,
+	// while the client is still writing its staging payload — the
+	// write-side tear-down (broken pipe / reset mid-write) the read-side
+	// ResetExecNext and FailExecNext faults cannot produce.
+	if s.takeExecHangup() {
+		if tcpConn, ok := conn.(*net.TCPConn); ok {
+			_ = tcpConn.SetLinger(0)
+		}
+		return
+	}
+
 	var stdin bytes.Buffer
 	for {
 		opcode, payload, err := wsReadFrame(buf.Reader)

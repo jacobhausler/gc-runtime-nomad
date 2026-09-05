@@ -1,3 +1,45 @@
+# v1.0.2
+
+Recovery fix for a provision wedge seen on a live cluster (`fnrt-t4l.18`).
+
+## What broke
+
+A session's NRT-P1-06 staging (workspace/secrets materialized over
+tar-over-exec-stdin) runs AFTER its child job has been dispatched. When the
+exec stream was torn down while the runtime was still WRITING that payload,
+two defects compounded:
+
+1. `writing exec stdin-close frame: broken pipe` (EPIPE) was not classified
+   as an alloc-readiness failure, so staging did not retry it. Only the
+   read-side shapes (EOF, ECONNRESET) were.
+2. The failed staging left a live child bound to the session, so every later
+   `provision` was rejected by dispatch's already-exists guard —
+   `provision: session already exists`, every tick, forever. The session
+   could never finish being provisioned and never be started.
+
+## What changed
+
+- `allocReadyRetryable` now also classifies the write-side and mid-frame
+  tear-downs: `EPIPE`/`broken pipe` and `io.ErrUnexpectedEOF`. A genuinely
+  dead stream still just exhausts the same bounded retry.
+- Bindings carry a `stage_pending` marker, written before the first staging
+  exec call and cleared once every staging call has succeeded. `provision`
+  resumes staging into the box it already dispatched when — and only when —
+  it finds its own binding in that state. A session whose staging completed
+  is still a duplicate provision and is still rejected with `already exists`
+  (04 §6 / R1a-02 wire contract, pinned by test). Bindings written before
+  this field existed have no marker and are never resumed.
+
+## Coverage
+
+New `fakenomad` fault `HangupExecNext` resets the alloc-exec stream
+immediately after the handshake, before any stdin frame is consumed — the
+write-side twin of `ResetExecNext`, which can only break a stream after the
+client has finished writing. Three fault-suite regressions ride it (wedge
+recovery, transient absorption, the already-exists contract) plus a
+classification unit test. Full offline ladder green — see
+`CONFORMANCE-RECEIPT.md`.
+
 # v1.0.0
 
 First public release of `runtime-nomad`: a Gas City RPP v0 runtime pack that

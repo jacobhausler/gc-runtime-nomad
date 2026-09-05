@@ -315,10 +315,23 @@ func (l *lifecycle) opProvisionWithConfig(ctx context.Context, sessionName strin
 		return err
 	}
 	defer unlock()
-	if err := l.dispatch(ctx, sessionName); err != nil {
+
+	// A binding left StagePending by an earlier provision that died between
+	// dispatch and the end of staging is this pack's own unfinished work
+	// (positive attribution — we wrote that marker), so resume straight to
+	// staging. Without this, the earlier dispatch has already committed a
+	// live child, and every later provision tick is rejected by dispatch's
+	// already-exists check with no way to ever finish staging: the wedge
+	// fnrt-t4l.18 saw on the lab, where a mid-stdin exec half-close failed
+	// staging and provision then failed identically forever.
+	if resume, err := l.resumeUnstaged(ctx, sessionName); err != nil {
 		return err
+	} else if !resume {
+		if err := l.dispatch(ctx, sessionName); err != nil {
+			return err
+		}
 	}
-	return l.stage(ctx, sessionName, cfg)
+	return l.stageTracked(ctx, sessionName, cfg)
 }
 
 // opStart is provision + launch (04 §3 start row): dispatch a fresh child,
@@ -354,7 +367,7 @@ func (l *lifecycle) opStartWithConfig(ctx context.Context, sessionName string, c
 	if resume, err := l.resumeUnlaunched(ctx, sessionName); err != nil {
 		return err
 	} else if resume {
-		if err := l.stage(ctx, sessionName, cfg); err != nil {
+		if err := l.stageTracked(ctx, sessionName, cfg); err != nil {
 			return err
 		}
 		return l.markLaunched(ctx, sessionName, cfg.Env)
@@ -363,7 +376,7 @@ func (l *lifecycle) opStartWithConfig(ctx context.Context, sessionName string, c
 	if err := l.dispatch(ctx, sessionName); err != nil {
 		return err
 	}
-	if err := l.stage(ctx, sessionName, cfg); err != nil {
+	if err := l.stageTracked(ctx, sessionName, cfg); err != nil {
 		return err
 	}
 	return l.markLaunched(ctx, sessionName, cfg.Env)
@@ -380,6 +393,33 @@ func (l *lifecycle) resumeUnlaunched(ctx context.Context, sessionName string) (b
 		return false, err
 	}
 	if !ok || b.ChildJobID == "" || b.Launched {
+		return false, nil
+	}
+	allocs, _, err := l.client.listAllocsForJob(ctx, b.ChildJobID, 0, 0)
+	if err != nil {
+		return false, nil
+	}
+	for _, a := range allocs {
+		if !isTerminalStatus(a.ClientStatus) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// resumeUnstaged reports whether sessionName has a binding this pack left
+// mid-staging: dispatched, never launched, still marked StagePending, and
+// still backed by a live (non-terminal) alloc. That combination is the only
+// state in which provision may skip its dispatch (and therefore its
+// already-exists rejection) and go straight to staging the box that is
+// already there. Like resumeUnlaunched it treats a lookup failure as "no
+// resume" so a stuck cluster read can never wedge provision.
+func (l *lifecycle) resumeUnstaged(ctx context.Context, sessionName string) (bool, error) {
+	b, ok, err := l.sidecar.load(sessionName)
+	if err != nil {
+		return false, err
+	}
+	if !ok || b.ChildJobID == "" || b.Launched || !b.StagePending {
 		return false, nil
 	}
 	allocs, _, err := l.client.listAllocsForJob(ctx, b.ChildJobID, 0, 0)
@@ -730,6 +770,56 @@ func (l *lifecycle) markLaunched(ctx context.Context, sessionName string, env ma
 	return l.sidecar.save(*b)
 }
 
+// stageTracked runs stage under the sidecar's StagePending marker, so a
+// staging failure leaves behind the positive attribution a later provision
+// needs to resume the box it already dispatched (resumeUnstaged) rather than
+// re-dispatching or wedging on already-exists. A cfg with nothing to
+// materialize skips the marker entirely: stage is a no-op there, so
+// provision/start keep behaving exactly as they did before the marker
+// existed when no config rides the call.
+func (l *lifecycle) stageTracked(ctx context.Context, sessionName string, cfg stageConfig) error {
+	if !stagesAnything(cfg) {
+		return l.stage(ctx, sessionName, cfg)
+	}
+	if err := l.setStagePending(sessionName, true); err != nil {
+		return err
+	}
+	if err := l.stage(ctx, sessionName, cfg); err != nil {
+		return err
+	}
+	return l.setStagePending(sessionName, false)
+}
+
+// setStagePending records (or clears) the mid-staging marker on
+// sessionName's binding, re-reading it first so a concurrent writer's other
+// fields are preserved.
+func (l *lifecycle) setStagePending(sessionName string, pending bool) error {
+	b, ok, err := l.sidecar.load(sessionName)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("session %q binding vanished before staging could be recorded", sessionName)
+	}
+	if b.StagePending == pending {
+		return nil
+	}
+	b.StagePending = pending
+	return l.sidecar.save(*b)
+}
+
+// stagesAnything reports whether cfg — plus the process-env extra secret
+// keys stage() merges in (GC_NOMAD_EXTRA_SECRET_KEYS) — has any workspace or
+// secret payload to materialize, i.e. whether stage will make an exec call
+// that can fail partway.
+func stagesAnything(cfg stageConfig) bool {
+	if len(cfg.Files) > 0 {
+		return true
+	}
+	secretEnv, _ := mergeExtraSecretEnv(cfg.Env, extraSecretKeys)
+	return len(secretEnv) > 0
+}
+
 // stage materializes cfg's workspace files and secret env vars into
 // sessionName's current alloc (NRT-P1-06, 04 §5 data contract) over two
 // tar-over-exec-stdin calls: cfg.Files (the CopyFiles/workspace-in analog)
@@ -816,9 +906,9 @@ func (l *lifecycle) execStage(ctx context.Context, sessionName string, command [
 	})
 }
 
-// retryAllocExecReady retries only the two failures that are expected while a
+// retryAllocExecReady retries only the failures that are expected while a
 // freshly dispatched allocation becomes exec-ready: no allocation is visible
-// yet, or Nomad closes the exec stream before the task is ready. Command exit
+// yet, or the exec stream is torn down before the task is ready. Command exit
 // failures and other provider errors are returned immediately so a real fault
 // is not hidden behind a retry delay.
 func retryAllocExecReady(ctx context.Context, operation func() error) error {
@@ -841,11 +931,25 @@ func retryAllocExecReady(ctx context.Context, operation func() error) error {
 	return lastErr
 }
 
+// allocReadyRetryable classifies the transport failures a torn-down exec
+// stream can surface. Which one the client sees depends on whether it was
+// reading or writing when the peer went away, and on how many hops sit in
+// between: reading gives EOF (clean close before any frame),
+// ErrUnexpectedEOF (close partway through a frame the codec had committed
+// to reading), or ECONNRESET; writing gives EPIPE — the shape fnrt-t4l.18
+// hit on the lab, where the staging tar's own stdin frames raced a
+// half-closed proxy tunnel ("writing exec stdin-close frame: broken pipe").
+// All of them mean the same thing to a caller: the box is not exec-ready
+// yet, re-dial and try again. A genuinely dead stream just exhausts the
+// bounded retry and surfaces the same error.
 func allocReadyRetryable(err error) bool {
 	return err != nil && (errors.Is(err, errAllocNotReady) ||
 		errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrUnexpectedEOF) ||
 		errors.Is(err, syscall.ECONNRESET) ||
-		strings.Contains(err.Error(), "connection reset by peer"))
+		errors.Is(err, syscall.EPIPE) ||
+		strings.Contains(err.Error(), "connection reset by peer") ||
+		strings.Contains(err.Error(), "broken pipe"))
 }
 
 // errSessionNotFound marks a currentAlloc failure caused by the session

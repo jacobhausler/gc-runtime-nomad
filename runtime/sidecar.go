@@ -41,6 +41,20 @@ type binding struct {
 	// not be flushed.
 	EvidenceLost bool `json:"evidence_lost,omitempty"`
 
+	// StagePending marks that this binding's box was dispatched and its
+	// NRT-P1-06 staging (workspace/secrets materialization) was started but
+	// never confirmed complete. It is the provision-path analog of
+	// dispatch's own intent record: written before the first tar-over-exec
+	// call and cleared once every staging call has succeeded, so a
+	// provision that dies mid-staging (the lab's mid-stdin exec half-close,
+	// fnrt-t4l.18) leaves a binding a later provision can positively
+	// identify as its own unfinished work and resume, instead of being
+	// rejected forever by dispatch's already-exists check. Absent on
+	// bindings written before this field existed, which is the conservative
+	// answer: those provisions did complete, so they keep reporting
+	// "already exists".
+	StagePending bool `json:"stage_pending,omitempty"`
+
 	// Launched distinguishes "provisioned, agent never launched" (false)
 	// from "launched" (true) — the two states that are otherwise
 	// observationally identical from the Nomad alloc alone (04 §6:

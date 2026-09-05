@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -150,6 +151,52 @@ func TestRetryAllocExecReadyRetriesConnectionReset(t *testing.T) {
 // session's own is-running answer, which is exactly the "shipper crash →
 // session task unaffected" scope line exercised at the real ops layer
 // rather than fakenomad's synthetic unit test.
+// TestRetryAllocExecReadyRetriesWriteSideTeardown pins the classifications
+// added for fnrt-t4l.18: the exec stream can also die while the caller is
+// WRITING (a staging tar's stdin frames), which surfaces as EPIPE rather
+// than as any of the read-side shapes — the exact error the lab reported,
+// "writing exec stdin-close frame: broken pipe". A short read partway
+// through a frame the codec had committed to (io.ReadFull) is the same
+// class and was likewise unclassified.
+func TestRetryAllocExecReadyRetriesWriteSideTeardown(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{
+			name: "wrapped epipe",
+			err:  fmt.Errorf("writing exec stdin-close frame: %w", syscall.EPIPE),
+		},
+		{
+			name: "websocket transport text",
+			err:  errors.New("writing exec stdin-data frame: write tcp 127.0.0.1:50650->127.0.0.1:18647: write: broken pipe"),
+		},
+		{
+			name: "short read mid frame",
+			err:  fmt.Errorf("reading exec frame: %w", io.ErrUnexpectedEOF),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			attempts := 0
+			err := retryAllocExecReady(context.Background(), func() error {
+				attempts++
+				if attempts < 3 {
+					return tc.err
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("retryAllocExecReady: %v", err)
+			}
+			if attempts != 3 {
+				t.Fatalf("write-side teardown attempts = %d, want 3", attempts)
+			}
+		})
+	}
+}
+
 func TestLifecycleStartSucceedsWithLogShipperEnabled(t *testing.T) {
 	l, _ := newTestLifecycle(t)
 	l.logShipper = logShipperConfig{Sink: "https://logs.example.internal/ingest"}

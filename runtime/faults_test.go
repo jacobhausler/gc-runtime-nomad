@@ -992,3 +992,83 @@ func TestFaultPermanentAuth(t *testing.T) {
 		t.Fatalf("list-running under permanent auth failure = nil error, want a propagated error")
 	}
 }
+
+// TestFaultProvisionResumesAfterStagingHangup covers the wedge fnrt-t4l.18
+// hit on the lab: staging died mid-stdin ("writing exec stdin-close frame:
+// broken pipe") AFTER the dispatch had already committed a live child, so
+// every later provision tick was rejected by dispatch's already-exists
+// guard and the session could never finish being provisioned. The second
+// provision must resume its own unfinished staging into the box that is
+// already there.
+func TestFaultProvisionResumesAfterStagingHangup(t *testing.T) {
+	l, srv := newTestLifecycle(t)
+	ctx := context.Background()
+	const session = "sess-staging-hangup"
+	cfg := stageConfig{Env: map[string]string{"OPENAI_API_KEY": "wedge-recovery-secret"}}
+
+	// Break every exec attempt staging is allowed to make, so the bounded
+	// readiness retry is exhausted and provision fails with the box live.
+	srv.HangupExecNext(allocExecReadyAttempts)
+	err := l.opProvisionWithConfig(ctx, session, cfg)
+	if err == nil {
+		t.Fatal("provision with a permanently torn-down exec stream = nil error, want a staging failure")
+	}
+	if !strings.Contains(err.Error(), "staging secrets") {
+		t.Fatalf("provision failure = %v, want a staging-secrets failure", err)
+	}
+	b, ok, loadErr := l.sidecar.load(session)
+	if loadErr != nil || !ok || !b.StagePending {
+		t.Fatalf("sidecar.load(%q) after the failed staging = (%+v, %v, %v), want a StagePending binding", session, b, ok, loadErr)
+	}
+
+	if err := l.opProvisionWithConfig(ctx, session, cfg); err != nil {
+		t.Fatalf("second provision after the failed staging = %v, want nil (resume, not already-exists)", err)
+	}
+	if b, ok, err := l.sidecar.load(session); err != nil || !ok || b.StagePending {
+		t.Fatalf("sidecar.load(%q) after the resumed staging = (%+v, %v, %v), want StagePending cleared", session, b, ok, err)
+	}
+	exitCode, out, err := l.opExec(ctx, session, []string{"/bin/sh", "-c", `cat "$NOMAD_SECRETS_DIR/OPENAI_API_KEY"`})
+	if err != nil || exitCode != 0 || !strings.Contains(string(out), "wedge-recovery-secret") {
+		t.Fatalf("staged secret after the resumed provision = (exit %d, out %q, err %v), want the secret", exitCode, out, err)
+	}
+}
+
+// TestFaultProvisionRetriesTransientStagingHangup is the same tear-down as
+// above but transient: a single mid-stdin hangup must be absorbed by
+// staging's own bounded retry, so one provision call still succeeds.
+func TestFaultProvisionRetriesTransientStagingHangup(t *testing.T) {
+	l, srv := newTestLifecycle(t)
+	ctx := context.Background()
+	const session = "sess-staging-hangup-transient"
+
+	srv.HangupExecNext(1)
+	if err := l.opProvisionWithConfig(ctx, session, stageConfig{
+		Env: map[string]string{"OPENAI_API_KEY": "transient-hangup-secret"},
+	}); err != nil {
+		t.Fatalf("provision across one transient exec tear-down = %v, want nil", err)
+	}
+	exitCode, out, err := l.opExec(ctx, session, []string{"/bin/sh", "-c", `cat "$NOMAD_SECRETS_DIR/OPENAI_API_KEY"`})
+	if err != nil || exitCode != 0 || !strings.Contains(string(out), "transient-hangup-secret") {
+		t.Fatalf("staged secret after the transient tear-down = (exit %d, out %q, err %v), want the secret", exitCode, out, err)
+	}
+}
+
+// TestFaultProvisionOfAStagedSessionStillReportsAlreadyExists pins the wire
+// contract the resume path must not erode (04 §6 / R1a-02: gc's exec proxy
+// infers ErrSessionExists from that exact phrase). Resuming is only ever
+// allowed for a binding this pack left mid-staging; a session whose staging
+// completed is still a duplicate provision and must be rejected.
+func TestFaultProvisionOfAStagedSessionStillReportsAlreadyExists(t *testing.T) {
+	l, _ := newTestLifecycle(t)
+	ctx := context.Background()
+	const session = "sess-staged-duplicate"
+	cfg := stageConfig{Env: map[string]string{"OPENAI_API_KEY": "already-staged-secret"}}
+
+	if err := l.opProvisionWithConfig(ctx, session, cfg); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	err := l.opProvisionWithConfig(ctx, session, cfg)
+	if err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("second provision of a fully staged session = %v, want an \"already exists\" rejection", err)
+	}
+}
