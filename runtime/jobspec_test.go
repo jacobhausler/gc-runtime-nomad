@@ -41,6 +41,9 @@ func TestSessionTaskReservesSecretsSpace(t *testing.T) {
 	if got != sessionSecretsMB {
 		t.Fatalf("agent SecretsMB = %d, want %d", got, sessionSecretsMB)
 	}
+	if memory := spec.TaskGroups[0].Tasks[0].Resources.MemoryMB; got > memory {
+		t.Fatalf("agent SecretsMB = %d exceeds MemoryMB = %d (Nomad rejects this jobspec)", got, memory)
+	}
 }
 
 // TestParentJobSpecMountsGCArtifactsReadOnly is the allocation contract for
