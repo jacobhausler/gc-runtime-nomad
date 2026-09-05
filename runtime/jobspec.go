@@ -52,11 +52,14 @@ const killTimeout = 30 * time.Second
 const lostAfter = 5 * time.Minute
 
 // sessionCPU/sessionMemoryMB are the explicit per-session resource class (04
-// §4 resources bullet). Sized for the fake/offline lane only — a real
-// deployment tunes these per session class.
+// §4 resources bullet). sessionSecretsMB overrides Nomad's 1 MiB secrets-tmpfs
+// default: deployment bootstraps keep CODEX_HOME there so auth remains outside
+// alloc-fs, and Codex's state database alone can exceed 300 MiB. Nomad counts
+// this reservation in scheduling, unlike its unrequested 1 MiB default.
 const (
-	sessionCPU      = 200
-	sessionMemoryMB = 256
+	sessionCPU       = 200
+	sessionMemoryMB  = 256
+	sessionSecretsMB = 512
 )
 
 // parentJobSpec builds the city's parameterized parent job — the job every
@@ -224,8 +227,9 @@ func sessionTask(artifactVolumeSource string) nomadTask {
 			"args":    []string{"-c", sessionSupervisorScript},
 		},
 		Resources: nomadResources{
-			CPU:      sessionCPU,
-			MemoryMB: sessionMemoryMB,
+			CPU:       sessionCPU,
+			MemoryMB:  sessionMemoryMB,
+			SecretsMB: sessionSecretsMB,
 		},
 		KillTimeout: killTimeout.Nanoseconds(),
 		// No identity{env|file}, Vault, Consul, or template blocks: Nomad's
@@ -600,8 +604,9 @@ type nomadTaskLifecycle struct {
 }
 
 type nomadResources struct {
-	CPU      int `json:"CPU"`
-	MemoryMB int `json:"MemoryMB"`
+	CPU       int `json:"CPU"`
+	MemoryMB  int `json:"MemoryMB"`
+	SecretsMB int `json:"SecretsMB,omitempty"`
 }
 
 // nomadArtifact mirrors Nomad's artifact stanza (go-getter): GetterOptions
