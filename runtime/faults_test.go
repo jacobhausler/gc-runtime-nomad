@@ -1053,12 +1053,15 @@ func TestFaultProvisionRetriesTransientStagingHangup(t *testing.T) {
 	}
 }
 
-// TestFaultProvisionOfAStagedSessionStillReportsAlreadyExists pins the wire
-// contract the resume path must not erode (04 §6 / R1a-02: gc's exec proxy
-// infers ErrSessionExists from that exact phrase). Resuming is only ever
-// allowed for a binding this pack left mid-staging; a session whose staging
-// completed is still a duplicate provision and must be rejected.
-func TestFaultProvisionOfAStagedSessionStillReportsAlreadyExists(t *testing.T) {
+// TestFaultProvisionOfALaunchedSessionStillReportsAlreadyExists pins the
+// wire contract the adopt path must not erode (04 §6 / R1a-02: gc's exec
+// proxy infers ErrSessionExists from that exact phrase) — and, with it, the
+// line fnrt-t4l.46 moved. A fully staged but never launched box is now
+// ADOPTED by a re-driven provision, because "staging finished, launch was
+// never confirmed" is exactly the DF-03 state a controller must be able to
+// converge out of. Only a session with an agent actually running in its box
+// is a duplicate, and that one is still rejected.
+func TestFaultProvisionOfALaunchedSessionStillReportsAlreadyExists(t *testing.T) {
 	l, _ := newTestLifecycle(t)
 	ctx := context.Background()
 	const session = "sess-staged-duplicate"
@@ -1067,8 +1070,15 @@ func TestFaultProvisionOfAStagedSessionStillReportsAlreadyExists(t *testing.T) {
 	if err := l.opProvisionWithConfig(ctx, session, cfg); err != nil {
 		t.Fatalf("provision: %v", err)
 	}
+	if err := l.opProvisionWithConfig(ctx, session, cfg); err != nil {
+		t.Fatalf("re-provision of a staged, unlaunched session = %v, want nil (adopt)", err)
+	}
+
+	if err := l.opStartWithConfig(ctx, session, cfg); err != nil {
+		t.Fatalf("start after provision: %v", err)
+	}
 	err := l.opProvisionWithConfig(ctx, session, cfg)
 	if err == nil || !strings.Contains(err.Error(), "already exists") {
-		t.Fatalf("second provision of a fully staged session = %v, want an \"already exists\" rejection", err)
+		t.Fatalf("provision of a launched session = %v, want an \"already exists\" rejection", err)
 	}
 }

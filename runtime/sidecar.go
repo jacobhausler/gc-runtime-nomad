@@ -45,14 +45,14 @@ type binding struct {
 	// NRT-P1-06 staging (workspace/secrets materialization) was started but
 	// never confirmed complete. It is the provision-path analog of
 	// dispatch's own intent record: written before the first tar-over-exec
-	// call and cleared once every staging call has succeeded, so a
-	// provision that dies mid-staging (the lab's mid-stdin exec half-close,
-	// fnrt-t4l.18) leaves a binding a later provision can positively
-	// identify as its own unfinished work and resume, instead of being
-	// rejected forever by dispatch's already-exists check. Absent on
-	// bindings written before this field existed, which is the conservative
-	// answer: those provisions did complete, so they keep reporting
-	// "already exists".
+	// call and cleared once every staging call has succeeded, so a binding
+	// left by a provision that died mid-staging (the lab's mid-stdin exec
+	// half-close, fnrt-t4l.18) says so on its face. Provision's retry no
+	// longer needs to consult it — adoption keys off liveChild, which
+	// covers every live-but-unlaunched box, not just a half-staged one
+	// (fnrt-t4l.46) — so this stays as the durable record of which staging
+	// halves never finished. Absent on bindings written before this field
+	// existed.
 	StagePending bool `json:"stage_pending,omitempty"`
 
 	// Launched distinguishes "provisioned, agent never launched" (false)

@@ -393,7 +393,7 @@ func TestOpListRunningUsesChildrenOfParentNotStaleSidecar(t *testing.T) {
 // launched marker, not mere alloc existence, is what is-running keys off
 // (04 §6 decision table).
 func TestOpProvisionThenExecWithoutLaunch(t *testing.T) {
-	l, _ := newTestLifecycle(t)
+	l, srv := newTestLifecycle(t)
 	ctx := context.Background()
 	const session = "sess-provisioned"
 
@@ -423,11 +423,73 @@ func TestOpProvisionThenExecWithoutLaunch(t *testing.T) {
 		t.Fatalf("exec stdout = empty, want fakenomad's scripted reply")
 	}
 
-	// provision is idempotent-rejecting exactly like start: a second
-	// provision on the same live (non-terminal, unlaunched) box is a
-	// duplicate.
+	// provision is idempotent (fnrt-t4l.46): a second provision on the same
+	// live, unlaunched box adopts it instead of erroring, and dispatches no
+	// second child.
+	if err := l.opProvision(ctx, session); err != nil {
+		t.Fatalf("second provision on a live unlaunched box = %v, want nil (adopt)", err)
+	}
+	if n := countDispatchCalls(srv.Trace(), l.parentJobID); n != 1 {
+		t.Fatalf("dispatch calls after two provisions = %d, want 1 (the second must adopt, not re-dispatch)", n)
+	}
+	if running, err := l.opIsRunning(ctx, session); err != nil || running {
+		t.Fatalf("is-running after adopting provision = (%v, %v), want (false, nil) — adoption must not launch", running, err)
+	}
+}
+
+// countDispatchCalls counts child-job dispatch requests for parentJobID in a
+// fakenomad trace — the assertion an adopt-instead-of-redispatch path needs:
+// exactly one child ever minted for a session, however many times its
+// provision/start is re-driven (04 §2.1 rule 4).
+func countDispatchCalls(trace []string, parentJobID string) int {
+	n := 0
+	for _, req := range trace {
+		if req == "POST /v1/job/"+parentJobID+"/dispatch" {
+			n++
+		}
+	}
+	return n
+}
+
+// TestOpProvisionOnLaunchedSessionIsRejected draws the other edge of
+// fnrt-t4l.46's idempotency: adoption covers a box this pack made but never
+// launched. A box with an agent already running in it is a genuine duplicate,
+// not a retry, so provision must still reject it with the 04 §6 wire-contract
+// phrase gc infers ErrSessionExists from (R1a-02).
+func TestOpProvisionOnLaunchedSessionIsRejected(t *testing.T) {
+	l, _ := newTestLifecycle(t)
+	ctx := context.Background()
+	const session = "sess-launched-then-provisioned"
+
+	if err := l.opStart(ctx, session); err != nil {
+		t.Fatalf("start: %v", err)
+	}
 	if err := l.opProvision(ctx, session); err == nil || !strings.Contains(err.Error(), "already exists") {
-		t.Fatalf("duplicate provision error = %v, want an \"already exists\" error", err)
+		t.Fatalf("provision over a launched session = %v, want an \"already exists\" error", err)
+	}
+}
+
+// TestOpStartAfterProvisionAdoptsTheProvisionedBox is the start-retry half of
+// fnrt-t4l.46: gc's controller provisions, then starts (or re-drives start
+// after a launch it never got to confirm). Start must resume into the box
+// provision already made — launching there, minting no second child — rather
+// than dispatching again or being rejected by the already-exists check.
+func TestOpStartAfterProvisionAdoptsTheProvisionedBox(t *testing.T) {
+	l, srv := newTestLifecycle(t)
+	ctx := context.Background()
+	const session = "sess-provision-then-start"
+
+	if err := l.opProvision(ctx, session); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if err := l.opStart(ctx, session); err != nil {
+		t.Fatalf("start after provision = %v, want nil (resume into the provisioned box)", err)
+	}
+	if n := countDispatchCalls(srv.Trace(), l.parentJobID); n != 1 {
+		t.Fatalf("dispatch calls across provision + start = %d, want 1", n)
+	}
+	if running, err := l.opIsRunning(ctx, session); err != nil || !running {
+		t.Fatalf("is-running after start resumed the provisioned box = (%v, %v), want (true, nil)", running, err)
 	}
 }
 

@@ -1,3 +1,53 @@
+# v1.0.3
+
+Provision idempotency and start-retry adoption (`fnrt-t4l.46`).
+
+## What broke
+
+v1.0.2 taught `provision` to resume the box it had already dispatched, but
+only for a binding it had positively marked `stage_pending` — a provision
+that died mid-staging. That is one of two ways a live, unlaunched box gets
+left bound to a session. The other one is what the DF-03 canary hit: the
+provision half succeeded and finished staging, the launch was never
+confirmed, and gc re-drove the verb every tick. `stage_pending` was already
+cleared, so no resume applied, dispatch's already-exists guard rejected every
+tick — 61 `session ... already exists` rejections while the alloc kept
+running healthily underneath. The lane could never converge.
+
+## What changed
+
+- `liveChild` is now the single "this session already has a box" test that
+  `provision`, `start`, and `dispatch` all key off, so the three cannot drift
+  apart on what counts as an existing session (`resumeUnlaunched` and
+  dispatch's guard are rewritten on it with no behavior change).
+- `provision` adopts before dispatching: a live child that is NOT launched is
+  adopted and staging is re-run against it. Re-staging is safe — stage's
+  channels are overwriting tar extractions into fixed paths — so the adopted
+  box converges on the state a fresh provision would have produced. This
+  subsumes v1.0.2's narrower `stage_pending` resume, which is retired;
+  the marker stays as the durable record of an unfinished staging half.
+- A live child that IS launched is a genuine duplicate, not a retry, and is
+  still rejected with the 04 §6 wire-contract `already exists` error gc reads
+  as `ErrSessionExists`. The v1.0.2 contract test is rewritten onto that
+  edge — the line this release moved.
+
+`start` needed no change: its `resumeUnlaunched` path already resumed into a
+provisioned box; this release pins that with tests at both rungs.
+
+## Coverage
+
+Ops-level tests for the adopting re-provision (asserting exactly one child
+dispatch, via the fakenomad request trace), the launched-session rejection,
+and start resuming into a provisioned box; the v1.0.2 fault-suite
+already-exists test re-pointed at the launched edge. Plus a `conformance.sh`
+rung that drives the binary's own CLI wire, since the failure was a
+controller re-driving the verb every tick — negative-tested: against the
+pre-fix `ops.go` it fails with exactly the incident's error.
+
+The gc-side half (gc minted a NEW session bead per tick instead of resuming
+on `provider_error: already exists`) is an upstream twin, drafted but not
+filed — its code pointers need confirming against gascity `main` first.
+
 # v1.0.2
 
 Recovery fix for a provision wedge seen on a live cluster (`fnrt-t4l.18`).

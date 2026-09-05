@@ -295,10 +295,20 @@ func isTerminalStatus(status string) bool {
 // sessionTask); no agent process exists in the box yet, and the sidecar
 // binding's launched marker stays false, so is-running reports false even
 // though the box already answers exec (04 §3 provision row, RPP-PROVISION-001).
-// A session with a live (non-terminal) child already bound is rejected —
-// the stderr message MUST contain "already exists" (04 §6 wire-contract
-// constant, R1a-02: gc's exec proxy infers ErrSessionExists from that exact
-// phrase).
+//
+// Provision is idempotent over the box it already made: a session whose
+// bound child is still live but NOT launched is ADOPTED (staging re-run
+// against it) rather than rejected. That is the fnrt-t4l.46 fix — a
+// provision that dispatched its child and then never got its launch
+// confirmed leaves exactly that state, and a controller that re-drives
+// provision every tick must be able to finish the job instead of collecting
+// "already exists" forever (61 of them in the DF-03 canary).
+//
+// A session whose child is live AND launched is still rejected: an agent is
+// running in that box, so provisioning over it is a duplicate, not a retry.
+// That rejection's stderr message MUST contain "already exists" (04 §6
+// wire-contract constant, R1a-02: gc's exec proxy infers ErrSessionExists
+// from that exact phrase).
 func (l *lifecycle) opProvision(ctx context.Context, sessionName string) error {
 	return l.opProvisionWithConfig(ctx, sessionName, stageConfig{})
 }
@@ -316,20 +326,29 @@ func (l *lifecycle) opProvisionWithConfig(ctx context.Context, sessionName strin
 	}
 	defer unlock()
 
-	// A binding left StagePending by an earlier provision that died between
-	// dispatch and the end of staging is this pack's own unfinished work
-	// (positive attribution — we wrote that marker), so resume straight to
-	// staging. Without this, the earlier dispatch has already committed a
-	// live child, and every later provision tick is rejected by dispatch's
-	// already-exists check with no way to ever finish staging: the wedge
-	// fnrt-t4l.18 saw on the lab, where a mid-stdin exec half-close failed
-	// staging and provision then failed identically forever.
-	if resume, err := l.resumeUnstaged(ctx, sessionName); err != nil {
+	// Adopt-or-dispatch (fnrt-t4l.46): a live child already bound to this
+	// session is the box this call was asked to make, so re-drive staging
+	// against it instead of dispatching a second one (04 §2.1 rule 4) or
+	// rejecting the caller. Re-staging is safe — stage's channels are
+	// overwriting writes into fixed paths, so the adopted box converges on
+	// the same state a fresh provision would have produced.
+	//
+	// This subsumes the narrower StagePending resume (fnrt-t4l.18): a
+	// provision that died mid-staging is only one of the ways a live,
+	// unlaunched box gets left behind. The DF-03 canary hit the other one —
+	// staging finished, the launch was never confirmed, and every later
+	// provision tick was rejected while the alloc kept running.
+	if b, live, err := l.liveChild(ctx, sessionName); err != nil {
 		return err
-	} else if !resume {
-		if err := l.dispatch(ctx, sessionName); err != nil {
-			return err
+	} else if live {
+		if b.Launched {
+			return fmt.Errorf("session %q already exists", sessionName)
 		}
+		return l.stageTracked(ctx, sessionName, cfg)
+	}
+
+	if err := l.dispatch(ctx, sessionName); err != nil {
+		return err
 	}
 	return l.stageTracked(ctx, sessionName, cfg)
 }
@@ -382,56 +401,47 @@ func (l *lifecycle) opStartWithConfig(ctx context.Context, sessionName string, c
 	return l.markLaunched(ctx, sessionName, cfg.Env)
 }
 
-// resumeUnlaunched reports whether sessionName has a binding whose child
-// was dispatched but never marked launched, and that child still has a
-// live (non-terminal) alloc. Returns false (with no error) for anything
-// that should fall through to a normal fresh dispatch, including a lookup
-// failure — a stuck lookup must not block start from ever proceeding.
-func (l *lifecycle) resumeUnlaunched(ctx context.Context, sessionName string) (bool, error) {
+// liveChild reports sessionName's sidecar binding when that binding names a
+// child job with at least one non-terminal alloc — the single "this session
+// already has a box" test opProvision, opStart, and dispatch all key off, so
+// the three cannot drift apart on what counts as an existing session.
+//
+// Reported not-live (false, nil) for anything that should fall through to a
+// fresh dispatch: no binding, a dispatch-intent record with no ChildJobID
+// yet (dispatch's own nonce-adoption path handles that one), an all-terminal
+// child, or a failed alloc lookup. A lookup failure is NOT proof of absence,
+// but wedging start/provision behind an unreachable API is worse than
+// risking a duplicate — the cluster-side duplicate suppression a full
+// implementation would add (04 §6) is out of scope for the provision split.
+func (l *lifecycle) liveChild(ctx context.Context, sessionName string) (binding, bool, error) {
 	b, ok, err := l.sidecar.load(sessionName)
 	if err != nil {
-		return false, err
+		return binding{}, false, err
 	}
-	if !ok || b.ChildJobID == "" || b.Launched {
-		return false, nil
+	if !ok || b.ChildJobID == "" {
+		return binding{}, false, nil
 	}
 	allocs, _, err := l.client.listAllocsForJob(ctx, b.ChildJobID, 0, 0)
 	if err != nil {
-		return false, nil
+		return binding{}, false, nil
 	}
 	for _, a := range allocs {
 		if !isTerminalStatus(a.ClientStatus) {
-			return true, nil
+			return *b, true, nil
 		}
 	}
-	return false, nil
+	return binding{}, false, nil
 }
 
-// resumeUnstaged reports whether sessionName has a binding this pack left
-// mid-staging: dispatched, never launched, still marked StagePending, and
-// still backed by a live (non-terminal) alloc. That combination is the only
-// state in which provision may skip its dispatch (and therefore its
-// already-exists rejection) and go straight to staging the box that is
-// already there. Like resumeUnlaunched it treats a lookup failure as "no
-// resume" so a stuck cluster read can never wedge provision.
-func (l *lifecycle) resumeUnstaged(ctx context.Context, sessionName string) (bool, error) {
-	b, ok, err := l.sidecar.load(sessionName)
+// resumeUnlaunched reports whether sessionName has a binding whose child was
+// dispatched but never marked launched, and that child still has a live
+// (non-terminal) alloc — start's resume-instead-of-redispatch case.
+func (l *lifecycle) resumeUnlaunched(ctx context.Context, sessionName string) (bool, error) {
+	b, live, err := l.liveChild(ctx, sessionName)
 	if err != nil {
 		return false, err
 	}
-	if !ok || b.ChildJobID == "" || b.Launched || !b.StagePending {
-		return false, nil
-	}
-	allocs, _, err := l.client.listAllocsForJob(ctx, b.ChildJobID, 0, 0)
-	if err != nil {
-		return false, nil
-	}
-	for _, a := range allocs {
-		if !isTerminalStatus(a.ClientStatus) {
-			return true, nil
-		}
-	}
-	return false, nil
+	return live && !b.Launched, nil
 }
 
 // opRelaunch re-execs the agent inside the SAME alloc without a fresh
@@ -565,20 +575,10 @@ func (l *lifecycle) dispatch(ctx context.Context, sessionName string) error {
 	if err != nil {
 		return err
 	}
-	if existingOK && existing.ChildJobID != "" {
-		allocs, _, err := l.client.listAllocsForJob(ctx, existing.ChildJobID, 0, 0)
-		if err == nil {
-			for _, a := range allocs {
-				if !isTerminalStatus(a.ClientStatus) {
-					return fmt.Errorf("session %q already exists", sessionName)
-				}
-			}
-		}
-		// A lookup error (unavailable/gone) is NOT proof of absence — but
-		// wedging start behind an unreachable API is worse than risking a
-		// duplicate here; the pre-dispatch child query a full cluster-side
-		// implementation would add (04 §6 duplicate-start suppression) is
-		// out of scope (provision split).
+	if _, live, err := l.liveChild(ctx, sessionName); err != nil {
+		return err
+	} else if live {
+		return fmt.Errorf("session %q already exists", sessionName)
 	}
 
 	if err := l.ensureParentRegistered(ctx); err != nil {
@@ -771,10 +771,9 @@ func (l *lifecycle) markLaunched(ctx context.Context, sessionName string, env ma
 }
 
 // stageTracked runs stage under the sidecar's StagePending marker, so a
-// staging failure leaves behind the positive attribution a later provision
-// needs to resume the box it already dispatched (resumeUnstaged) rather than
-// re-dispatching or wedging on already-exists. A cfg with nothing to
-// materialize skips the marker entirely: stage is a no-op there, so
+// staging failure leaves a binding that records, on its face, that this
+// pack's own staging half never finished against the box it dispatched. A
+// cfg with nothing to materialize skips the marker entirely: stage is a no-op there, so
 // provision/start keep behaving exactly as they did before the marker
 // existed when no config rides the call.
 func (l *lifecycle) stageTracked(ctx context.Context, sessionName string, cfg stageConfig) error {

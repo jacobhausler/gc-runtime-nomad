@@ -56,3 +56,39 @@ echo "conformance: gc runtime check"
 
 echo "conformance: gc runtime conformance"
 "$gc_bin" runtime conformance "$bindir/gc-runtime-nomad"
+
+# Provision/start retry idempotency (fnrt-t4l.46) — driven through the
+# binary's own wire, not the Go ops layer, because the failure this rung
+# guards was a controller re-driving the CLI verb every tick: a provision
+# whose launch was never confirmed left a live, unlaunched box, and every
+# subsequent provision was rejected with "already exists" (61 of them in
+# DF-03) instead of finishing the job. Provision must adopt the box it
+# already made, start must resume into it, and neither may mint a second
+# child.
+echo "conformance: provision/start retry idempotency (fnrt-t4l.46)"
+retry_session="gc-rpp-retry-$$"
+"$bindir/gc-runtime-nomad" provision "$retry_session" </dev/null
+"$bindir/gc-runtime-nomad" provision "$retry_session" </dev/null
+if [ "$("$bindir/gc-runtime-nomad" is-running "$retry_session")" != "false" ]; then
+  echo "conformance: re-provision must not launch the agent" >&2
+  exit 1
+fi
+"$bindir/gc-runtime-nomad" start "$retry_session" </dev/null
+if [ "$("$bindir/gc-runtime-nomad" is-running "$retry_session")" != "true" ]; then
+  echo "conformance: start after provision must resume into the provisioned box" >&2
+  exit 1
+fi
+# A launched session is a genuine duplicate, not a retry: both verbs must
+# still reject it with the 04 §6 wire-contract phrase gc reads as
+# ErrSessionExists.
+for verb in start provision; do
+  if err="$("$bindir/gc-runtime-nomad" "$verb" "$retry_session" </dev/null 2>&1)"; then
+    echo "conformance: $verb on a launched session succeeded; want an already-exists rejection" >&2
+    exit 1
+  fi
+  case "$err" in
+    *"already exists"*) ;;
+    *) echo "conformance: $verb on a launched session said '$err'; want an \"already exists\" error" >&2; exit 1 ;;
+  esac
+done
+"$bindir/gc-runtime-nomad" stop "$retry_session"
