@@ -437,6 +437,36 @@ func TestOpProvisionThenExecWithoutLaunch(t *testing.T) {
 	}
 }
 
+// TestOpExecConfirmsASeparableTransportLaunch covers the gc proc.provision
+// path: gc provisions the box, then launches the agent by sending the exact
+// tmux command over exec. A successful launch must advance the pack's sidecar
+// marker, otherwise is-running reports runtime-missing and gc retires a live
+// allocation immediately.
+func TestOpExecConfirmsASeparableTransportLaunch(t *testing.T) {
+	l, _ := newTestLifecycle(t)
+	ctx := context.Background()
+	const session = "sess-separable-launch"
+
+	if err := l.opProvision(ctx, session); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	launch := []string{"tmux", "new-session", "-d", "-s", tmuxSessionName, "sleep 60"}
+	if code, out, err := l.opExec(ctx, session, launch); err != nil || code != 0 {
+		t.Fatalf("exec transport launch = (%d, %q, %v), want (0, _, nil)", code, out, err)
+	}
+
+	b, ok, err := l.sidecar.load(session)
+	if err != nil || !ok {
+		t.Fatalf("sidecar.load after transport launch = (%+v, %v, %v)", b, ok, err)
+	}
+	if !b.Launched {
+		t.Fatalf("successful transport launch did not set the launched marker")
+	}
+	if running, err := l.opIsRunning(ctx, session); err != nil || !running {
+		t.Fatalf("is-running after transport launch = (%v, %v), want (true, nil)", running, err)
+	}
+}
+
 // countDispatchCalls counts child-job dispatch requests for parentJobID in a
 // fakenomad trace — the assertion an adopt-instead-of-redispatch path needs:
 // exactly one child ever minted for a session, however many times its
