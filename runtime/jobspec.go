@@ -58,7 +58,7 @@ const lostAfter = 5 * time.Minute
 // this reservation in scheduling, unlike its unrequested 1 MiB default.
 const (
 	sessionCPU       = 200
-	sessionMemoryMB  = 256
+	sessionMemoryMB  = 512
 	sessionSecretsMB = 512
 )
 
