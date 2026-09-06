@@ -478,6 +478,17 @@ func (l *lifecycle) opExec(ctx context.Context, sessionName string, command []st
 		defer unlock()
 	}
 
+	if transportLaunch {
+		// GC's canonical launch argv is only the transport handshake. The pack
+		// owns the staged environment and deployment-configured bootstrap, so
+		// route this operation through the same launch path as opStart instead
+		// of executing cfg.Command directly and then merely recording a marker.
+		if err := l.markLaunched(ctx, sessionName, nil); err != nil {
+			return 0, nil, fmt.Errorf("launching transport session %q: %w", sessionName, err)
+		}
+		return 0, nil, nil
+	}
+
 	allocID, err := l.currentAlloc(ctx, sessionName)
 	if err != nil {
 		return 0, nil, err
@@ -485,11 +496,6 @@ func (l *lifecycle) opExec(ctx context.Context, sessionName string, command []st
 	exitCode, stdout, err := l.client.execAlloc(ctx, allocID, execTaskName, command)
 	if err != nil {
 		return 0, nil, fmt.Errorf("exec on session %q: %w", sessionName, err)
-	}
-	if transportLaunch && exitCode == 0 {
-		if err := l.confirmLaunched(ctx, sessionName); err != nil {
-			return 0, stdout, fmt.Errorf("recording transport launch for session %q: %w", sessionName, err)
-		}
 	}
 	return exitCode, stdout, nil
 }
