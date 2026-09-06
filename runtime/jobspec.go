@@ -443,6 +443,23 @@ func (c logShipperConfig) artifactSource() string {
 //     stdout file (agent.stdout.1, .2, ...). Kept: same stream, and a file can
 //     match at most one of the two patterns, so declaring both is free.
 //
+// The sibling capture channels get their own sources rather than extra
+// patterns bolted onto session_stdout (cr-gdeav.6.5.8):
+//   - session_stderr — logs/agent.stderr, the launcher's `"$AGENT_CMD"
+//     2>>"$LOGS/agent.stderr"`, plus the same .N rotation pattern the stdout
+//     source uses for the task's own stream.
+//   - agent_exit — logs/agent.exit, the "exit= started= ended= ..." record.
+//     ONE exact name, no glob: the launcher writes it as agent.exit.$$ and
+//     renames it into place, so a wildcard would only ever widen the match
+//     onto the transient file. Every shipper path is a named file inside the
+//     allocation's logs dir — the same credential boundary runtime/ops.go's
+//     egressFiles is (a recursive sweep there would reach the staged secrets),
+//     and no source here uses "**".
+//
+// All three feed the one label transform and the one gc_log_sink, so the
+// stderr and exit channels carry the same session_name/alloc_id/node labels
+// as the stdout they were captured beside.
+//
 // The auth block is only emitted when cfg.TokenFile is set — vector has no
 // bearer-token-file primitive of its own, so an unset token file means an
 // unauthenticated sink rather than a literal empty bearer token.
@@ -463,12 +480,24 @@ include = ["{{ env "NOMAD_ALLOC_DIR" }}/logs/agent.stdout", "{{ env "NOMAD_ALLOC
 read_from = "beginning"
 ignore_checkpoints = true
 
+[sources.session_stderr]
+type = "file"
+include = ["{{ env "NOMAD_ALLOC_DIR" }}/logs/agent.stderr", "{{ env "NOMAD_ALLOC_DIR" }}/logs/agent.stderr.*"]
+read_from = "beginning"
+ignore_checkpoints = true
+
+[sources.agent_exit]
+type = "file"
+include = ["{{ env "NOMAD_ALLOC_DIR" }}/logs/agent.exit"]
+read_from = "beginning"
+ignore_checkpoints = true
+
 [sources.internal_metrics]
 type = "internal_metrics"
 
 [transforms.label]
 type = "remap"
-inputs = ["session_jsonl", "session_stdout"]
+inputs = ["session_jsonl", "session_stdout", "session_stderr", "agent_exit"]
 source = '''
 .session_name = "{{ env "NOMAD_META_GC_SESSION" }}"
 .alloc_id = "{{ env "NOMAD_ALLOC_ID" }}"

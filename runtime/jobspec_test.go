@@ -438,8 +438,9 @@ func quotedValueAfter(s, marker string) (string, bool) {
 
 func TestVectorConfigDisablesFileCheckpoints(t *testing.T) {
 	toml := vectorConfigTOML(logShipperConfig{Sink: "http://sink.example/ingest"})
-	if got := strings.Count(toml, "ignore_checkpoints = true"); got != 2 {
-		t.Fatalf("ignore_checkpoints occurrences = %d, want one for each file source\n%s", got, toml)
+	fileSources := strings.Count(toml, "type = \"file\"")
+	if got := strings.Count(toml, "ignore_checkpoints = true"); got != fileSources {
+		t.Fatalf("ignore_checkpoints occurrences = %d, want one for each of the %d file sources\n%s", got, fileSources, toml)
 	}
 }
 
@@ -460,26 +461,33 @@ var includePatternList = regexp.MustCompile(`"([^"]*)"`)
 // the shipped config rather than a copy of it.
 func sessionStdoutIncludes(t *testing.T, rendered string) []string {
 	t.Helper()
-	block := strings.Index(rendered, "[sources.session_stdout]")
+	return sourceIncludes(t, rendered, "session_stdout")
+}
+
+// sourceIncludes is sessionStdoutIncludes generalized to any named source, so
+// every capture channel can be measured against the same rendered config.
+func sourceIncludes(t *testing.T, rendered, source string) []string {
+	t.Helper()
+	block := strings.Index(rendered, "[sources."+source+"]")
 	if block < 0 {
-		t.Fatalf("no [sources.session_stdout] source in rendered config:\n%s", rendered)
+		t.Fatalf("no [sources.%s] source in rendered config:\n%s", source, rendered)
 	}
 	rest := rendered[block:]
 	start := strings.Index(rest, "include = [")
 	if start < 0 {
-		t.Fatalf("session_stdout has no include list:\n%s", rest)
+		t.Fatalf("sources.%s has no include list:\n%s", source, rest)
 	}
 	rest = rest[start:]
 	end := strings.IndexByte(rest, ']')
 	if end < 0 {
-		t.Fatalf("unterminated session_stdout include list:\n%s", rest)
+		t.Fatalf("unterminated sources.%s include list:\n%s", source, rest)
 	}
 	var patterns []string
 	for _, m := range includePatternList.FindAllStringSubmatch(rest[:end], -1) {
 		patterns = append(patterns, m[1])
 	}
 	if len(patterns) == 0 {
-		t.Fatalf("session_stdout include list is empty:\n%s", rest[:end])
+		t.Fatalf("sources.%s include list is empty:\n%s", source, rest[:end])
 	}
 	return patterns
 }
@@ -500,39 +508,7 @@ func sessionStdoutIncludes(t *testing.T, rendered string) []string {
 // of each pattern, which keeps a temp-path alloc dir (whatever characters it
 // contains) out of the glob entirely.
 func TestVectorSessionStdoutSourceMatchesShippedCapture(t *testing.T) {
-	l, srv := newTestLifecycle(t)
-	l.logShipper = logShipperConfig{Sink: "http://sink.example/ingest"}
-
-	ctx := context.Background()
-	const session = "sess-stdout-source-match"
-	if err := l.opStartWithConfig(ctx, session, stageConfig{}); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	allocID, err := l.currentAlloc(ctx, session)
-	if err != nil {
-		t.Fatalf("resolve current alloc: %v", err)
-	}
-	if state, ok := srv.TaskState(allocID, logShipperTaskName); !ok || state != "running" {
-		t.Fatalf("log-shipper task state = (%q, %v), want (\"running\", true) — the task never started", state, ok)
-	}
-
-	exitCode, out, err := l.opExec(ctx, session, []string{"cat", "local/vector.toml"})
-	if err != nil || exitCode != 0 {
-		t.Fatalf("cat rendered vector.toml: exit=%d err=%v out=%s", exitCode, err, out)
-	}
-	rendered := string(out)
-	if strings.Contains(rendered, "{{") {
-		t.Fatalf("rendered vector.toml still contains an unresolved Nomad template expression:\n%s", rendered)
-	}
-
-	jsonlPattern, ok := quotedValueAfter(rendered, `include = ["`)
-	if !ok {
-		t.Fatalf("no session_jsonl include line in rendered config:\n%s", rendered)
-	}
-	allocDir, found := strings.CutSuffix(jsonlPattern, "/data/*.jsonl")
-	if !found || allocDir == "" {
-		t.Fatalf("could not recover NOMAD_ALLOC_DIR from rendered include %q:\n%s", jsonlPattern, rendered)
-	}
+	rendered, allocDir := renderedShipperConfig(t, "sess-stdout-source-match")
 
 	// The two names that can exist under the allocation's logs dir: the file
 	// the bootstrap writes, and Nomad's rotation of the "agent" task's stream.
@@ -645,5 +621,161 @@ func TestParentJobSpecIsJSONMarshalable(t *testing.T) {
 	spec := parentJobSpec("default", "", "gc-sessions", cfg)
 	if _, err := json.Marshal(spec); err != nil {
 		t.Fatalf("marshal parent job spec with log-shipper enabled: %v", err)
+	}
+}
+
+// renderedShipperConfig drives the REAL parentJobSpec through fakenomad's own
+// Template-stanza rendering and returns the vector.toml Vector would receive on
+// a real node — so the capture tests measure the shipped config rather than a
+// copy of it. NOMAD_ALLOC_DIR is recovered from the sibling session_jsonl
+// source in that same rendered file rather than restated by the caller, which
+// keeps a temp-path alloc dir (whatever characters it contains) out of the
+// globs entirely.
+func renderedShipperConfig(t *testing.T, session string) (rendered, allocDir string) {
+	t.Helper()
+	l, srv := newTestLifecycle(t)
+	l.logShipper = logShipperConfig{Sink: "http://sink.example/ingest"}
+
+	ctx := context.Background()
+	if err := l.opStartWithConfig(ctx, session, stageConfig{}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	allocID, err := l.currentAlloc(ctx, session)
+	if err != nil {
+		t.Fatalf("resolve current alloc: %v", err)
+	}
+	if state, ok := srv.TaskState(allocID, logShipperTaskName); !ok || state != "running" {
+		t.Fatalf("log-shipper task state = (%q, %v), want (\"running\", true) — the task never started", state, ok)
+	}
+
+	exitCode, out, err := l.opExec(ctx, session, []string{"cat", "local/vector.toml"})
+	if err != nil || exitCode != 0 {
+		t.Fatalf("cat rendered vector.toml: exit=%d err=%v out=%s", exitCode, err, out)
+	}
+	rendered = string(out)
+	if strings.Contains(rendered, "{{") {
+		t.Fatalf("rendered vector.toml still contains an unresolved Nomad template expression:\n%s", rendered)
+	}
+	jsonlPattern, ok := quotedValueAfter(rendered, `include = ["`)
+	if !ok {
+		t.Fatalf("no session_jsonl include line in rendered config:\n%s", rendered)
+	}
+	allocDir, found := strings.CutSuffix(jsonlPattern, "/data/*.jsonl")
+	if !found || allocDir == "" {
+		t.Fatalf("could not recover NOMAD_ALLOC_DIR from rendered include %q:\n%s", jsonlPattern, rendered)
+	}
+	return rendered, allocDir
+}
+
+// renderedSection returns the body of one rendered TOML table, stopping at the
+// next table header.
+func renderedSection(t *testing.T, rendered, table string) string {
+	t.Helper()
+	header := "[" + table + "]"
+	i := strings.Index(rendered, header)
+	if i < 0 {
+		t.Fatalf("no %s table in rendered config:\n%s", header, rendered)
+	}
+	rest := rendered[i+len(header):]
+	if next := strings.Index(rest, "\n["); next >= 0 {
+		rest = rest[:next]
+	}
+	return rest
+}
+
+// quotedValuesInList pulls the quoted entries of one `key = [ ... ]` list out
+// of a rendered TOML body — the bracketed-list half of quotedValueAfter.
+func quotedValuesInList(t *testing.T, block, key, what string) []string {
+	t.Helper()
+	start := strings.Index(block, key+" = [")
+	if start < 0 {
+		t.Fatalf("%s has no %s list:\n%s", what, key, block)
+	}
+	rest := block[start:]
+	end := strings.IndexByte(rest, ']')
+	if end < 0 {
+		t.Fatalf("unterminated %s %s list:\n%s", what, key, block)
+	}
+	var out []string
+	for _, m := range includePatternList.FindAllStringSubmatch(rest[:end], -1) {
+		out = append(out, m[1])
+	}
+	if len(out) == 0 {
+		t.Fatalf("%s %s list is empty:\n%s", what, key, block)
+	}
+	return out
+}
+
+// TestVectorSessionCaptureSources is cr-gdeav.6.5.8: runtime/ops.go's
+// egressFiles names THREE agent-capture files inside the allocation's logs dir
+// — agent.stdout, agent.stderr, agent.exit — but vectorConfigTOML shipped file
+// patterns for stdout alone. The other two channels were written by
+// ops/nomad/agent-launch.sh (`"$AGENT_CMD" 2>>"$LOGS/agent.stderr"`, and the
+// agent.exit.$$ rename), copied out on the stop path, and then silently never
+// shipped.
+//
+// Each named file must be matched by a source, and every capture source must
+// reach the sink through the one label transform — and every capture pattern
+// must stay a named file under the allocation's logs dir. That boundary is the
+// credential boundary: runtime/ops.go's egress allowlist exists because a
+// recursive sweep of an allocation reaches the staged secrets, and the shipper
+// must not be wider than the copy-out it mirrors.
+func TestVectorSessionCaptureSources(t *testing.T) {
+	rendered, allocDir := renderedShipperConfig(t, "sess-capture-sources")
+	logsDir := allocDir + "/logs/"
+
+	// The two names the launcher's own stream and Nomad's rotation can each
+	// produce, per source; agent.exit only ever has the final renamed name.
+	captureSources := map[string][]string{
+		"session_stdout": {"agent.stdout", "agent.stdout.1"},
+		"session_stderr": {"agent.stderr", "agent.stderr.1"},
+		"agent_exit":     {"agent.exit"},
+	}
+	for _, source := range []string{"session_stdout", "session_stderr", "agent_exit"} {
+		patterns := sourceIncludes(t, rendered, source)
+		seen := map[string]bool{}
+		for _, pattern := range patterns {
+			if !strings.HasPrefix(pattern, logsDir) {
+				t.Errorf("sources.%s pattern %q is outside %s — the capture shipper must stay inside the allocation's logs dir", source, pattern, logsDir)
+				continue
+			}
+			if strings.Contains(pattern, "**") {
+				t.Errorf("sources.%s pattern %q is recursive discovery; the capture channels are named files", source, pattern)
+			}
+			rel := strings.TrimPrefix(pattern, logsDir)
+			for _, candidate := range captureSources[source] {
+				matched, err := path.Match(rel, candidate)
+				if err != nil {
+					t.Fatalf("sources.%s pattern %q is not a valid glob: %v", source, rel, err)
+				}
+				if matched {
+					seen[candidate] = true
+				}
+			}
+		}
+		for _, candidate := range captureSources[source] {
+			if !seen[candidate] {
+				t.Errorf("sources.%s has no pattern matching logs/%s (patterns: %v)", source, candidate, patterns)
+			}
+		}
+	}
+
+	// One labeling path, one sink: the stderr and exit records must carry the
+	// same session_name/alloc_id/node fields as the stdout captured beside them.
+	labelInputs := quotedValuesInList(t, renderedSection(t, rendered, "transforms.label"), "inputs", "transforms.label")
+	for _, source := range []string{"session_jsonl", "session_stdout", "session_stderr", "agent_exit"} {
+		var wired bool
+		for _, in := range labelInputs {
+			if in == source {
+				wired = true
+			}
+		}
+		if !wired {
+			t.Errorf("sources.%s is not an input of the label transform — it would reach the sink unlabeled, or not at all (label inputs: %v)", source, labelInputs)
+		}
+	}
+	sinkInputs := quotedValuesInList(t, renderedSection(t, rendered, "sinks.gc_log_sink"), "inputs", "sinks.gc_log_sink")
+	if len(sinkInputs) != 1 || sinkInputs[0] != "label" {
+		t.Errorf("gc_log_sink inputs = %v, want [label] — every capture channel must ride the labeled stream", sinkInputs)
 	}
 }
