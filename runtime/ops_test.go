@@ -452,7 +452,7 @@ func TestOpExecConfirmsASeparableTransportLaunch(t *testing.T) {
 	fakeTmux := filepath.Join(fakeBin, "tmux")
 	launchRecord := filepath.Join(t.TempDir(), "tmux-launch-argv")
 	if err := os.WriteFile(fakeTmux, []byte(`#!/bin/sh
-printf '%s\n' "$*" > "$LAUNCH_RECORD"
+printf '%s\n' "$*" >> "$LAUNCH_RECORD"
 case "$1" in
 new-session|has-session) exit 0 ;;
 list-panes) exit 1 ;;
