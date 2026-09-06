@@ -137,16 +137,40 @@ func (l *lifecycle) lockSession(ctx context.Context, sessionName string) (func()
 
 // egressFile is one well-known file a stop-path egress reads out of every
 // allocation before its job is deregistered. Discovery beyond this fixed
-// pair (e.g. a directory listing) is out of scope for this bead.
+// allowlist (e.g. a directory listing) is out of scope by design: the list is
+// also the credential boundary. Only named files are ever copied out of an
+// allocation, so a recursive sweep can never carry the session's staged
+// secrets (alloc/secrets/, tmp/) into a durable sink.
+//
+// The agent-capture trio (cr-gdeav.6.5) is written inside the allocation by
+// the deployment bootstrap ops/nomad/agent-launch.sh:
+//
+//	alloc/logs/agent.exit   exit= started= ended= pane= argv0= alloc= — the
+//	                        agent command NAME and timestamps only, never env
+//	                        values (that is what makes this file safe to ship)
+//	alloc/logs/agent.stdout raw pane output, tapped with `tmux pipe-pane` so
+//	                        the agent keeps its tty (gc drives it as an
+//	                        interactive client: peek/nudge/interrupt)
+//	alloc/logs/agent.stderr the agent's stderr, appended
+//
+// All three must be copied before deregister. The pane dies with the session,
+// `nomad alloc logs` reads the *task's* streams (the pause shell — empty), and
+// `gc session logs` cannot resolve a session written with `codex --ephemeral`,
+// so after deregistration the three channels are simply gone (cr-gdeav.6.3
+// forensics found all of them empty). A lane whose capture block has not
+// landed yet 404s on these paths, which egressAllocFiles already skips.
 var egressFiles = []struct {
 	allocPath string
 	destName  string
 }{
 	{"alloc/logs/transcript.log", "transcript.log"},
 	{"alloc/data/evidence.json", "evidence.json"},
+	{"alloc/logs/agent.exit", "agent.exit"},
+	{"alloc/logs/agent.stdout", "agent.stdout"},
+	{"alloc/logs/agent.stderr", "agent.stderr"},
 }
 
-// egressAllocFiles copies childJobID's per-allocation transcript/evidence
+// egressAllocFiles copies childJobID's per-allocation declared egress
 // files into l.egressDir/<session>/ via the client fs API. It runs before
 // opStop's deregister call, since deregister is what makes those files
 // unreachable. A no-op when egress is disabled (l.egressDir == "").

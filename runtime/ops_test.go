@@ -1214,15 +1214,28 @@ printf '%s\n' "$!" >"$NOMAD_ALLOC_DIR/.gc-log-shipper.pid"
 }
 
 // TestOpStopEgressesBeforeDeregister drives the NRT-P1-07 acceptance: with
-// egress configured, stop reads every allocation's transcript/evidence
-// files via the fs API, lands them under the sink directory, and the fake's
-// request trace shows the fs-cat read(s) completing strictly before the
-// deregister call.
+// egress configured, stop reads every allocation's declared egress files via
+// the fs API, lands them under the sink directory, and the fake's request
+// trace shows the fs-cat read(s) completing strictly before the deregister
+// call.
+//
+// The agent-capture trio (cr-gdeav.6.5) is named in the assertions: agent.exit
+// plus the captured stdout/stderr must be in the sink, because after the
+// deregister there is no pane to peek, `nomad alloc logs` reads the task's own
+// (pause-shell) streams, and `gc session logs` cannot resolve an
+// `--ephemeral` codex session — the trio is unreachable everywhere else.
+//
+// The sink is asserted to be a strict allowlist in both directions: every
+// declared file landed byte-for-byte, and nothing undeclared did — including a
+// file planted under alloc/secrets/. That is the credential boundary; the copy
+// names files, it never lists a directory.
 func TestOpStopEgressesBeforeDeregister(t *testing.T) {
 	l, srv := newTestLifecycle(t)
 	l.egressDir = t.TempDir()
 	ctx := context.Background()
 	const session = "sess-egress"
+
+	const credentialSentinel = "sk-sentinel-must-never-egress"
 
 	if err := l.opStart(ctx, session); err != nil {
 		t.Fatalf("start: %v", err)
@@ -1232,6 +1245,44 @@ func TestOpStopEgressesBeforeDeregister(t *testing.T) {
 		t.Fatalf("load binding after start: (%v, %v, %v)", b, ok, err)
 	}
 	childJobID := b.ChildJobID
+
+	allocs, _, err := l.client.listAllocsForJob(ctx, childJobID, 0, 0)
+	if err != nil || len(allocs) != 1 {
+		t.Fatalf("listAllocsForJob = (%v, %v), want exactly one alloc", allocs, err)
+	}
+	allocID := allocs[0].ID
+
+	// What the allocation's own capture block would have written by the time
+	// stop runs. agent.exit names the agent command and timestamps only —
+	// never its environment — which is what makes shipping it safe.
+	want := map[string]string{
+		allocID + "-transcript.log": "fakenomad transcript for " + allocID + "\n",
+		allocID + "-evidence.json":  `{"alloc_id":"` + allocID + `"}` + "\n",
+		allocID + "-agent.exit": "exit=0 started=2026-09-06T20:00:00Z ended=2026-09-06T20:07:00Z" +
+			" pane=%1 argv0=codex alloc=" + allocID + "\n",
+		allocID + "-agent.stdout": "codex> hello from the pane\r\n",
+		allocID + "-agent.stderr": "codex> warn: rate limited\n",
+	}
+	for _, f := range egressFiles {
+		content, declared := want[allocID+"-"+f.destName]
+		if !declared {
+			t.Fatalf("egressFiles declares %q as %q, the test has no content for it", f.allocPath, f.destName)
+		}
+		if !srv.SetAllocFile(allocID, f.allocPath, content) {
+			t.Fatalf("SetAllocFile(%q): alloc %q not found", f.allocPath, allocID)
+		}
+	}
+	// Files a stop must leave in the allocation: an unrelated data file and a
+	// staged credential in the secrets dir.
+	for _, path := range []string{
+		"alloc/data/unrelated.bin",
+		"alloc/secrets/service-account.json",
+		"alloc/tmp/scratch.bin",
+	} {
+		if !srv.SetAllocFile(allocID, path, "OPENAI_API_KEY="+credentialSentinel) {
+			t.Fatalf("SetAllocFile(%q): alloc %q not found", path, allocID)
+		}
+	}
 
 	if err := l.opStop(ctx, session); err != nil {
 		t.Fatalf("stop: %v", err)
@@ -1257,13 +1308,115 @@ func TestOpStopEgressesBeforeDeregister(t *testing.T) {
 		t.Fatalf("fs-cat request (trace index %d) did not precede deregister (index %d): %v", catIdx, deregIdx, trace)
 	}
 
+	// Read back from the sink AFTER the deregister above: survival through
+	// deregistration is the whole point of the egress.
 	sinkDir := filepath.Join(l.egressDir, base64.RawURLEncoding.EncodeToString([]byte(session)))
+	info, err := os.Stat(sinkDir)
+	if err != nil {
+		t.Fatalf("reading egress sink dir: %v", err)
+	}
+	if !info.IsDir() || info.Mode().Perm() != 0o700 {
+		t.Fatalf("egress sink dir = mode %v, want a 0700 directory", info.Mode())
+	}
 	entries, err := os.ReadDir(sinkDir)
 	if err != nil {
 		t.Fatalf("reading egress sink dir: %v", err)
 	}
 	if len(entries) != len(egressFiles) {
 		t.Fatalf("egress sink dir has %d entries, want %d: %v", len(entries), len(egressFiles), entries)
+	}
+
+	landed := make(map[string]string, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			t.Fatalf("egress sink entry %q is a directory, want flat files", e.Name())
+		}
+		fi, err := e.Info()
+		if err != nil {
+			t.Fatalf("stat egress sink entry %q: %v", e.Name(), err)
+		}
+		if mode := fi.Mode().Perm(); mode != 0o600 {
+			t.Fatalf("egress sink entry %q mode = %v, want 0600", e.Name(), mode)
+		}
+		data, err := os.ReadFile(filepath.Join(sinkDir, e.Name()))
+		if err != nil {
+			t.Fatalf("reading egress sink %q after deregister: %v", e.Name(), err)
+		}
+		landed[e.Name()] = string(data)
+	}
+
+	for name, wantContent := range want {
+		gotContent, ok := landed[name]
+		if !ok {
+			t.Fatalf("egress sink is missing %q (declared file never copied); sink = %v", name, landed)
+		}
+		if gotContent != wantContent {
+			t.Fatalf("egress sink %q = %q, want %q", name, gotContent, wantContent)
+		}
+	}
+	for name := range landed {
+		if _, declared := want[name]; !declared {
+			t.Fatalf("egress sink holds undeclared file %q — the stop-path copy must stay an allowlist", name)
+		}
+	}
+
+	// Credential discipline: the planted secret stayed in the allocation, and
+	// no egressed byte carries a secret-shaped string.
+	for name, content := range landed {
+		if strings.Contains(content, credentialSentinel) || strings.Contains(content, "OPENAI_API_KEY") {
+			t.Fatalf("egress sink %q leaks a credential: %q", name, content)
+		}
+		if strings.Contains(name, "secret") || strings.Contains(name, "token") {
+			t.Fatalf("egress sink %q looks like a credential file", name)
+		}
+	}
+	if got := landed[allocID+"-agent.exit"]; !strings.Contains(got, "exit=0") || !strings.Contains(got, "argv0=codex") {
+		t.Fatalf("agent.exit egress = %q, want the recorded exit code and the agent command name", got)
+	}
+}
+
+// TestOpStopEgressSurvivesAbsentCaptureFiles covers the lane that predates the
+// capture block (and any session whose agent died before it wrote anything):
+// the capture paths 404, and a 404 is "file absent", not an egress failure.
+// Stop must still finish, egress the files that do exist, and complete the
+// session removal.
+func TestOpStopEgressSurvivesAbsentCaptureFiles(t *testing.T) {
+	l, _ := newTestLifecycle(t)
+	l.egressDir = t.TempDir()
+	ctx := context.Background()
+	const session = "sess-egress-absent-capture"
+
+	if err := l.opStart(ctx, session); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	b, ok, err := l.sidecar.load(session)
+	if err != nil || !ok {
+		t.Fatalf("load binding after start: (%v, %v, %v)", b, ok, err)
+	}
+	allocs, _, err := l.client.listAllocsForJob(ctx, b.ChildJobID, 0, 0)
+	if err != nil || len(allocs) != 1 {
+		t.Fatalf("listAllocsForJob = (%v, %v), want exactly one alloc", allocs, err)
+	}
+	for _, name := range []string{"agent.exit", "agent.stdout", "agent.stderr"} {
+		if _, err := l.client.readAllocFile(ctx, allocs[0].ID, "alloc/logs/"+name); !errors.Is(err, errAllocFileGone) {
+			t.Fatalf("premise: fs-cat of absent %q = %v, want errAllocFileGone", name, err)
+		}
+	}
+
+	if err := l.opStop(ctx, session); err != nil {
+		t.Fatalf("stop with absent capture files = %v, want nil", err)
+	}
+
+	sinkDir := filepath.Join(l.egressDir, base64.RawURLEncoding.EncodeToString([]byte(session)))
+	entries, err := os.ReadDir(sinkDir)
+	if err != nil {
+		t.Fatalf("reading egress sink dir: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("egress sink dir has %d entries, want the 2 files the allocation actually had: %v", len(entries), entries)
+	}
+	if _, ok, err := l.sidecar.load(session); err != nil || ok {
+		t.Fatalf("sidecar binding for %q survived stop = (%v, %v, %v), want it gone", session, ok, err)
 	}
 }
 

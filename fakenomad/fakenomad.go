@@ -454,6 +454,26 @@ func (s *Server) SetAllocStatus(allocID, clientStatus string) bool {
 	return true
 }
 
+// SetAllocFile seeds one path in allocID's fake filesystem (leaving the other
+// files that allocation already serves alone) so catAllocFile answers it. It
+// exists so a test can drive the stop-path egress against an allocation that
+// contains exactly the files it means to test — e.g. the agent-capture trio
+// (cr-gdeav.6.5), which only exists once the deployment bootstrap's capture
+// block has run in the allocation — instead of only the pair every allocation
+// gets by default.
+func (s *Server) SetAllocFile(allocID, path, content string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.allocs[allocID]; !ok {
+		return false
+	}
+	if s.allocFiles[allocID] == nil {
+		s.allocFiles[allocID] = map[string]string{}
+	}
+	s.allocFiles[allocID][path] = content
+	return true
+}
+
 // PlaceAlloc adds a new allocation for jobID with the given ClientStatus and
 // returns its ID. It exists so tests can simulate a Nomad reschedule placing
 // a replacement allocation under the same job (the "replacement alloc"
