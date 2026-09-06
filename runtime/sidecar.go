@@ -168,6 +168,59 @@ func (s *sidecar) list() ([]binding, error) {
 	return out, nil
 }
 
+// tombstonesDirName is the subdirectory of the sidecar dir that keeps reap
+// records. sidecar.list skips directories, so a tombstone can never be read
+// back as a current binding — the record survives, the box does not.
+const tombstonesDirName = "tombstones"
+
+// tombstone is the durable record of a session box this pack deregistered
+// without being asked to — the adoption gate's receipt (cr-gdeav.6.1,
+// executive ruling cr-mnl96 G2). The archival policy governs records, not
+// ephemeral runtime allocs, so the alloc is what gets removed and this entry
+// (child job, alloc, age, why, when) is what gets kept, written beside the
+// binding it describes before the stop removes that binding.
+type tombstone struct {
+	SessionName string    `json:"session_name"`
+	ChildJobID  string    `json:"child_job_id"`
+	AllocID     string    `json:"alloc_id,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	// Age is how long the box had been resident when it was reaped, as a Go
+	// duration string, so a reader never has to subtract two timestamps to
+	// check it against GC_NOMAD_ADOPT_MAX_AGE.
+	Age      string `json:"age"`
+	Launched bool   `json:"launched"`
+	AgentPID int    `json:"agent_pid,omitempty"`
+	// Reason is the gate's own words for why this box was refused
+	// (age limit exceeded / agent absent), same string the decision log line
+	// carries.
+	Reason       string    `json:"reason"`
+	TombstonedAt time.Time `json:"tombstoned_at"`
+}
+
+// tombstone writes one reap record under the sidecar dir. temp+rename like
+// every other sidecar write; the name is session+timestamp so repeated reaps
+// of one session name accumulate a history instead of overwriting each other.
+func (s *sidecar) tombstone(t tombstone) error {
+	dir := filepath.Join(s.dir, tombstonesDirName)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("creating tombstone directory: %w", err)
+	}
+	data, err := json.Marshal(t)
+	if err != nil {
+		return fmt.Errorf("encoding tombstone for %q: %w", t.SessionName, err)
+	}
+	target := filepath.Join(dir, fmt.Sprintf("%s-%d.json",
+		base64.RawURLEncoding.EncodeToString([]byte(t.SessionName)), t.TombstonedAt.UTC().UnixNano()))
+	tmp := target + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return fmt.Errorf("writing tombstone for %q: %w", t.SessionName, err)
+	}
+	if err := os.Rename(tmp, target); err != nil {
+		return fmt.Errorf("committing tombstone for %q: %w", t.SessionName, err)
+	}
+	return nil
+}
+
 // newNonce generates the per-dispatch attribution nonce (04 §2.1: dispatch
 // Meta carries gc_session + a random nonce chosen by the pack, never a
 // capability).

@@ -389,3 +389,23 @@ func TestRunLifecycleOpRequiresConfig(t *testing.T) {
 		t.Fatalf("run(is-running) with no config = %d, want %d (exitError)", got, exitError)
 	}
 }
+
+// TestParseAdoptMaxAge covers the GC_NOMAD_ADOPT_MAX_AGE config surface
+// (cr-gdeav.6.1): unset means the shipped 30m default, a real duration is
+// honored, and anything that would silently turn the limit off — a typo, or a
+// non-positive value — is a config error rather than a fallback. The failure
+// mode this knob exists to prevent is precisely "nobody noticed the limit was
+// not being applied".
+func TestParseAdoptMaxAge(t *testing.T) {
+	if got, err := parseAdoptMaxAge(""); err != nil || got != defaultAdoptMaxAge {
+		t.Fatalf(`parseAdoptMaxAge("") = (%v, %v), want the %v default`, got, err, defaultAdoptMaxAge)
+	}
+	if got, err := parseAdoptMaxAge("2h"); err != nil || got != 2*time.Hour {
+		t.Fatalf(`parseAdoptMaxAge("2h") = (%v, %v), want 2h`, got, err)
+	}
+	for _, bad := range []string{"not-a-duration", "0s", "-5m"} {
+		if got, err := parseAdoptMaxAge(bad); err == nil {
+			t.Fatalf("parseAdoptMaxAge(%q) = %v, want an error: it would disable the limit", bad, got)
+		}
+	}
+}

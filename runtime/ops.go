@@ -76,6 +76,24 @@ type lifecycle struct {
 	// to deliver the pinned Linux gc artifact. It is deployment input, never a
 	// host name hard-coded into the runtime pack; empty means no mount.
 	artifactVolumeSource string
+
+	// adoptMaxAge bounds how old a live-but-unlaunched box may be before
+	// provision/start refuse to ADOPT it and reap it instead (cr-gdeav.6.1).
+	// Before it existed, adoption was unbounded: the DF-03 canary's box,
+	// dispatched 2026-09-05T20:54Z, was still being adopted at 11:15Z the
+	// next day (14h20m old) and re-staged as if it were this tick's work.
+	// newLifecycle sets it from GC_NOMAD_ADOPT_MAX_AGE. The zero value means
+	// defaultAdoptMaxAge (30m) — a limit that can be switched off by omitting
+	// a knob is the bug this field exists to close, so there is no opt-out
+	// state; adoptAgeLimit resolves the two.
+	adoptMaxAge time.Duration
+
+	// logf, when set, receives the pack's decision lines — notably WHICH
+	// adopt/reap path a provision or start call chose, which is otherwise
+	// invisible from outside the box. nil-safe by design: the lifecycle is
+	// built without an output sink in tests, and newLifecycle wires it to
+	// stderr, the only channel gc's exec proxy captures from this binary.
+	logf func(format string, args ...any)
 }
 
 // lockSession acquires an exclusive, cross-process advisory file lock for
@@ -348,13 +366,27 @@ func (l *lifecycle) opProvisionWithConfig(ctx context.Context, sessionName strin
 	// unlaunched box gets left behind. The DF-03 canary hit the other one —
 	// staging finished, the launch was never confirmed, and every later
 	// provision tick was rejected while the alloc kept running.
-	if b, live, err := l.liveChild(ctx, sessionName); err != nil {
+	//
+	// Adoption is bounded (cr-gdeav.6.1): the box has to be young enough
+	// (adoptMaxAge) and its agent confirmed absent, or it is not this call's
+	// half-finished box but an orphan, and adoptExisting reaps it so the
+	// dispatch below makes a fresh one. See classifyAdoption.
+	b, live, err := l.liveChild(ctx, sessionName)
+	if err != nil {
 		return err
-	} else if live {
-		if b.Launched {
-			return fmt.Errorf("session %q already exists", sessionName)
+	}
+	if live {
+		reuse, err := l.adoptExisting(ctx, sessionName, b, "provision")
+		if err != nil {
+			return err
 		}
-		return l.stageTracked(ctx, sessionName, cfg)
+		if reuse {
+			return l.stageTracked(ctx, sessionName, cfg)
+		}
+		// Reaped: the stale box is deregistered and tombstoned, so the
+		// dispatch below is the fresh provision the ruling asked for
+		// (never a bypass of liveChild — that gate is what got checked,
+		// and it is what said "this box is no longer the one to reuse").
 	}
 
 	if err := l.dispatch(ctx, sessionName); err != nil {
@@ -375,16 +407,20 @@ func (l *lifecycle) opProvisionWithConfig(ctx context.Context, sessionName strin
 // ConfirmStarted" crash point): that binding IS the positive attribution
 // (no cluster lookup needed, since this pack already wrote it), so the
 // retry resumes straight to launch instead of dispatching a second child or
-// being rejected by dispatch's already-exists check.
+// being rejected by dispatch's already-exists check. That resume is bounded by
+// the same adopt-or-reap gate provision uses (cr-gdeav.6.1): a box too old to
+// be this attempt's, or one whose agent is gone, is reaped instead of resumed,
+// and a box whose agent is actually running is refused rather than
+// double-launched.
 func (l *lifecycle) opStart(ctx context.Context, sessionName string) error {
 	return l.opStartWithConfig(ctx, sessionName, stageConfig{})
 }
 
 // opStartWithConfig is opStart plus NRT-P1-06 staging: cfg's workspace
 // files and secret env vars are materialized (l.stage) after the box is
-// dispatched (or adopted via resumeUnlaunched) and before launch, so the
-// agent bootstrap command that launch execs finds its workspace and secrets
-// already in place. cfg.Env's argvSafe subset also rides launch's tmux
+// dispatched (or adopted through the same bounded adopt-or-reap gate
+// provision uses) and before launch, so the agent bootstrap command that
+// launch execs finds its workspace and secrets already in place. cfg.Env's argvSafe subset also rides launch's tmux
 // argv (buildLaunchCommand) — never the secrets dir.
 func (l *lifecycle) opStartWithConfig(ctx context.Context, sessionName string, cfg stageConfig) error {
 	unlock, err := l.lockSession(ctx, sessionName)
@@ -393,13 +429,23 @@ func (l *lifecycle) opStartWithConfig(ctx context.Context, sessionName string, c
 	}
 	defer unlock()
 
-	if resume, err := l.resumeUnlaunched(ctx, sessionName); err != nil {
+	b, live, err := l.liveChild(ctx, sessionName)
+	if err != nil {
 		return err
-	} else if resume {
-		if err := l.stageTracked(ctx, sessionName, cfg); err != nil {
+	}
+	if live {
+		reuse, err := l.adoptExisting(ctx, sessionName, b, "start")
+		if err != nil {
 			return err
 		}
-		return l.markLaunched(ctx, sessionName, cfg.Env)
+		if reuse {
+			if err := l.stageTracked(ctx, sessionName, cfg); err != nil {
+				return err
+			}
+			return l.markLaunched(ctx, sessionName, cfg.Env)
+		}
+		// Reaped: fall through to a fresh dispatch (same as the provision
+		// door above).
 	}
 
 	if err := l.dispatch(ctx, sessionName); err != nil {
@@ -443,15 +489,173 @@ func (l *lifecycle) liveChild(ctx context.Context, sessionName string) (binding,
 	return binding{}, false, nil
 }
 
-// resumeUnlaunched reports whether sessionName has a binding whose child was
-// dispatched but never marked launched, and that child still has a live
-// (non-terminal) alloc — start's resume-instead-of-redispatch case.
-func (l *lifecycle) resumeUnlaunched(ctx context.Context, sessionName string) (bool, error) {
-	b, live, err := l.liveChild(ctx, sessionName)
-	if err != nil {
-		return false, err
+// adoptPath is the decision the two adopt-or-dispatch doors (provision and
+// start) take for a session whose sidecar binding already names a live child.
+// cr-gdeav.6.1 added the two rules the doors were missing: an age limit, and
+// an agent-absence check before reuse. Before them the only split was
+// launched-reject / unlaunched-adopt, so a box left half-provisioned for hours
+// was still adopted as if it were this tick's work — the 2026-09-06 canary
+// re-staged a child dispatched 14h20m earlier.
+type adoptPath uint8
+
+const (
+	// adoptReuse re-drives this pack's own half of the job against the box it
+	// already made — fnrt-t4l.46's idempotent retry, now conditional on that
+	// box being young AND its agent being confirmed absent.
+	adoptReuse adoptPath = iota
+	// adoptReject answers with the 04 §6 wire contract ("already exists"),
+	// which gc's exec proxy maps to ErrSessionExists: an agent is running in
+	// that box (or the pack cannot tell either way), so the call is a
+	// duplicate, not a retry.
+	adoptReject
+	// adoptSelfHealLaunched is the crash window the agent-absence rule
+	// catches: the launch exec succeeded and confirmLaunched never landed, so
+	// the binding claims launched=false while an agent really is running. The
+	// pack records the marker it lost, then rejects — adopting would
+	// re-stage-and-double-launch into a live agent.
+	adoptSelfHealLaunched
+	// adoptReap deregisters the box, tombstones the binding beside it, and
+	// lets the caller dispatch fresh — executive ruling cr-mnl96 G2 (option
+	// A, REAP FIRST): an aged or agent-less provisioned box is an ephemeral
+	// runtime allocation, and the estate's answer to it is a record plus a
+	// clean dispatch. This is never a bypass of liveChild: liveChild is the
+	// gate that just said "this box is not the one to reuse".
+	adoptReap
+)
+
+// classifyAdoption decides which adoptPath the live child b (found by
+// liveChild for sessionName) gets, and returns the reason in words the
+// decision log carries. Order matters: age is a cheap cluster-free test and
+// is the rule the canary actually violated, so it runs before the in-box
+// probe.
+func (l *lifecycle) classifyAdoption(ctx context.Context, sessionName string, b binding) (adoptPath, string) {
+	age := time.Since(b.CreatedAt).Round(time.Second)
+	limit := l.adoptAgeLimit()
+	if !b.CreatedAt.IsZero() && time.Since(b.CreatedAt) > limit {
+		return adoptReap, fmt.Sprintf("binding age %s exceeds the adoption age limit %s", age, limit)
 	}
-	return live && !b.Launched, nil
+	alive, known := l.bindingAgentStatus(ctx, b)
+	switch {
+	case b.Launched && known && alive:
+		return adoptReject, fmt.Sprintf("agent alive in the launched box (binding age %s)", age)
+	case b.Launched && known && !alive:
+		return adoptReap, "binding says launched but its in-box agent is gone: the box is a shell, not a session"
+	case b.Launched:
+		// Probe unavailable: unknown is not confirmed-absent. Same honesty
+		// split opIsRunning applies (04 §6) — reaping on a transport fault
+		// would destroy a live session because the API blipped.
+		return adoptReject, fmt.Sprintf("agent liveness unknown (probe unavailable, binding age %s): keeping the already-exists contract", age)
+	case known && alive:
+		return adoptSelfHealLaunched, "binding says launched=false but an agent is running: the launch confirm write was lost"
+	default:
+		return adoptReuse, fmt.Sprintf("binding age %s within the limit %s and its agent is absent: re-driving this pack's own half against the box it already made", age, limit)
+	}
+}
+
+// adoptAgeLimit resolves the configured adoption age limit: an unset (or
+// nonsensically non-positive) value is the shipped default, never "unbounded".
+func (l *lifecycle) adoptAgeLimit() time.Duration {
+	if l.adoptMaxAge > 0 {
+		return l.adoptMaxAge
+	}
+	return defaultAdoptMaxAge
+}
+
+// adoptExisting runs the shared decision for both doors and logs which path
+// it took (rule 2's "log which path it took"). It reports reuse=true when the
+// caller must finish the job against the existing box and must NOT dispatch;
+// reuse=false with nil means the stale box is gone and the caller should
+// dispatch a fresh one; a non-nil error ends the call with the box untouched.
+func (l *lifecycle) adoptExisting(ctx context.Context, sessionName string, b binding, op string) (bool, error) {
+	path, why := l.classifyAdoption(ctx, sessionName, b)
+	switch path {
+	case adoptReuse:
+		l.logDecision("%s %q: path=adopt — %s", op, sessionName, why)
+		return true, nil
+	case adoptSelfHealLaunched:
+		l.logDecision("%s %q: path=self-heal-launched-marker — %s", op, sessionName, why)
+		if err := l.confirmLaunched(ctx, sessionName); err != nil {
+			return false, err
+		}
+		return false, fmt.Errorf("session %q already exists", sessionName)
+	case adoptReap:
+		l.logDecision("%s %q: path=reap-then-provision-fresh — %s", op, sessionName, why)
+		if err := l.reapChild(ctx, sessionName, b, why); err != nil {
+			return false, err
+		}
+		return false, nil
+	default:
+		l.logDecision("%s %q: path=reject-already-exists — %s", op, sessionName, why)
+		return false, fmt.Errorf("session %q already exists", sessionName)
+	}
+}
+
+// reapChild removes a stale box that the adoption gate refused to reuse: the
+// tombstone record is written FIRST (the record is the artifact the ruling
+// asks for, and a reap that dies after the deregister must still be citable),
+// then opStop carries the stop-path evidence egress, the deregister, and the
+// terminal confirmation, and finally removes the binding.
+func (l *lifecycle) reapChild(ctx context.Context, sessionName string, b binding, why string) error {
+	tomb := tombstone{
+		SessionName:  sessionName,
+		ChildJobID:   b.ChildJobID,
+		AllocID:      l.liveAllocID(ctx, b),
+		CreatedAt:    b.CreatedAt,
+		Age:          time.Since(b.CreatedAt).Round(time.Second).String(),
+		Launched:     b.Launched,
+		AgentPID:     b.AgentPID,
+		Reason:       why,
+		TombstonedAt: time.Now().UTC(),
+	}
+	if err := l.sidecar.tombstone(tomb); err != nil {
+		return fmt.Errorf("tombstoning stale box for session %q: %w", sessionName, err)
+	}
+	if err := l.opStop(ctx, sessionName); err != nil {
+		return fmt.Errorf("reaping stale child %q of session %q (tombstone already written): %w", b.ChildJobID, sessionName, err)
+	}
+	return nil
+}
+
+// bindingAgentStatus runs the in-box liveness probe against b's current live
+// alloc. It reports known=false — NOT dead — when the alloc or the probe
+// could not be reached, so no caller mistakes a transport fault for a
+// confirmed-absent agent (04 §6's honesty split).
+func (l *lifecycle) bindingAgentStatus(ctx context.Context, b binding) (alive, known bool) {
+	allocID := l.liveAllocID(ctx, b)
+	if allocID == "" {
+		return false, false
+	}
+	alive, err := l.probeAgentAlive(ctx, allocID, b.AgentPID)
+	if err != nil {
+		return false, false
+	}
+	return alive, true
+}
+
+// liveAllocID returns b's non-terminal alloc ID, or "" if there is none or the
+// lookup failed. Best-effort by design: it feeds the in-box probe (whose
+// caller treats "" as unknown) and the tombstone record (where a missing alloc
+// ID weakens a receipt line, it does not make the reap wrong).
+func (l *lifecycle) liveAllocID(ctx context.Context, b binding) string {
+	allocs, _, err := l.client.listAllocsForJob(ctx, b.ChildJobID, 0, 0)
+	if err != nil {
+		return ""
+	}
+	for _, a := range allocs {
+		if !isTerminalStatus(a.ClientStatus) {
+			return a.ID
+		}
+	}
+	return ""
+}
+
+// logDecision writes one line about a decision the pack took that is otherwise
+// invisible from outside the box. Nil-safe: see lifecycle.logf.
+func (l *lifecycle) logDecision(format string, args ...any) {
+	if l.logf == nil {
+		return
+	}
+	l.logf(format, args...)
 }
 
 // opRelaunch re-execs the agent inside the SAME alloc without a fresh

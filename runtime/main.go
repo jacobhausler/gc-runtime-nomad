@@ -44,6 +44,7 @@
 //	GC_NOMAD_LOG_SINK_TOKEN_FILE  optional: in-box path the log-shipper task reads its Authorization bearer token's value from; unset means an unauthenticated sink
 //	GC_NOMAD_LOG_LABELS   optional: "k=v,k=v" labels merged onto every shipped log line alongside the fixed session_name/alloc_id/node/runtime=nomad set
 //	GC_NOMAD_LOG_SHIPPER_ARTIFACT  optional: URL or local path for the pinned Vector archive; unset uses the upstream release URL
+//	GC_NOMAD_ADOPT_MAX_AGE  optional: Go duration (e.g. "30m", "2h") capping how old a live-but-unlaunched session box may be before provision/start reap it (stop + tombstone) and dispatch a fresh one instead of adopting it; unset means the 30m default, an unparseable value is a config error (cr-gdeav.6.1)
 //	GC_NOMAD_ARTIFACT_VOLUME  optional: Nomad client host-volume name mounted read-only at /mnt/nomad for the pinned Linux gc artifact; unset declares no artifact mount
 //	GC_NOMAD_AGENT_LAUNCH_SCRIPT  optional: POSIX shell script the launch command execs inside the tmux pane after sourcing the staged environment (ops.go's buildLaunchCommand) — deployment-owned, so PATH prepends and HOME-style secrets-dir wiring for a specific agent (e.g. Codex) live in configuration, never in this pack; unset preserves the legacy bare-tmux placeholder session
 package main
@@ -54,6 +55,7 @@ import (
 	"io"
 	"os"
 	"strconv"
+	"time"
 )
 
 const (
@@ -70,8 +72,15 @@ const (
 	envLogLabels      = "GC_NOMAD_LOG_LABELS"
 	envLogArtifact    = "GC_NOMAD_LOG_SHIPPER_ARTIFACT"
 	envArtifactVolume = "GC_NOMAD_ARTIFACT_VOLUME"
+	envAdoptMaxAge    = "GC_NOMAD_ADOPT_MAX_AGE"
 
 	defaultParentJob = "gc-sessions"
+
+	// defaultAdoptMaxAge is the adoption age limit when
+	// GC_NOMAD_ADOPT_MAX_AGE is unset: well past any legitimate
+	// provision-then-launch gap (staging + launch is seconds), and far short
+	// of the hours-long orphan the canary reproduced.
+	defaultAdoptMaxAge = 30 * time.Minute
 
 	exitOK      = 0
 	exitError   = 1
@@ -360,6 +369,10 @@ func newLifecycle() (*lifecycle, error) {
 		parentJob = defaultParentJob
 	}
 	forbidRegistration, _ := strconv.ParseBool(os.Getenv(envForbidReg))
+	adoptMaxAge, err := parseAdoptMaxAge(os.Getenv(envAdoptMaxAge))
+	if err != nil {
+		return nil, err
+	}
 	return &lifecycle{
 		client:             c,
 		sidecar:            sc,
@@ -374,7 +387,31 @@ func newLifecycle() (*lifecycle, error) {
 			Artifact:  os.Getenv(envLogArtifact),
 		},
 		artifactVolumeSource: os.Getenv(envArtifactVolume),
+		adoptMaxAge:          adoptMaxAge,
+		logf: func(format string, args ...any) {
+			fmt.Fprintf(os.Stderr, "gc-runtime-nomad: "+format+"\n", args...)
+		},
 	}, nil
+}
+
+// parseAdoptMaxAge reads GC_NOMAD_ADOPT_MAX_AGE. Empty means the default; a
+// value that is not a Go duration is a config error rather than a silent
+// fallback, because the failure mode this knob exists to prevent is exactly
+// "nobody noticed the limit was not being applied" — and a non-positive
+// duration is rejected for the same reason (it would turn the limit off while
+// looking like it was set).
+func parseAdoptMaxAge(raw string) (time.Duration, error) {
+	if raw == "" {
+		return defaultAdoptMaxAge, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("parsing %s=%q: %w (want a Go duration such as 30m)", envAdoptMaxAge, raw, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("%s=%s disables the adoption age limit; omit the variable to get the %s default instead", envAdoptMaxAge, d, defaultAdoptMaxAge)
+	}
+	return d, nil
 }
 
 func boolText(b bool) string {
