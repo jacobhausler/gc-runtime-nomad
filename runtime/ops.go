@@ -810,9 +810,13 @@ func separableTransportLaunch(command []string) ([]string, bool) {
 
 // parseExecWireArgv decodes the deliberately tiny grammar produced by gc's
 // exec shellQuote: every argument is single-quoted, spaces separate arguments,
-// and an embedded quote is encoded as '\'' . It is not a general shell
-// parser; rejecting anything outside that grammar keeps launch recognition
-// narrower than the command the shell itself will accept.
+// and an embedded quote is encoded as:
+//
+//	'\''
+//
+// It is not a general shell parser; rejecting anything outside that grammar
+// keeps launch recognition narrower than the command the shell itself will
+// accept.
 func parseExecWireArgv(command string) ([]string, bool) {
 	var argv []string
 	for command != "" {
