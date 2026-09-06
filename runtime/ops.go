@@ -238,6 +238,22 @@ if [ -f "$NOMAD_SECRETS_DIR/env.sh" ]; then
 fi
 exec "$@"`
 
+// paneStagedEnvPrelude is the shell prelude a launched pane runs BEFORE the
+// deployment-configured agent script. tmux builds a pane's environment from
+// the tmux SERVER and never from the client that issued the verb, so the
+// client-side sourcing above reaches neither new-session nor respawn-pane
+// (cr-gdeav.6.8, measured on tmux 3.7b): an agent launched that way had no
+// GC_CITY_URL, no session identity and no relay pointers while still
+// reporting launched=true. Sourcing the staged env.sh inside the pane, where
+// the tmpfs already holds it, is the one delivery path every provider shares,
+// which makes a provider's `command` shim redundant rather than load-bearing.
+// The prelude names only $NOMAD_SECRETS_DIR — a Nomad-provided task path, not a
+// secret — so no credential value is interpolated into argv (envArgvSafe is
+// untouched), and it drops the client-side city/rig labels the pane must not
+// act on, the same trio the proof's shim carried.
+const paneStagedEnvPrelude = `if [ -f "$NOMAD_SECRETS_DIR/env.sh" ]; then . "$NOMAD_SECRETS_DIR/env.sh"; fi; ` +
+	`unset GC_CITY GC_CITY_PATH GC_RIG; `
+
 // agentLaunchScript is the POSIX shell script the launch command execs
 // inside the tmux pane once the staged environment is sourced — the bounded
 // seam a deployment uses to turn the placeholder session into a real agent
@@ -299,7 +315,9 @@ func parseExtraSecretKeys(raw string) []string {
 // KEY=VALUE` on this argv — safe by construction, since envArgvSafe's whole
 // job is excluding anything credential-shaped from ever reaching argv
 // (E1a §4.5). The wrapper sources the value-safe env.sh produced by stage
-// before invoking tmux; keys are sorted so the command is deterministic.
+// before invoking tmux, and the pane body re-sources it INSIDE the pane
+// (paneStagedEnvPrelude), because tmux gives a pane the server's environment
+// and never the client's; keys are sorted so the command is deterministic.
 // agentLaunchScript itself never carries credential values — it is
 // deployment-owned shell logic (PATH/HOME wiring) that reads secret bytes
 // out of the already-staged $NOMAD_SECRETS_DIR files at pane-start time, so
@@ -327,7 +345,9 @@ func buildLaunchCommandForTmux(env map[string]string, tmuxArgs []string) []strin
 		cmd = append(cmd, "-e", k+"="+env[k])
 	}
 	if agentLaunchScript != "" {
-		cmd = append(cmd, "/bin/sh", "-c", agentLaunchScript)
+		// The pane sources the staged environment itself (see
+		// paneStagedEnvPrelude): the client-side wrapper cannot reach it.
+		cmd = append(cmd, "/bin/sh", "-c", paneStagedEnvPrelude+agentLaunchScript)
 	}
 	return cmd
 }

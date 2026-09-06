@@ -473,8 +473,44 @@ exec codex`
 	if strings.Contains(joined, "must-not-appear") {
 		t.Fatalf("launch command %v unexpectedly carries credential-shaped content", cmd)
 	}
-	if got, want := cmd[len(cmd)-3:], []string{"/bin/sh", "-c", script}; !reflect.DeepEqual(got, want) {
+	// The pane's initial command is the configured script with the staged
+	// environment sourced ahead of it (cr-gdeav.6.8): the prelude plus the
+	// script, still exactly one /bin/sh -c argument.
+	if got, want := cmd[len(cmd)-3:], []string{"/bin/sh", "-c", paneStagedEnvPrelude + script}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("launch command %v does not exec the configured agent script as the tmux pane's initial command", cmd)
+	}
+}
+
+// TestLaunchCommandPaneSourcesStagedEnv is the RED half of cr-gdeav.6.8: tmux
+// gives a pane the SERVER's environment and never the CLIENT's, so sourcing
+// the staged env.sh in the tmux client (launchEnvScript) delivers nothing to
+// the agent — measured on tmux 3.7b for both verbs gc uses
+// (ops/receipts/nrt-d3/2026-09-06-g3-attempt2-forensics.md §(2)). The staged
+// environment must therefore be sourced inside the PANE, on both the
+// new-session and the respawn-pane form, or a session launched over gc's
+// separable transport starts an agent with no GC_CITY_URL, no session
+// identity and no relay pointers (launched=True, attached=false — the G3
+// attempt-2 shape). Unit tier: it inspects the built argv and must not exec
+// tmux (the builder image has none).
+func TestLaunchCommandPaneSourcesStagedEnv(t *testing.T) {
+	const script = `. /mnt/nomad/gc/agent-launch.sh`
+	withAgentLaunchScript(t, script)
+
+	for _, tmuxArgs := range [][]string{
+		{"new-session", "-d", "-s", tmuxSessionName},
+		{"respawn-pane", "-k", "-t", tmuxSessionName},
+	} {
+		cmd := buildLaunchCommandForTmux(nil, tmuxArgs)
+		if len(cmd) < 3 || cmd[len(cmd)-3] != "/bin/sh" || cmd[len(cmd)-2] != "-c" {
+			t.Fatalf("%s: launch command %v does not end in a /bin/sh -c pane body", tmuxArgs[0], cmd)
+		}
+		pane := cmd[len(cmd)-1]
+		if !strings.Contains(pane, `. "$NOMAD_SECRETS_DIR/env.sh"`) {
+			t.Errorf("%s: pane body does not source the staged environment: %q", tmuxArgs[0], pane)
+		}
+		if !strings.HasSuffix(pane, script) {
+			t.Errorf("%s: pane body %q no longer ends with the configured agent launch script", tmuxArgs[0], pane)
+		}
 	}
 }
 
