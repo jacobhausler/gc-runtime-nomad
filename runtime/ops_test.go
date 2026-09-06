@@ -1416,7 +1416,7 @@ func TestOpStopEgressSurvivesAbsentCaptureFiles(t *testing.T) {
 		t.Fatalf("egress sink dir has %d entries, want the 2 files the allocation actually had: %v", len(entries), entries)
 	}
 	if _, ok, err := l.sidecar.load(session); err != nil || ok {
-		t.Fatalf("sidecar binding for %q survived stop = (%v, %v, %v), want it gone", session, ok, err)
+		t.Fatalf("sidecar binding for %q survived stop (ok %v, err %v), want it gone", session, ok, err)
 	}
 }
 
