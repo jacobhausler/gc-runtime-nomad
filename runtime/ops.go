@@ -263,7 +263,17 @@ func parseExtraSecretKeys(raw string) []string {
 // out of the already-staged $NOMAD_SECRETS_DIR files at pane-start time, so
 // nothing secret ever rides this argv either.
 func buildLaunchCommand(env map[string]string) []string {
-	cmd := []string{"/bin/sh", "-c", launchEnvScript, "gc-runtime-nomad-launch", "tmux", "new-session", "-d", "-s", tmuxSessionName}
+	return buildLaunchCommandForTmux(env, []string{"new-session", "-d", "-s", tmuxSessionName})
+}
+
+// buildLaunchCommandForTmux uses the pack-owned staged bootstrap with the
+// canonical tmux operation selected by GC. The transport launch command is a
+// handshake, not the provider's bootstrap command: preserve whether GC asked
+// for a new session or a respawn, while sourcing the staged environment and
+// applying the deployment-owned agent launch script in either case.
+func buildLaunchCommandForTmux(env map[string]string, tmuxArgs []string) []string {
+	cmd := []string{"/bin/sh", "-c", launchEnvScript, "gc-runtime-nomad-launch", "tmux"}
+	cmd = append(cmd, tmuxArgs...)
 	keys := make([]string, 0, len(env))
 	for k := range env {
 		if envArgvSafe(k) {
@@ -469,7 +479,7 @@ func (l *lifecycle) opRelaunch(ctx context.Context, sessionName string) error {
 // launch in its private sidecar just as opStart does, or its own is-running
 // operation immediately reports the newly launched session missing.
 func (l *lifecycle) opExec(ctx context.Context, sessionName string, command []string) (int, []byte, error) {
-	transportLaunch := isSeparableTransportLaunch(command)
+	transportCommand, transportLaunch := separableTransportLaunch(command)
 	if transportLaunch {
 		unlock, err := l.lockSession(ctx, sessionName)
 		if err != nil {
@@ -483,7 +493,7 @@ func (l *lifecycle) opExec(ctx context.Context, sessionName string, command []st
 		// owns the staged environment and deployment-configured bootstrap, so
 		// route this operation through the same launch path as opStart instead
 		// of executing cfg.Command directly and then merely recording a marker.
-		if err := l.markLaunched(ctx, sessionName, nil); err != nil {
+		if err := l.markTransportLaunched(ctx, sessionName, transportCommand); err != nil {
 			return 0, nil, fmt.Errorf("launching transport session %q: %w", sessionName, err)
 		}
 		return 0, nil, nil
@@ -504,21 +514,33 @@ func (l *lifecycle) opExec(ctx context.Context, sessionName string, command []st
 // forms gc's exec transport emits from launchAgent. Ordinary exec remains
 // stateless, including unrelated tmux commands.
 func isSeparableTransportLaunch(command []string) bool {
+	_, ok := separableTransportLaunch(command)
+	return ok
+}
+
+// separableTransportLaunch returns GC's canonical tmux launch argv after
+// unwrapping the exec wire form. The final pane command is intentionally
+// discarded by the caller: it belongs to GC's transport handshake, while the
+// runtime pack owns the staged provider bootstrap.
+func separableTransportLaunch(command []string) ([]string, bool) {
 	// RPP v0's exec op carries argv as one shellQuote-produced string on
 	// stdin. main preserves that contract by invoking /bin/sh -c, so unwrap
 	// only that exact, single-quoted grammar before matching the launch argv.
 	if len(command) == 3 && command[0] == "/bin/sh" && command[1] == "-c" {
 		parsed, ok := parseExecWireArgv(command[2])
 		if !ok {
-			return false
+			return nil, false
 		}
 		command = parsed
 	}
 	if len(command) != 6 || command[0] != "tmux" || command[4] != tmuxSessionName || command[5] == "" {
-		return false
+		return nil, false
 	}
-	return (command[1] == "new-session" && command[2] == "-d" && command[3] == "-s") ||
-		(command[1] == "respawn-pane" && command[2] == "-k" && command[3] == "-t")
+	if !((command[1] == "new-session" && command[2] == "-d" && command[3] == "-s") ||
+		(command[1] == "respawn-pane" && command[2] == "-k" && command[3] == "-t")) {
+		return nil, false
+	}
+	return command, true
 }
 
 // parseExecWireArgv decodes the deliberately tiny grammar produced by gc's
@@ -783,12 +805,20 @@ func (l *lifecycle) findOrphanByNonce(ctx context.Context, sessionName, nonce st
 // the detached tmux-client call that starts the agent (04 §3 provision row
 // launch invariant).
 func (l *lifecycle) launch(ctx context.Context, sessionName string, env map[string]string) error {
+	return l.launchWithCommand(ctx, sessionName, buildLaunchCommand(env))
+}
+
+// launchWithCommand executes a pack-owned detached tmux launch command into
+// sessionName's current alloc. Keeping this separate lets opExec preserve GC's
+// new-session versus respawn transport verb without handing GC's raw command
+// a way around staged bootstrap.
+func (l *lifecycle) launchWithCommand(ctx context.Context, sessionName string, command []string) error {
 	return retryAllocExecReady(ctx, func() error {
 		allocID, err := l.currentAlloc(ctx, sessionName)
 		if err != nil {
 			return err
 		}
-		exitCode, dbgOut, err := l.client.execAlloc(ctx, allocID, execTaskName, buildLaunchCommand(env))
+		exitCode, dbgOut, err := l.client.execAlloc(ctx, allocID, execTaskName, command)
 		if err != nil {
 			return fmt.Errorf("launching session %q: %w", sessionName, err)
 		}
@@ -834,6 +864,19 @@ func (l *lifecycle) capturePanePID(ctx context.Context, sessionName string) (int
 // nil since no fresh env accompanies a relaunch.
 func (l *lifecycle) markLaunched(ctx context.Context, sessionName string, env map[string]string) error {
 	if err := l.launch(ctx, sessionName, env); err != nil {
+		return err
+	}
+	return l.confirmLaunched(ctx, sessionName)
+}
+
+// markTransportLaunched preserves GC's canonical tmux transport verb while
+// replacing its raw pane command with the staged, deployment-owned bootstrap.
+// The caller already holds sessionName's lock.
+func (l *lifecycle) markTransportLaunched(ctx context.Context, sessionName string, transport []string) error {
+	if len(transport) != 6 {
+		return fmt.Errorf("invalid transport launch argv length %d", len(transport))
+	}
+	if err := l.launchWithCommand(ctx, sessionName, buildLaunchCommandForTmux(nil, transport[1:5])); err != nil {
 		return err
 	}
 	return l.confirmLaunched(ctx, sessionName)
