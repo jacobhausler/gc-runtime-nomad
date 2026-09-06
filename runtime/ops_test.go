@@ -493,6 +493,45 @@ esac
 	}
 }
 
+func TestOpExecAppliesStagedBootstrapToTransportRespawn(t *testing.T) {
+	l, _ := newTestLifecycle(t)
+	ctx := context.Background()
+	const session = "sess-separable-respawn"
+	const launchScript = "printf staged-respawn > \"$NOMAD_SECRETS_DIR/respawn-marker\""
+	withAgentLaunchScript(t, launchScript)
+	fakeBin := t.TempDir()
+	fakeTmux := filepath.Join(fakeBin, "tmux")
+	launchRecord := filepath.Join(t.TempDir(), "tmux-respawn-argv")
+	if err := os.WriteFile(fakeTmux, []byte(`#!/bin/sh
+printf '%s\n' "$*" >> "$LAUNCH_RECORD"
+case "$1" in
+has-session|respawn-pane) exit 0 ;;
+new-session) exit 1 ;;
+list-panes) exit 1 ;;
+*) exit 1 ;;
+esac
+`), 0o700); err != nil {
+		t.Fatalf("write fake tmux: %v", err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("LAUNCH_RECORD", launchRecord)
+
+	if err := l.opProvision(ctx, session); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	launch := []string{"/bin/sh", "-c", `'tmux' 'respawn-pane' '-k' '-t' 'main' 'sleep 60'`}
+	if code, out, err := l.opExec(ctx, session, launch); err != nil || code != 0 {
+		t.Fatalf("exec transport respawn = (%d, %q, %v), want (0, _, nil)", code, out, err)
+	}
+	recorded, err := os.ReadFile(launchRecord)
+	if err != nil {
+		t.Fatalf("read tmux respawn argv: %v", err)
+	}
+	if got := string(recorded); !strings.Contains(got, "respawn-pane") || !strings.Contains(got, launchScript) {
+		t.Fatalf("transport respawn argv = %q, want respawn-pane with staged agent launch script %q", got, launchScript)
+	}
+}
+
 // countDispatchCalls counts child-job dispatch requests for parentJobID in a
 // fakenomad trace — the assertion an adopt-instead-of-redispatch path needs:
 // exactly one child ever minted for a session, however many times its
