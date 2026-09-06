@@ -3,14 +3,17 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gc-runtime-nomad/fakenomad"
 )
@@ -562,6 +565,186 @@ func TestOpProvisionOnLaunchedSessionIsRejected(t *testing.T) {
 	if err := l.opProvision(ctx, session); err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("provision over a launched session = %v, want an \"already exists\" error", err)
 	}
+}
+
+// TestProvisionReapsBoxOlderThanAdoptLimit is rule 1 of cr-gdeav.6.1:
+// provision must never adopt a provisioned box older than the adoption age
+// limit, and what it does instead is REAP (deregister + tombstone) and
+// dispatch fresh — executive ruling cr-mnl96 G2, option A. The fixture is the
+// real DF-03 shape: a box dispatched 14h20m ago, still resident, still bound,
+// still unlaunched. Before the gate, provision re-staged yesterday's box and
+// minted nothing; the canary did exactly that at 2026-09-06T11:15Z.
+func TestProvisionReapsBoxOlderThanAdoptLimit(t *testing.T) {
+	l, srv := newTestLifecycle(t)
+	ctx := context.Background()
+	const session = "sess-adopt-age-limit"
+
+	if err := l.opProvision(ctx, session); err != nil {
+		t.Fatalf("first provision: %v", err)
+	}
+	first, ok, err := l.sidecar.load(session)
+	if err != nil || !ok || first.ChildJobID == "" {
+		t.Fatalf("binding after provision = (%v, %v), want a bound child", ok, err)
+	}
+
+	// Age the binding the way the canary aged: the box stays resident and the
+	// binding keeps the CreatedAt dispatch stamped at 04 §2.1 rule 1.
+	aged := *first
+	aged.CreatedAt = time.Now().UTC().Add(-14*time.Hour - 20*time.Minute)
+	if err := l.sidecar.save(aged); err != nil {
+		t.Fatalf("aging the binding: %v", err)
+	}
+
+	if err := l.opProvision(ctx, session); err != nil {
+		t.Fatalf("provision over an aged box = %v, want it to finish with a fresh box, not an error", err)
+	}
+	if n := countDispatchCalls(srv.Trace(), l.parentJobID); n != 2 {
+		t.Fatalf("dispatch calls across both provisions = %d, want 2: an aged box is reaped and replaced, never adopted", n)
+	}
+
+	now, ok, err := l.sidecar.load(session)
+	if err != nil || !ok {
+		t.Fatalf("binding after the reap = (%v, %v), want the fresh binding", ok, err)
+	}
+	if now.ChildJobID == first.ChildJobID {
+		t.Fatalf("still bound to the aged child %q after the reap", now.ChildJobID)
+	}
+	// The aged box is gone by the pack's own liveness predicate: no
+	// non-terminal alloc left on it.
+	allocs, _, err := l.client.listAllocsForJob(ctx, first.ChildJobID, 0, 0)
+	if err != nil {
+		t.Fatalf("listing the aged child's allocs: %v", err)
+	}
+	for _, a := range allocs {
+		if !isTerminalStatus(a.ClientStatus) {
+			t.Fatalf("aged child alloc %s is still %s after the reap", a.ID, a.ClientStatus)
+		}
+	}
+	// And the removal is receipted beside the binding it came from — the
+	// record is what the estate keeps when it throws an alloc away.
+	tombs := readReapTombstones(t, l)
+	if len(tombs) != 1 {
+		t.Fatalf("tombstones after one reap = %d, want 1", len(tombs))
+	}
+	rec := tombs[0]
+	if got := rec["child_job_id"]; got != first.ChildJobID {
+		t.Fatalf("tombstone child_job_id = %v, want the aged child %q", got, first.ChildJobID)
+	}
+	if got, _ := rec["age"].(string); got == "" || got == "0s" {
+		t.Fatalf("tombstone age = %v, want the box's real age as a duration string", rec["age"])
+	}
+	if got, _ := rec["reason"].(string); !strings.Contains(got, "adoption age limit") {
+		t.Fatalf("tombstone reason = %q, want it to name the adoption age limit", got)
+	}
+}
+
+// TestAdoptionRefusesBoxWhoseAgentIsRunning is rule 2 of cr-gdeav.6.1: before
+// reusing a box, adoption has to verify the agent is ABSENT. The state that
+// makes this load-bearing is the crash window between a successful launch exec
+// and the confirmLaunched write — launched=false with a live agent inside.
+// Adoption used to read that marker as proof no agent existed, re-stage over
+// it, and let the next start double-launch into a running agent. Provision now
+// records the marker it lost and answers the already-exists contract, and
+// start refuses the same box instead of launching a second agent into it.
+//
+// The in-box agent is the same fake tmux the transport-launch tests use: the
+// pack's agent-absence test is a tmux has-session/kill -0 probe, so a shim
+// that answers those verbs is what the rule is actually specified against
+// (PATH is inherited by fakenomad's in-process exec, so the probe sees it too).
+func TestAdoptionRefusesBoxWhoseAgentIsRunning(t *testing.T) {
+	l, srv := newTestLifecycle(t)
+	ctx := context.Background()
+	const session = "sess-adoption-agent-present"
+
+	fakeBin := t.TempDir()
+	launchRecord := filepath.Join(t.TempDir(), "tmux-argv")
+	if err := os.WriteFile(filepath.Join(fakeBin, "tmux"), []byte(`#!/bin/sh
+printf '%s\n' "$*" >> "$TMUX_RECORD"
+case "$1" in
+new-session) exit 0 ;;
+has-session) exit 0 ;;
+list-panes) printf '%s\n' "$FAKE_PANE_PID" ;;
+*) exit 1 ;;
+esac
+`), 0o700); err != nil {
+		t.Fatalf("write fake tmux: %v", err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TMUX_RECORD", launchRecord)
+	t.Setenv("FAKE_PANE_PID", strconv.Itoa(os.Getpid()))
+
+	if err := l.opProvision(ctx, session); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	// The crash window: launch execed into the box and its agent is running,
+	// but confirmLaunched never recorded it — launched=false with a live
+	// agent, exactly the state the marker alone used to be trusted for.
+	// Seeded over client.execAlloc, not opExec: opExec recognizes a tmux
+	// new-session as gc's transport launch and would confirm the marker,
+	// which is the launch that WORKED, not the crash window under test.
+	allocID, err := l.currentAlloc(ctx, session)
+	if err != nil {
+		t.Fatalf("currentAlloc: %v", err)
+	}
+	code, out, err := l.client.execAlloc(ctx, allocID, execTaskName, []string{"tmux", "new-session", "-d", "-s", tmuxSessionName, "sleep", "60"})
+	if err != nil || code != 0 {
+		t.Fatalf("seeding the in-box agent = (%d, %v): %s", code, err, out)
+	}
+	if b, _, err := l.sidecar.load(session); err != nil || b.Launched {
+		t.Fatalf("fixture: launched=%v (err %v), want the marker still unset", b.Launched, err)
+	}
+
+	if err := l.opProvision(ctx, session); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("provision over a box whose agent is running = %v, want the already-exists wire contract", err)
+	}
+	// The marker the pack lost is written back, so gc's next is-running tells
+	// the truth about a box it can no longer re-stage.
+	if running, err := l.opIsRunning(ctx, session); err != nil || !running {
+		t.Fatalf("is-running after the self-heal = (%v, %v), want (true, nil)", running, err)
+	}
+	if err := l.opStart(ctx, session); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("start over a box whose agent is running = %v, want already-exists (never a double launch)", err)
+	}
+	if n := countDispatchCalls(srv.Trace(), l.parentJobID); n != 1 {
+		t.Fatalf("dispatch calls = %d, want 1: refusing must not mint a second child", n)
+	}
+	// And nothing relaunched into the running agent: the only tmux verb the
+	// pack may have issued against that box is new-session — the seed above.
+	recorded, err := os.ReadFile(launchRecord)
+	if err != nil {
+		t.Fatalf("read tmux argv: %v", err)
+	}
+	if n := strings.Count(string(recorded), "new-session"); n != 1 {
+		t.Fatalf("new-session calls recorded = %d, want 1 (the seed): %s", n, recorded)
+	}
+}
+
+// readReapTombstones reads the reap records the sidecar keeps under its
+// tombstones subdirectory (spelled literally here: a test that reached for the
+// production constant could not tell a missing record from a missing feature).
+func readReapTombstones(t *testing.T, l *lifecycle) []map[string]any {
+	t.Helper()
+	dir := filepath.Join(l.sidecar.dir, "tombstones")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		t.Fatalf("reading %s: %v", dir, err)
+	}
+	var out []map[string]any
+	for _, e := range entries {
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatalf("reading tombstone %s: %v", e.Name(), err)
+		}
+		var rec map[string]any
+		if err := json.Unmarshal(data, &rec); err != nil {
+			t.Fatalf("decoding tombstone %s: %v", e.Name(), err)
+		}
+		out = append(out, rec)
+	}
+	return out
 }
 
 // TestOpStartAfterProvisionAdoptsTheProvisionedBox is the start-retry half of
