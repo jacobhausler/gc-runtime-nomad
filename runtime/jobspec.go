@@ -429,6 +429,20 @@ func (c logShipperConfig) artifactSource() string {
 // ReplaceAll below leaves them untouched (Nomad's template pass is meant to
 // consume them).
 //
+// The session_stdout source declares two patterns rather than one, because
+// two different names can appear under {{ env "NOMAD_ALLOC_DIR" }}/logs and
+// only the second was ever listed (cr-gdeav.6.5.5):
+//   - "logs/agent.stdout" — the file the deployment bootstrap actually writes
+//     (ops/nomad/agent-launch.sh taps the pane with `tmux pipe-pane -o
+//     "cat >> '$LOGS/agent.stdout'"`, unsuffixed) and the exact name the
+//     stop-path egress copies out (runtime/ops.go's egressFiles). Vector's
+//     glob treats the "." in "agent.stdout.*" as a literal, so the old single
+//     pattern demanded a suffix and never matched the shipped file: the pane
+//     capture was written, egressed, and silently never shipped.
+//   - "logs/agent.stdout.*" — Nomad's rotation of the "agent" task's own
+//     stdout file (agent.stdout.1, .2, ...). Kept: same stream, and a file can
+//     match at most one of the two patterns, so declaring both is free.
+//
 // The auth block is only emitted when cfg.TokenFile is set — vector has no
 // bearer-token-file primitive of its own, so an unset token file means an
 // unauthenticated sink rather than a literal empty bearer token.
@@ -445,7 +459,7 @@ ignore_checkpoints = true
 
 [sources.session_stdout]
 type = "file"
-include = ["{{ env "NOMAD_ALLOC_DIR" }}/logs/agent.stdout.*"]
+include = ["{{ env "NOMAD_ALLOC_DIR" }}/logs/agent.stdout", "{{ env "NOMAD_ALLOC_DIR" }}/logs/agent.stdout.*"]
 read_from = "beginning"
 ignore_checkpoints = true
 

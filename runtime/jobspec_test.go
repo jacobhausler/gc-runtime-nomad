@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"path"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -187,7 +189,7 @@ func TestParentJobSpecAddsLogShipperTask(t *testing.T) {
 	toml := shipper.Templates[0].EmbeddedTmpl
 	for _, want := range []string{
 		`include = ["{{ env "NOMAD_ALLOC_DIR" }}/data/*.jsonl", "$${HOME}/.claude/projects/**/*.jsonl"]`,
-		`include = ["{{ env "NOMAD_ALLOC_DIR" }}/logs/agent.stdout.*"]`,
+		`include = ["{{ env "NOMAD_ALLOC_DIR" }}/logs/agent.stdout", "{{ env "NOMAD_ALLOC_DIR" }}/logs/agent.stdout.*"]`,
 		`uri = "{{ env "GC_LOG_SINK" }}"`,
 		`type = "prometheus_exporter"`,
 		`address = "0.0.0.0:{{ env "NOMAD_PORT_metrics" }}"`,
@@ -438,6 +440,138 @@ func TestVectorConfigDisablesFileCheckpoints(t *testing.T) {
 	toml := vectorConfigTOML(logShipperConfig{Sink: "http://sink.example/ingest"})
 	if got := strings.Count(toml, "ignore_checkpoints = true"); got != 2 {
 		t.Fatalf("ignore_checkpoints occurrences = %d, want one for each file source\n%s", got, toml)
+	}
+}
+
+// shippedAgentStdoutRel is the path, relative to $NOMAD_ALLOC_DIR, of the file
+// the deployment bootstrap actually writes inside the allocation:
+// ops/nomad/agent-launch.sh taps the agent's pane with `tmux pipe-pane -o
+// "cat >> '$LOGS/agent.stdout'"` (LOGS = ${NOMAD_ALLOC_DIR}/logs) and
+// runtime/ops.go's egressFiles copies alloc/logs/agent.stdout out verbatim.
+// It is UNSUFFIXED — the whole of cr-gdeav.6.5.5.
+const shippedAgentStdoutRel = "logs/agent.stdout"
+
+// includePatternList is the `"..."` entries of one bracketed include list.
+var includePatternList = regexp.MustCompile(`"([^"]*)"`)
+
+// sessionStdoutIncludes pulls the [sources.session_stdout] include patterns out
+// of a rendered vector.toml — the same substring-scraping style as
+// quotedValueAfter, extended to a bracketed list, so the test below measures
+// the shipped config rather than a copy of it.
+func sessionStdoutIncludes(t *testing.T, rendered string) []string {
+	t.Helper()
+	block := strings.Index(rendered, "[sources.session_stdout]")
+	if block < 0 {
+		t.Fatalf("no [sources.session_stdout] source in rendered config:\n%s", rendered)
+	}
+	rest := rendered[block:]
+	start := strings.Index(rest, "include = [")
+	if start < 0 {
+		t.Fatalf("session_stdout has no include list:\n%s", rest)
+	}
+	rest = rest[start:]
+	end := strings.IndexByte(rest, ']')
+	if end < 0 {
+		t.Fatalf("unterminated session_stdout include list:\n%s", rest)
+	}
+	var patterns []string
+	for _, m := range includePatternList.FindAllStringSubmatch(rest[:end], -1) {
+		patterns = append(patterns, m[1])
+	}
+	if len(patterns) == 0 {
+		t.Fatalf("session_stdout include list is empty:\n%s", rest[:end])
+	}
+	return patterns
+}
+
+// TestVectorSessionStdoutSourceMatchesShippedCapture is the cr-gdeav.6.5.5
+// regression: [sources.session_stdout] declared only
+// "{{ env "NOMAD_ALLOC_DIR" }}/logs/agent.stdout.*". Vector's glob treats that
+// "." as a literal and "*" as not crossing "/", so the pattern REQUIRES a
+// suffix and never matched the unsuffixed logs/agent.stdout the launcher
+// writes and the stop-path egress names. The pane capture was therefore
+// written, egressed, and silently never shipped.
+//
+// Like the two render tests above, this drives the REAL parentJobSpec through
+// fakenomad's own Template-stanza rendering and reads the rendered file back,
+// so what gets matched is what Vector would receive on a real node; the alloc
+// dir is recovered from the sibling source in that same rendered file rather
+// than restated here. Matching then happens on the allocation-relative remainder
+// of each pattern, which keeps a temp-path alloc dir (whatever characters it
+// contains) out of the glob entirely.
+func TestVectorSessionStdoutSourceMatchesShippedCapture(t *testing.T) {
+	l, srv := newTestLifecycle(t)
+	l.logShipper = logShipperConfig{Sink: "http://sink.example/ingest"}
+
+	ctx := context.Background()
+	const session = "sess-stdout-source-match"
+	if err := l.opStartWithConfig(ctx, session, stageConfig{}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	allocID, err := l.currentAlloc(ctx, session)
+	if err != nil {
+		t.Fatalf("resolve current alloc: %v", err)
+	}
+	if state, ok := srv.TaskState(allocID, logShipperTaskName); !ok || state != "running" {
+		t.Fatalf("log-shipper task state = (%q, %v), want (\"running\", true) — the task never started", state, ok)
+	}
+
+	exitCode, out, err := l.opExec(ctx, session, []string{"cat", "local/vector.toml"})
+	if err != nil || exitCode != 0 {
+		t.Fatalf("cat rendered vector.toml: exit=%d err=%v out=%s", exitCode, err, out)
+	}
+	rendered := string(out)
+	if strings.Contains(rendered, "{{") {
+		t.Fatalf("rendered vector.toml still contains an unresolved Nomad template expression:\n%s", rendered)
+	}
+
+	jsonlPattern, ok := quotedValueAfter(rendered, `include = ["`)
+	if !ok {
+		t.Fatalf("no session_jsonl include line in rendered config:\n%s", rendered)
+	}
+	allocDir, found := strings.CutSuffix(jsonlPattern, "/data/*.jsonl")
+	if !found || allocDir == "" {
+		t.Fatalf("could not recover NOMAD_ALLOC_DIR from rendered include %q:\n%s", jsonlPattern, rendered)
+	}
+
+	// The two names that can exist under the allocation's logs dir: the file
+	// the bootstrap writes, and Nomad's rotation of the "agent" task's stream.
+	wanted := map[string]bool{
+		shippedAgentStdoutRel:        false,
+		shippedAgentStdoutRel + ".1": false,
+	}
+	for _, pattern := range sessionStdoutIncludes(t, rendered) {
+		// The credential boundary: the shipper may read nothing outside the
+		// allocation's logs dir (runtime/ops.go's egress allowlist is the same
+		// boundary, and must not be out-wide-listed here).
+		if !strings.HasPrefix(pattern, allocDir+"/logs/") {
+			t.Errorf("session_stdout pattern %q is outside %s/logs/ — the shipper must stay inside the allocation's logs dir", pattern, allocDir)
+			continue
+		}
+		rel := strings.TrimPrefix(pattern, allocDir+"/")
+		for candidate := range wanted {
+			matched, err := path.Match(rel, candidate)
+			if err != nil {
+				t.Fatalf("pattern %q is not a valid glob: %v", rel, err)
+			}
+			if matched {
+				wanted[candidate] = true
+			}
+		}
+	}
+	for candidate, matched := range wanted {
+		if !matched {
+			t.Errorf("no session_stdout pattern matches the allocation-relative path %q (patterns: %v)", candidate, sessionStdoutIncludes(t, rendered))
+		}
+	}
+
+	// Canary: the pattern this bead fixed must NOT match the shipped file. If it
+	// ever does, the assertion above is a tautology and this test has stopped
+	// proving the bug it was written for.
+	if stale, err := path.Match("logs/agent.stdout.*", shippedAgentStdoutRel); err != nil {
+		t.Fatalf("canary glob: %v", err)
+	} else if stale {
+		t.Fatalf("canary broken: the suffix-only pattern logs/agent.stdout.* matches %q — this test no longer proves the cr-gdeav.6.5.5 regression", shippedAgentStdoutRel)
 	}
 }
 
