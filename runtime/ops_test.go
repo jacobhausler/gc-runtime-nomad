@@ -638,6 +638,106 @@ func TestProvisionReapsBoxOlderThanAdoptLimit(t *testing.T) {
 	}
 }
 
+// TestAdoptionReapsBoxWhoseAgentCannotBeProbed is the bounded probe-reap rule
+// of the human ruling cr-gdeav.6.1-probe-absence-unknown: an adopt read that
+// CANNOT CONFIRM the agent absent is a reap trigger, never a reuse permission.
+// The state is a young box (inside GC_NOMAD_ADOPT_MAX_AGE), launched=false,
+// whose alloc is resident while the in-box liveness probe cannot be delivered.
+//
+// The shipped pack took classifyAdoption's default arm there, and that arm
+// caught BOTH "probe confirmed absent" and "probe unavailable" — so an
+// alloc-exec reset let the pack re-stage, and let start launch, into a box
+// whose agent state had never been measured. That is the same double-launch
+// window adoptSelfHealLaunched exists to close, entered through silence
+// instead of through a stale marker; the DF-03 canary hit exactly this shape
+// on 2026-09-06, the agent reset landing after the partial launch was already
+// on record.
+//
+// The required behaviour is REAP, not refuse: refuse's "already exists"
+// phrase is what gc's exec proxy maps to ErrSessionExists, an ALREADY_RUNNING
+// read whose retry can launch into a box whose agent reset after a partial
+// launch. The reap stays bounded by the proof a fresh dispatch needs —
+// tombstone first, then the stop path — because adoptExisting returns
+// reapChild's error before the caller dispatches, so a stop that cannot be
+// confirmed mints nothing. Reuse stays allowed only on a CONFIRMED absence,
+// which is why the age-limit and live-agent tests are unchanged.
+func TestAdoptionReapsBoxWhoseAgentCannotBeProbed(t *testing.T) {
+	l, srv := newTestLifecycle(t)
+	ctx := context.Background()
+	const session = "sess-adopt-probe-unavailable"
+
+	if err := l.opProvision(ctx, session); err != nil {
+		t.Fatalf("first provision: %v", err)
+	}
+	first, ok, err := l.sidecar.load(session)
+	if err != nil || !ok || first.ChildJobID == "" {
+		t.Fatalf("binding after provision = (%v, %v), want a bound child", ok, err)
+	}
+	if first.Launched {
+		t.Fatal("fixture: binding is already launched, want the young unlaunched box adoption would otherwise reuse")
+	}
+
+	// Exactly one exec fault: the in-box liveness probe is the only exec
+	// classifyAdoption issues, so liveness is genuinely unknown while
+	// everything a bounded reap needs afterwards — egress, deregister, the
+	// terminal read — still works. The alloc LOOKUP is a REST call and keeps
+	// answering, which is what makes this "cannot tell" rather than "no box".
+	srv.FailExecNext(1)
+	var decisions []string
+	l.logf = func(format string, args ...any) {
+		decisions = append(decisions, fmt.Sprintf(format, args...))
+	}
+
+	if err := l.opProvision(ctx, session); err != nil {
+		t.Fatalf("provision over a box whose agent state could not be read = %v, want the bounded reap and fresh dispatch to finish", err)
+	}
+	if n := countDispatchCalls(srv.Trace(), l.parentJobID); n != 2 {
+		t.Fatalf("dispatch calls across both provisions = %d, want 2: an unprobeable box is reaped and replaced, never reused", n)
+	}
+
+	now, ok, err := l.sidecar.load(session)
+	if err != nil || !ok {
+		t.Fatalf("binding after the reap = (%v, %v), want the fresh binding", ok, err)
+	}
+	if now.ChildJobID == first.ChildJobID {
+		t.Fatalf("still bound to the unprobeable child %q — the pack re-staged a box it could not measure", now.ChildJobID)
+	}
+	// The fresh dispatch is never blind: the box it replaced is confirmed gone
+	// by the pack's own liveness predicate first.
+	allocs, _, err := l.client.listAllocsForJob(ctx, first.ChildJobID, 0, 0)
+	if err != nil {
+		t.Fatalf("listing the reaped child's allocs: %v", err)
+	}
+	for _, a := range allocs {
+		if !isTerminalStatus(a.ClientStatus) {
+			t.Fatalf("child alloc %s is still %s: dispatched over a box that was never stopped", a.ID, a.ClientStatus)
+		}
+	}
+
+	tombs := readReapTombstones(t, l)
+	if len(tombs) != 1 {
+		t.Fatalf("tombstones after one reap = %d, want 1", len(tombs))
+	}
+	rec := tombs[0]
+	if got := rec["child_job_id"]; got != first.ChildJobID {
+		t.Fatalf("tombstone child_job_id = %v, want the unprobeable child %q", got, first.ChildJobID)
+	}
+	reason, _ := rec["reason"].(string)
+	if !strings.Contains(reason, "could not be confirmed") {
+		t.Fatalf("tombstone reason = %q, want it to name the unconfirmed agent absence as why the box died", reason)
+	}
+
+	// The decision line is a receipt, and in this state it may not claim what
+	// nothing measured: reuse is asserted only against a confirmed absence.
+	joined := strings.Join(decisions, "\n")
+	if !strings.Contains(joined, "path=reap-then-provision-fresh") {
+		t.Fatalf("decision log = %q, want the path it took named (path=reap-then-provision-fresh)", joined)
+	}
+	if strings.Contains(joined, "agent is absent") {
+		t.Fatalf("decision log asserts an absence it never measured: %q", joined)
+	}
+}
+
 // TestAdoptionRefusesBoxWhoseAgentIsRunning is rule 2 of cr-gdeav.6.1: before
 // reusing a box, adoption has to verify the agent is ABSENT. The state that
 // makes this load-bearing is the crash window between a successful launch exec
