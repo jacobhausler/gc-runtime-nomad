@@ -545,9 +545,46 @@ func (l *lifecycle) classifyAdoption(ctx context.Context, sessionName string, b 
 		// split opIsRunning applies (04 §6) — reaping on a transport fault
 		// would destroy a live session because the API blipped.
 		return adoptReject, fmt.Sprintf("agent liveness unknown (probe unavailable, binding age %s): keeping the already-exists contract", age)
+	// An unlaunched box whose agent state could not be read is reaped, not
+	// reused and not refused. Human ruling cr-gdeav.6.1-probe-absence-unknown:
+	// every adopt read that cannot CONFIRM the agent absent is a reap trigger,
+	// because the alternative reading of that silence is exactly the canary's —
+	// a box that really was half-launched, its agent reset landing after the
+	// partial launch was recorded, being re-staged and then launched into a
+	// second time. known=false is both unread shapes: an alloc lookup that
+	// returned nothing, and an in-box probe exec that never landed
+	// (bindingAgentStatus reports unknown, never dead, for either).
+	//
+	// Not refuse, though refusing is the conservative-looking move. Refusing
+	// means writing "already exists" into stderr, and gc's exec provider
+	// INFERS runtime.ErrSessionExists from exactly that phrase
+	// (pinned edge 8c73625b9 internal/runtime/exec/exec.go:142
+	// startCollisionPhrases) — it is the only provider that infers the
+	// sentinel from wording rather than returning it. And a session gc believes
+	// is there is a session gc will launch into: launchAgent respawns the pane
+	// of a box whose tmux session exists (same file, 291-295,
+	// `tmux respawn-pane -k`). So the refusal is not a terminal read — it is a
+	// claim that a session the pack could not measure is live and owned, and
+	// the caller's next launch honours that claim by killing whatever pane is
+	// in there and starting a second agent. Reap is also what this ruling
+	// already orders for a box that is merely too old; an unreadable box is no
+	// safer than an old one.
+	//
+	// The reap stays BOUNDED, which is what keeps this from being a blind
+	// second dispatch: reapChild writes the tombstone, then opStop deregisters
+	// and blocks on the terminal read, and adoptExisting returns that error
+	// before the caller reaches dispatch. A box whose stop cannot be
+	// confirmed therefore mints nothing; the fresh dispatch below happens only
+	// over a box the pack has seen go terminal.
+	case !known:
+		return adoptReap, fmt.Sprintf("agent absence could not be confirmed (in-box probe or alloc lookup unavailable, binding age %s): reaping instead of re-staging a box this pack cannot measure", age)
 	case known && alive:
 		return adoptSelfHealLaunched, "binding says launched=false but an agent is running: the launch confirm write was lost"
 	default:
+		// Reached only with the probe's answer in hand: !Launched AND
+		// known AND !alive, so this may claim what it says. The reuse the
+		// ruling leaves standing is a reuse of a CONFIRMED absence, and the
+		// age limit above is the bounded reaper either way.
 		return adoptReuse, fmt.Sprintf("binding age %s within the limit %s and its agent is absent: re-driving this pack's own half against the box it already made", age, limit)
 	}
 }
