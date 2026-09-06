@@ -446,9 +446,13 @@ func TestOpExecConfirmsASeparableTransportLaunch(t *testing.T) {
 	l, _ := newTestLifecycle(t)
 	ctx := context.Background()
 	const session = "sess-separable-launch"
+	const launchScript = "printf staged-bootstrap > \"$NOMAD_SECRETS_DIR/launch-marker\""
+	withAgentLaunchScript(t, launchScript)
 	fakeBin := t.TempDir()
 	fakeTmux := filepath.Join(fakeBin, "tmux")
+	launchRecord := filepath.Join(t.TempDir(), "tmux-launch-argv")
 	if err := os.WriteFile(fakeTmux, []byte(`#!/bin/sh
+printf '%s\n' "$*" > "$LAUNCH_RECORD"
 case "$1" in
 new-session|has-session) exit 0 ;;
 list-panes) exit 1 ;;
@@ -458,6 +462,7 @@ esac
 		t.Fatalf("write fake tmux: %v", err)
 	}
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("LAUNCH_RECORD", launchRecord)
 
 	if err := l.opProvision(ctx, session); err != nil {
 		t.Fatalf("provision: %v", err)
@@ -475,6 +480,13 @@ esac
 	}
 	if !b.Launched {
 		t.Fatalf("successful transport launch did not set the launched marker")
+	}
+	recorded, err := os.ReadFile(launchRecord)
+	if err != nil {
+		t.Fatalf("read tmux launch argv: %v", err)
+	}
+	if got := string(recorded); !strings.Contains(got, launchScript) {
+		t.Fatalf("transport launch argv = %q, want staged agent launch script %q", got, launchScript)
 	}
 	if running, err := l.opIsRunning(ctx, session); err != nil || !running {
 		t.Fatalf("is-running after transport launch = (%v, %v), want (true, nil)", running, err)
