@@ -1199,19 +1199,24 @@ func (l *lifecycle) markLaunched(ctx context.Context, sessionName string, cfg st
 	if err := l.confirmLaunched(ctx, sessionName, workDir); err != nil {
 		return err
 	}
-	return l.startupPrime(ctx, sessionName, cfg)
+	return l.startupPrimeDetached(ctx, sessionName, cfg)
 }
 
 // markTransportLaunched preserves GC's canonical tmux transport verb while
 // replacing its raw pane command with the staged, deployment-owned bootstrap.
 // The caller already holds sessionName's lock.
 //
-// Once the launch is confirmed, it primes the pane exactly as markLaunched
-// does (cr-gdeav.6.12): this is gc's proc.provision path, which stages the
-// startup prompt separately (opProvisionWithConfig -> savePromptPending) from
-// the launch it later drives through this transport handshake, so the prompt
-// fields ride the binding's PromptPending — recorded at stage time — rather
-// than this call's own argv, which carries only the transport verb.
+// Once the launch is confirmed, it hands the pane off to the detached prime
+// window exactly as markLaunched does (cr-gdeav.6.12/6.13): this is gc's
+// proc.provision path, which stages the startup prompt separately
+// (opProvisionWithConfig -> savePromptPending) from the launch it later
+// drives through this transport handshake, so the prompt fields ride the
+// binding's PromptPending — recorded at stage time — rather than this call's
+// own argv, which carries only the transport verb. startupPrimeDetached
+// returns as soon as the window is spawned, so this op keeps returning the
+// instant launch is confirmed, same as before any priming existed
+// (cr-gdeav.6.13: a blocking wait here is what put attempt 6's start past
+// gc's async-start budget and looped a fresh dispatch every ~30s).
 func (l *lifecycle) markTransportLaunched(ctx context.Context, sessionName string, transport []string) error {
 	if len(transport) != 6 {
 		return fmt.Errorf("invalid transport launch argv length %d", len(transport))
@@ -1231,7 +1236,7 @@ func (l *lifecycle) markTransportLaunched(ctx context.Context, sessionName strin
 	if pending, ok, err := l.sidecar.load(sessionName); err == nil && ok && pending.PromptPending != nil {
 		cfg = *pending.PromptPending
 	}
-	return l.startupPrime(ctx, sessionName, cfg)
+	return l.startupPrimeDetached(ctx, sessionName, cfg)
 }
 
 // confirmLaunched records a launch that has already succeeded. Its caller
@@ -1715,6 +1720,11 @@ func (l *lifecycle) opIsRunning(ctx context.Context, sessionName string) (bool, 
 		// death — same honesty split as the alloc lookup above.
 		return true, nil
 	}
+	// Best-effort: pick up the detached prime window's marker files if this
+	// session is still owed one (cr-gdeav.6.13). A no-op exec-free check
+	// once PromptedAt is set or no prompt was ever staged, so this costs
+	// nothing on the common path and never affects the liveness answer.
+	l.syncPromptedMarker(ctx, sessionName)
 	return alive, nil
 }
 
