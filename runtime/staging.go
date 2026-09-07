@@ -262,9 +262,33 @@ func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
+// pemPointerSuffix names the mTLS identity bridge convention (cr-gdeav.6.15):
+// an extra secret key GC_NOMAD_EXTRA_SECRET_KEYS bridges in named FOO_PEM is
+// materialized as a file exactly like any other staged secret (stage()'s
+// per-key stageFile loop, unchanged), but its BYTES never ride env.sh — only
+// a POINTER to where the file landed does, exported as FOO. This is what lets
+// a consumer that wants a file path — gc's remote client reads
+// GC_CITY_CA/GC_CITY_CLIENT_CERT/GC_CITY_CLIENT_KEY as file paths
+// (cmd/gc/remote_client.go:92-93) — get exactly that, with nothing beyond the
+// Nomad-provided $NOMAD_SECRETS_DIR path (not a secret, paneStagedEnvPrelude's
+// own reasoning) ever appearing in env.sh for these keys.
+const pemPointerSuffix = "_PEM"
+
+// pemPointerName returns the env var buildEnvScript should point at key's
+// staged file, and whether key follows the *_PEM convention at all.
+func pemPointerName(key string) (string, bool) {
+	base := strings.TrimSuffix(key, pemPointerSuffix)
+	if base == key || base == "" || !validShellEnvName(base) {
+		return "", false
+	}
+	return base, true
+}
+
 // buildEnvScript creates the sourceable environment contract staged into
 // NOMAD_SECRETS_DIR. Keys are sorted for deterministic receipts and only
-// valid shell identifiers are exported.
+// valid shell identifiers are exported. A *_PEM key's own value is withheld
+// (pemPointerName above) — env.sh points AT its staged file instead of ever
+// repeating the PEM bytes as a second copy.
 func buildEnvScript(env map[string]string) []byte {
 	keys := make([]string, 0, len(env))
 	for key := range env {
@@ -276,13 +300,137 @@ func buildEnvScript(env map[string]string) []byte {
 
 	var b strings.Builder
 	for _, key := range keys {
+		if _, isPointer := pemPointerName(key); isPointer {
+			continue
+		}
 		b.WriteString("export ")
 		b.WriteString(key)
 		b.WriteByte('=')
 		b.WriteString(shellQuote(env[key]))
 		b.WriteByte('\n')
 	}
+	for _, key := range keys {
+		pointer, ok := pemPointerName(key)
+		if !ok {
+			continue
+		}
+		// Double-quoted (not shellQuote's single quotes) so $NOMAD_SECRETS_DIR
+		// expands at source time to the real staged path every time env.sh is
+		// sourced - never a path this pack hardcodes or resolves itself.
+		b.WriteString("export ")
+		b.WriteString(pointer)
+		b.WriteString(`="$NOMAD_SECRETS_DIR/`)
+		b.WriteString(key)
+		b.WriteString("\"\n")
+	}
 	return []byte(b.String())
+}
+
+// Remote-context staging (cr-gdeav.6.15): a Nomad-launched Codex box can
+// reach the city over its own native TLS/context mechanism — no flags, no
+// bespoke wiring — if this pack stages a GC_HOME with a contexts.toml gc's
+// own resolver already knows how to read (cmd/gc/remote_target.go:104-106,
+// $GC_HOME/contexts.toml; schema at internal/clientcontext/clientcontext.go).
+// This pack cannot import that package (zero-gascity-dependency contract), so
+// the TOML is hand-written here, pinned to the exact field names
+// (name/url/ca_file/client_cert_file/client_key_file) rather than guessed at.
+const (
+	// remoteContextRelPath is where the staged GC_HOME lands under
+	// NOMAD_SECRETS_DIR - a subdirectory, not the secrets root itself, so gc's
+	// OWN contexts.toml never collides with the per-key secret files
+	// staged beside it.
+	remoteContextDir     = "gc-home"
+	remoteContextRelPath = remoteContextDir + "/contexts.toml"
+
+	// nomadSecretsDirPath is Nomad's own fixed exec-task secrets mount point
+	// (verified live: `nomad alloc exec ... env` reports
+	// NOMAD_SECRETS_DIR=/secrets on every task) - a Nomad platform constant,
+	// not a value this pack invents or reads from the wire. contexts.toml is
+	// a literal TOML file with no shell variable expansion, unlike env.sh, so
+	// its ca_file/client_cert_file/client_key_file fields need the resolved
+	// path written out; env.sh's own pointer exports (buildEnvScript above)
+	// stay dynamic ($NOMAD_SECRETS_DIR) precisely because a shell CAN expand
+	// that at source time and TOML cannot.
+	nomadSecretsDirPath = "/secrets"
+)
+
+// remoteContextPEMKeys names the three identity roles this bridge wires into
+// a context, and the *_PEM secret key each expects (cr-gdeav.6.15, matching
+// what the executive stages via GC_NOMAD_EXTRA_SECRET_KEYS). Order is the
+// order their fields appear in the rendered TOML.
+var remoteContextPEMKeys = [3]struct{ field, key string }{
+	{"ca_file", "GC_CITY_CA_PEM"},
+	{"client_cert_file", "GC_CITY_CLIENT_CERT_PEM"},
+	{"client_key_file", "GC_CITY_CLIENT_KEY_PEM"},
+}
+
+// buildRemoteContextFile returns the gc-home/contexts.toml stageFile for
+// secretEnv, or nil when secretEnv carries no remote target to stage
+// (missing GC_CITY_NAME or GC_CITY_URL) — a no-op for every deployment that
+// does not opt into this bridge, same invariant every other staging field on
+// this pack already holds.
+func buildRemoteContextFile(secretEnv map[string]string) *stageFile {
+	name := strings.TrimSpace(secretEnv["GC_CITY_NAME"])
+	url := strings.TrimSpace(secretEnv["GC_CITY_URL"])
+	if name == "" || url == "" {
+		return nil
+	}
+	var b strings.Builder
+	b.WriteString("[[context]]\n")
+	fmt.Fprintf(&b, "name = %s\n", tomlQuote(name))
+	fmt.Fprintf(&b, "url = %s\n", tomlQuote(url))
+	for _, role := range remoteContextPEMKeys {
+		if _, present := secretEnv[role.key]; !present {
+			continue
+		}
+		fmt.Fprintf(&b, "%s = %s\n", role.field, tomlQuote(nomadSecretsDirPath+"/"+role.key))
+	}
+	return &stageFile{Path: remoteContextRelPath, Content: []byte(b.String()), Mode: 0o600}
+}
+
+// buildRemoteContextEnvLines returns the extra env.sh lines that point gc's
+// own remote-context resolution at the GC_HOME this pack stages
+// (buildRemoteContextFile) - nil when no context was staged (the same
+// missing-name-or-url no-op), so an ordinary deployment's env.sh is
+// unaffected. GC_HOME is exported dynamically ($NOMAD_SECRETS_DIR/gc-home) —
+// same reasoning as the *_PEM pointers above, since a literal path this pack
+// resolved itself would assume Nomad's mount point rather than reading it;
+// GC_CITY_CONTEXT is a context NAME, not a credential, so it still goes
+// through shellQuote like any ordinary exported value.
+func buildRemoteContextEnvLines(secretEnv map[string]string) []byte {
+	name := strings.TrimSpace(secretEnv["GC_CITY_NAME"])
+	url := strings.TrimSpace(secretEnv["GC_CITY_URL"])
+	if name == "" || url == "" {
+		return nil
+	}
+	var b strings.Builder
+	b.WriteString(`export GC_HOME="$NOMAD_SECRETS_DIR/` + remoteContextDir + "\"\n")
+	b.WriteString("export GC_CITY_CONTEXT=" + shellQuote(name) + "\n")
+	return []byte(b.String())
+}
+
+// tomlQuote renders s as a TOML basic string. contexts.toml carries only a
+// city name, a URL, and this pack's own fixed secrets-dir file paths - none
+// expected to need escaping - but this is written defensively rather than
+// assuming that stays true.
+func tomlQuote(s string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for _, r := range s {
+		switch r {
+		case '"', '\\':
+			b.WriteByte('\\')
+			b.WriteRune(r)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\t':
+			b.WriteString(`\t`)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
 }
 
 // errStagePathInvalid marks a stageFile whose Path is absolute or escapes

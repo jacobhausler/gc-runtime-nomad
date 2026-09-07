@@ -1377,11 +1377,23 @@ func (l *lifecycle) stage(ctx context.Context, sessionName string, cfg stageConf
 		secretFiles = append(secretFiles, stageFile{Path: k, Content: []byte(v), Mode: 0o600})
 	}
 	if len(secretEnv) > 0 {
+		envScript := buildEnvScript(secretEnv)
+		// The remote-context bridge (cr-gdeav.6.15) rides the same env.sh:
+		// GC_HOME/GC_CITY_CONTEXT are a no-op append when GC_CITY_NAME or
+		// GC_CITY_URL is absent from the wire, so this costs nothing for a
+		// deployment that has not opted in.
+		envScript = append(envScript, buildRemoteContextEnvLines(secretEnv)...)
 		secretFiles = append(secretFiles, stageFile{
 			Path:    stagedEnvScriptName,
-			Content: buildEnvScript(secretEnv),
+			Content: envScript,
 			Mode:    0o600,
 		})
+		// contexts.toml itself - gc's own $GC_HOME/contexts.toml schema,
+		// hand-written since this pack cannot import gc's clientcontext
+		// package. Also a no-op append on the same condition.
+		if ctxFile := buildRemoteContextFile(secretEnv); ctxFile != nil {
+			secretFiles = append(secretFiles, *ctxFile)
+		}
 	}
 	if len(secretFiles) > 0 {
 		data, err := buildTar(secretFiles)
