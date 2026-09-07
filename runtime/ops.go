@@ -1205,18 +1205,33 @@ func (l *lifecycle) markLaunched(ctx context.Context, sessionName string, cfg st
 // markTransportLaunched preserves GC's canonical tmux transport verb while
 // replacing its raw pane command with the staged, deployment-owned bootstrap.
 // The caller already holds sessionName's lock.
+//
+// Once the launch is confirmed, it primes the pane exactly as markLaunched
+// does (cr-gdeav.6.12): this is gc's proc.provision path, which stages the
+// startup prompt separately (opProvisionWithConfig -> savePromptPending) from
+// the launch it later drives through this transport handshake, so the prompt
+// fields ride the binding's PromptPending — recorded at stage time — rather
+// than this call's own argv, which carries only the transport verb.
 func (l *lifecycle) markTransportLaunched(ctx context.Context, sessionName string, transport []string) error {
 	if len(transport) != 6 {
 		return fmt.Errorf("invalid transport launch argv length %d", len(transport))
 	}
 	workDir := ""
-	if b, ok, err := l.sidecar.load(sessionName); err == nil && ok {
+	b, ok, err := l.sidecar.load(sessionName)
+	if err == nil && ok {
 		workDir = b.WorkDir
 	}
 	if err := l.launchWithCommand(ctx, sessionName, buildLaunchCommandForTmux(nil, transport[1:5], workDir)); err != nil {
 		return err
 	}
-	return l.confirmLaunched(ctx, sessionName, workDir)
+	if err := l.confirmLaunched(ctx, sessionName, workDir); err != nil {
+		return err
+	}
+	cfg := stageConfig{}
+	if pending, ok, err := l.sidecar.load(sessionName); err == nil && ok && pending.PromptPending != nil {
+		cfg = *pending.PromptPending
+	}
+	return l.startupPrime(ctx, sessionName, cfg)
 }
 
 // confirmLaunched records a launch that has already succeeded. Its caller
@@ -1250,6 +1265,9 @@ func (l *lifecycle) confirmLaunched(ctx context.Context, sessionName string, wor
 // provision/start keep behaving exactly as they did before the marker
 // existed when no config rides the call.
 func (l *lifecycle) stageTracked(ctx context.Context, sessionName string, cfg stageConfig) error {
+	if err := l.savePromptPending(sessionName, cfg); err != nil {
+		return err
+	}
 	if !stagesAnything(cfg) {
 		return l.stage(ctx, sessionName, cfg)
 	}
@@ -1260,6 +1278,28 @@ func (l *lifecycle) stageTracked(ctx context.Context, sessionName string, cfg st
 		return err
 	}
 	return l.setStagePending(sessionName, false)
+}
+
+// savePromptPending persists cfg's startup-prompt/priming subset onto
+// sessionName's binding (cr-gdeav.6.12), so a later transport launch through
+// opExec — which runs with no stageConfig of its own — can still deliver the
+// prompt gc sent at provision/start time. A cfg that owes no prompt
+// (cfg.startupPrompt() is empty) is a complete no-op: provision/start behave
+// exactly as before this field existed on every ordinary call.
+func (l *lifecycle) savePromptPending(sessionName string, cfg stageConfig) error {
+	if text, _ := cfg.startupPrompt(); text == "" {
+		return nil
+	}
+	b, ok, err := l.sidecar.load(sessionName)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("session %q binding vanished before its startup prompt could be recorded", sessionName)
+	}
+	subset := cfg.promptSubset()
+	b.PromptPending = &subset
+	return l.sidecar.save(*b)
 }
 
 // setStagePending records (or clears) the mid-staging marker on

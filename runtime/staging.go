@@ -109,6 +109,27 @@ func (c stageConfig) startupPrompt() (text, source string) {
 	return "", ""
 }
 
+// promptSubset returns only the startup-prompt/priming fields of cfg — never
+// WorkDir, Env, or Files — for persisting onto a session's binding
+// (cr-gdeav.6.12). It exists because gc's proc.provision path carries these
+// fields on opProvisionWithConfig's stageConfig, but opExec's transport-launch
+// path (markTransportLaunched, ops.go) runs with no stageConfig of its own —
+// gc's canonical tmux launch argv carries only the transport handshake — so
+// the prompt fields have to survive from stage time to whichever launch path
+// actually runs. Excluding Env/Files keeps that persisted copy from ever
+// re-carrying a secret the staging call routed past the sidecar entirely.
+func (c stageConfig) promptSubset() stageConfig {
+	return stageConfig{
+		Command:           c.Command,
+		Nudge:             c.Nudge,
+		ProcessNames:      c.ProcessNames,
+		ReadyPromptPrefix: c.ReadyPromptPrefix,
+		ReadyDelayMs:      c.ReadyDelayMs,
+		PromptSuffix:      c.PromptSuffix,
+		PromptFlag:        c.PromptFlag,
+	}
+}
+
 // unshellQuote decodes one single-quoted shell word back to its value — the
 // inverse of this file's shellQuote, and the same quote-escaping grammar
 // parseExecWireArgv already decodes on the exec wire. gc builds PromptSuffix

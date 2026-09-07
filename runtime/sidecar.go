@@ -96,6 +96,20 @@ type binding struct {
 	// cr-gdeav.6.9's canary read as primed for eight minutes while sitting
 	// at an empty prompt.
 	PromptStatus string `json:"prompt_status,omitempty"`
+
+	// PromptPending carries the startup-prompt/priming subset of the
+	// stageConfig gc sent at provision/start time forward to whichever launch
+	// path actually runs (cr-gdeav.6.12). It exists because gc's
+	// proc.provision path stages the prompt fields separately from the
+	// launch it later drives through opExec's transport-launch handshake
+	// (markTransportLaunched, ops.go), which carries no stageConfig of its
+	// own — gc's canonical tmux launch argv is only ever the transport
+	// verb. Nil means no startup prompt was ever staged for this session;
+	// startupPrime treats that identically to a zero-value stageConfig
+	// (nothing owed). Only the prompt/priming subset is ever stored here —
+	// never Env or Files — so this never re-carries a secret past the
+	// channel stage() already routes them through.
+	PromptPending *stageConfig `json:"prompt_pending,omitempty"`
 }
 
 // sidecar is a file-based KV under a directory: one JSON file per session,
