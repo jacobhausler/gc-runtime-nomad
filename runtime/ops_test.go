@@ -496,6 +496,80 @@ esac
 	}
 }
 
+// TestOpExecPrimesTransportLaunchFromStagedPromptFields is the RED/GREEN pair
+// for cr-gdeav.6.12: live attempt 5 (pack ac6f0de) still never primed, because
+// startupPrime was only ever called from markLaunched (opStart/opRelaunch),
+// while gc drives this lane's actual launch through opExec's transport-launch
+// handshake (markTransportLaunched) — which ran with no stageConfig of its
+// own, so the nudge/ready_prompt_prefix gc sent at provision time never
+// reached it and the binding gained no prompt_status at all.
+//
+// The fake tmux here answers capture-pane with the real captured Codex ready
+// row (testdata/codex-startup-pane.raw, the same fixture
+// startup_ready_pane_test.go pins the matcher against), so this proves the
+// fix end to end: provision stages the prompt, the transport launch primes
+// from it, and prompted_at lands on the binding.
+func TestOpExecPrimesTransportLaunchFromStagedPromptFields(t *testing.T) {
+	l, _ := newTestLifecycle(t)
+	ctx := context.Background()
+	const session = "sess-transport-prime"
+	withAgentLaunchScript(t, "true")
+
+	readyPane, err := os.ReadFile("testdata/codex-startup-pane.raw")
+	if err != nil {
+		t.Fatalf("read captured pane fixture: %v", err)
+	}
+	paneFixture := filepath.Join(t.TempDir(), "pane.raw")
+	if err := os.WriteFile(paneFixture, readyPane, 0o600); err != nil {
+		t.Fatalf("write pane fixture: %v", err)
+	}
+	sendKeysRecord := filepath.Join(t.TempDir(), "tmux-send-keys-argv")
+	fakeBin := t.TempDir()
+	fakeTmux := filepath.Join(fakeBin, "tmux")
+	if err := os.WriteFile(fakeTmux, []byte(`#!/bin/sh
+case "$1" in
+new-session|has-session) exit 0 ;;
+capture-pane) cat "$PANE_FIXTURE" ;;
+send-keys) printf '%s\n' "$*" >> "$SEND_KEYS_RECORD" ;;
+list-panes) exit 1 ;;
+*) exit 1 ;;
+esac
+`), 0o700); err != nil {
+		t.Fatalf("write fake tmux: %v", err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("PANE_FIXTURE", paneFixture)
+	t.Setenv("SEND_KEYS_RECORD", sendKeysRecord)
+
+	cfg := stageConfig{Nudge: "Run gc hook --claim --json now.", ReadyPromptPrefix: "› Ask Codex"}
+	if err := l.opProvisionWithConfig(ctx, session, cfg); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+
+	launch := []string{"/bin/sh", "-c", `'tmux' 'new-session' '-d' '-s' 'main' 'sleep 60'`}
+	if code, out, err := l.opExec(ctx, session, launch); err != nil || code != 0 {
+		t.Fatalf("exec transport launch = (%d, %q, %v), want (0, _, nil)", code, out, err)
+	}
+
+	b, ok, err := l.sidecar.load(session)
+	if err != nil || !ok {
+		t.Fatalf("sidecar.load after transport launch = (%+v, %v, %v)", b, ok, err)
+	}
+	if b.PromptedAt == nil {
+		t.Fatal("transport launch never primed the startup prompt staged at provision time")
+	}
+	if b.PromptStatus != promptStatusDelivered {
+		t.Fatalf("prompt_status = %q, want %q", b.PromptStatus, promptStatusDelivered)
+	}
+	recorded, err := os.ReadFile(sendKeysRecord)
+	if err != nil {
+		t.Fatalf("read tmux send-keys argv: %v", err)
+	}
+	if !strings.Contains(string(recorded), cfg.Nudge) {
+		t.Fatalf("send-keys argv = %q, want the staged nudge text %q", recorded, cfg.Nudge)
+	}
+}
+
 func TestOpExecAppliesStagedBootstrapToTransportRespawn(t *testing.T) {
 	l, _ := newTestLifecycle(t)
 	ctx := context.Background()
