@@ -143,6 +143,14 @@ func (l *lifecycle) startupPrime(ctx context.Context, sessionName string, cfg st
 
 func startupPrime(ctx context.Context, st *sidecar, in startupIO, logf func(format string, args ...any), sessionName string, cfg stageConfig) error {
 	text, source := cfg.startupPrompt()
+	// Value-blind record of what actually arrived on the start wire, BEFORE the
+	// empty-text return: "nothing was typed" and "nothing was sent" look
+	// identical from the outside, and attempt 4 could not be diagnosed from the
+	// alloc because the pack logged neither. Names and presence only - the
+	// prompt body never reaches a log line or a captured file.
+	logf("startup-prompt session=%s wire command=%t nudge=%t ready_prompt_prefix=%t ready_delay_ms=%d process_names=%t prompt_source=%s prompt_bytes=%d",
+		sessionName, cfg.Command != "", cfg.Nudge != "", cfg.ReadyPromptPrefix != "",
+		cfg.ReadyDelayMs, len(cfg.ProcessNames) > 0, source, len(text))
 	if text == "" {
 		return nil
 	}
@@ -269,7 +277,7 @@ func paneShowsReadyPrompt(captured, readyPromptPrefix string) bool {
 	}
 	prefix := normalizePromptSpace(readyPromptPrefix)
 	bare := strings.TrimSpace(prefix)
-	for _, line := range strings.Split(captured, "\n") {
+	for _, line := range paneReadyLines(captured) {
 		trimmed := normalizePromptSpace(line)
 		for _, candidate := range []string{trimmed, stripPromptBoxBorder(trimmed)} {
 			if strings.HasPrefix(candidate, prefix) || (bare != "" && candidate == bare) {
@@ -296,4 +304,73 @@ func stripPromptBoxBorder(s string) string {
 		return strings.TrimLeft(string(runes[1:]), " \t")
 	}
 	return s
+}
+
+// paneReadyLines reconstructs the visible text rows of a pane capture so the
+// gc-parity prefix rule above can be applied per row.
+//
+// It has to accept two shapes. `tmux capture-pane -p` (what the live probe
+// runs) is already the rendered screen: plain text, one row per line, and this
+// function degenerates to a trim. The raw agent stream the bootstrap captures
+// to agent.stdout is the TUI's repaint bytes instead - escape-heavy, and laid
+// out by cursor-positioning sequences rather than newlines (the cr-gdeav.6.11
+// attempt-4 capture holds a whole 30-row screen in 9 newline-separated
+// chunks). Matching gc's rule against raw chunks would decide readiness on
+// whatever byte happened to be first.
+//
+// So: strip the control layer (CSI/OSC and friends), treat a sequence that
+// parks the caret in column 1 - CUP `ESC[<row>;1H`/`f`, and CR - as the row
+// break the terminal itself would have made, and drop the rest. This
+// normalizes bytes; it does not widen the matching rule, which stays
+// character-for-character gc's matchesPromptPrefix.
+func paneReadyLines(captured string) []string {
+	var (
+		rows []string
+		cur  strings.Builder
+	)
+	breakRow := func() {
+		if row := cur.String(); strings.TrimSpace(row) != "" {
+			rows = append(rows, row)
+		}
+		cur.Reset()
+	}
+	runes := []rune(captured)
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		switch {
+		case r == '\x1b' && i+1 < len(runes) && runes[i+1] == '[':
+			// CSI: parameter+intermediate bytes (0x20-0x3F) then a final byte
+			// (0x40-0x7E). Only CUP/HVP to column 1 is a row boundary.
+			j := i + 2
+			paramsStart := j
+			for j < len(runes) && runes[j] >= 0x20 && runes[j] <= 0x3f {
+				j++
+			}
+			params := string(runes[paramsStart:j])
+			if j < len(runes) && (runes[j] == 'H' || runes[j] == 'f') && strings.HasSuffix(params, ";1") {
+				breakRow()
+			}
+			i = j
+		case r == '\x1b' && i+1 < len(runes) && runes[i+1] == ']':
+			// OSC: terminated by BEL or ST (ESC \\).
+			j := i + 2
+			for j < len(runes) && runes[j] != '\a' && !(runes[j] == '\x1b' && j+1 < len(runes) && runes[j+1] == '\\') {
+				j++
+			}
+			i = j - 1
+		case r == '\x1b' && i+1 < len(runes):
+			// Two-character sequences (ESC c, ESC ] handled above, ESC ( B ...).
+			i++
+		case r == '\n' || r == '\r':
+			breakRow()
+		case r == '\t':
+			cur.WriteRune(' ')
+		case r < 0x20 || r == 0x7f:
+			// Remaining control bytes carry no visible text.
+		default:
+			cur.WriteRune(r)
+		}
+	}
+	breakRow()
+	return rows
 }
