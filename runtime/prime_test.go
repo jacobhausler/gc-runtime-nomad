@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -141,3 +142,84 @@ esac
 		t.Fatalf("prompt_status = %q, want %q (the status file's own word, not a hardcoded \"delivered\")", b.PromptStatus, promptStatusSubmitUnconfirmed)
 	}
 }
+
+// extractPaneReadyFunc pulls the pane_ready() shell function verbatim out of
+// the real, shipped primeScript, so a test of "the readiness predicate" is a
+// test of the exact bytes staged into an alloc, not a hand-copied
+// reimplementation that could silently drift from it.
+func extractPaneReadyFunc(script string) (string, bool) {
+	start := strings.Index(script, "pane_ready() {")
+	if start < 0 {
+		return "", false
+	}
+	rest := script[start:]
+	end := strings.Index(rest, "\n}\n")
+	if end < 0 {
+		return "", false
+	}
+	return rest[:end+len("\n}\n")], true
+}
+
+// runPaneReady runs the extracted pane_ready() against fixture, under the
+// given ready-prefix, and reports whether it decided "ready" (exit 0).
+func runPaneReady(t *testing.T, fn, prefix string, fixture []byte) bool {
+	t.Helper()
+	paneFile := filepath.Join(t.TempDir(), "pane.txt")
+	// pane_ready reads real `tmux capture-pane -p` output: already-rendered
+	// lines, not the raw TUI repaint stream a captured agent.stdout holds
+	// (startup_ready_pane_test.go's own fixture note) - so the fixture is
+	// reconstructed into rows first, exactly as the live pane would render.
+	rendered := strings.Join(paneReadyLines(string(fixture)), "\n")
+	if err := os.WriteFile(paneFile, []byte(rendered), 0o600); err != nil {
+		t.Fatalf("write reconstructed pane fixture: %v", err)
+	}
+	script := "PREFIX=" + shellQuote(prefix) + "\n" + fn + "\npane_ready " + shellQuote(paneFile) + "\n"
+	cmd := exec.Command("/bin/sh", "-c", script)
+	return cmd.Run() == nil
+}
+
+// TestPrimeReadinessRejectsLoadingFrameAcceptsLoadedFrame is the RED/GREEN
+// pair for cr-gdeav.6.16. Attempt 9 (pack db669c7) crashed again: agent.exit
+// exit=1, stderr "Error: timed out discarding buffered terminal input",
+// gc-prime/status=submit_unconfirmed, prompted_at 4s after start. Captured
+// agent.stdout (fetched live from alloc 076519d8 before it was GC'd,
+// testdata/codex-loading-not-ready.raw, trimmed to the first TUI frame) shows
+// WHY: Codex paints "› Ask Codex to do anything" in the SAME first frame as
+// "model:     loading" / "directory: loading" - the ready prefix is present
+// from the very first frame, well before the agent has actually finished
+// initializing, so a prefix-only match (every prior attempt's rule) fires
+// immediately and types into Codex's startup terminal-query/discard window.
+//
+// pane_ready() must reject that frame (prefix present, but "loading" is
+// still on screen) and accept testdata/codex-startup-pane.raw's frame
+// (attempt 4, fully resolved: "model: qwen3.8-27b-nvfp4 medium",
+// "directory: /alloc/work", "permissions: YOLO mode", no "loading" anywhere).
+func TestPrimeReadinessRejectsLoadingFrameAcceptsLoadedFrame(t *testing.T) {
+	fn, ok := extractPaneReadyFunc(primeScript)
+	if !ok {
+		t.Fatal("primeScript has no pane_ready() function to extract - cr-gdeav.6.16's readiness predicate must be its own named, testable unit")
+	}
+
+	loading, err := os.ReadFile("testdata/codex-loading-not-ready.raw")
+	if err != nil {
+		t.Fatalf("read attempt-9 loading fixture: %v", err)
+	}
+	loaded, err := os.ReadFile("testdata/codex-startup-pane.raw")
+	if err != nil {
+		t.Fatalf("read attempt-4 loaded fixture: %v", err)
+	}
+
+	const prefix = "› Ask Codex"
+	if runPaneReady(t, fn, prefix, loading) {
+		t.Fatal("pane_ready accepted attempt 9's frame as ready, though model:/directory: still say \"loading\" - this is exactly what typed into Codex's startup discard window and crashed it")
+	}
+	if !runPaneReady(t, fn, prefix, loaded) {
+		t.Fatal("pane_ready rejected attempt 4's fully-loaded frame - the rule must still accept a genuinely ready pane")
+	}
+}
+
+// TestPrimeScriptHonorsReadyDelayAsPostReadySettle: see the GREEN commit,
+// which adds this alongside the readyDelayMs/primeDefaultReadyDelayMs
+// symbols it exercises (kept out of the RED commit so RED compiles
+// standalone against the pre-fix pack, per this repo's own RED/GREEN
+// convention).
