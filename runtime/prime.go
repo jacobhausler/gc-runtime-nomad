@@ -47,18 +47,52 @@ const (
 	primeStatusFile  = "status"
 	primeReadyBudget = 180 // seconds; mirrors startupReadyBudgetDefault
 	primeInterval    = 2   // seconds; mirrors startupReadyIntervalDefault
+
+	// Submit tuning below is gc's own (internal/runtime/tmux/tmux.go,
+	// nudgeSubmitDebounce / submitEnterAndConfirm's consts), copied verbatim
+	// rather than guessed at (cr-gdeav.6.14). Live evidence is why this
+	// matters: attempt 7 (pack bfe4378) typed the nudge as literal text
+	// followed by a LONE Enter the instant the ready prefix matched — which
+	// on this box is ~200ms after launch, well inside Codex's own startup
+	// terminal-query/discard phase (OSC 10/11, CSI 6n, kitty keyboard query,
+	// captured at the very head of agent.stdout) — and Codex exited 1,
+	// "timed out discarding buffered terminal input". Reproduced live against
+	// alloc 12d0aa58 (§11): the same immediate lone-Enter sequence either
+	// stranded the text drafted-but-unsubmitted or crashed the agent; gc's
+	// own sequence — literal paste, THEN a 500ms debounce, THEN Escape
+	// then Enter as ONE submit unit, confirmed by polling for codex's busy
+	// indicator ("esc to interrupt") — worked cleanly twice in a row, typed
+	// at the same ~200ms mark with no extra readiness settle beyond the
+	// debounce gc already applies. Codex's TUI reads a send-keys burst as a
+	// bracketed paste, so a lone trailing Enter is swallowed as a composer
+	// newline, not a submit (nudgeSubmitKeySequenceForFamily("codex") =
+	// {"Escape","Enter"}, tmux.go). The debounce is gc's ordinary paste
+	// settle time, not a bespoke wait for this pack's own race.
+	primeSubmitDebounceMs    = 500
+	primeSubmitMaxSends      = 3
+	primeSubmitBackoffMs     = 200
+	primeConfirmPollsPerSend = 4
+	primeConfirmPollMs       = 150
 )
 
 // primeScript is the POSIX shell the detached tmux window runs. It is a
-// shell-side reimplementation of awaitReady/paneShowsReadyPrompt's core rule
-// — trim the pane line, prefix-match against the configured value — because
-// nothing in this pack's own process survives to run that Go code once the
-// launch op has returned. It deliberately skips the NBSP-fold and box-border
-// strip startup.go's Go matcher carries (paneShowsReadyPrompt): those cover
-// TUI rendering edge cases the ready row observed in production does not
-// need, and keeping the script this small keeps it auditable by inspection
-// in the alloc, which matters more here than parity down to the last corner
-// case.
+// shell-side reimplementation of two pieces of gc's own Go logic, because
+// nothing in this pack's own process survives to run Go code once the launch
+// op has returned:
+//
+//   - awaitReady/paneShowsReadyPrompt's core readiness rule (trim the pane
+//     line, prefix-match against the configured value) — deliberately
+//     without the NBSP-fold and box-border strip the Go matcher carries;
+//     those cover TUI rendering edge cases the ready row observed in
+//     production does not need, and keeping the script this small keeps it
+//     auditable by inspection in the alloc.
+//   - tmux.NudgeSession's submit sequence for the codex family: literal
+//     paste, a fixed debounce, then Escape+Enter as the submit unit,
+//     confirmed by polling the pane for codex's busy indicator and re-sent
+//     (without re-pasting) while the pane stays idle. This pack drives only
+//     Codex-shaped TUIs (agent-launch.sh's AGENT_CMD), so it hardcodes the
+//     codex family's own sequence rather than reimplementing gc's per-family
+//     dispatch (providerEnv / targetLooksLikeProvider) for one family.
 const primeScriptTemplate = `#!/bin/sh
 set -u
 DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
@@ -84,22 +118,66 @@ while [ "$elapsed" -le %[1]d ]; do
   sleep %[2]d
   elapsed=$((elapsed + %[2]d))
 done
+
+pane_busy() {
+  tmux capture-pane -p -t main 2>/dev/null | grep -q 'esc to interrupt'
+}
+
 if [ "$ready" -eq 1 ]; then
-  if tmux send-keys -t main -l -- "$(cat "$DIR/nudge.txt")" && tmux send-keys -t main Enter; then
-    date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ > "$DIR/prompted_at"
+  if ! tmux send-keys -t main -l -- "$(cat "$DIR/nudge.txt")"; then
+    printf 'nudge_failed\n' > "$DIR/status"
+    exit 0
+  fi
+  # gc's own paste-to-submit debounce (tmux.NudgeSession -> nudgeSubmitDebounce).
+  sleep %[3]s
+  confirmed=0
+  send=0
+  while [ "$send" -lt %[4]d ]; do
+    if [ "$send" -gt 0 ]; then
+      # Never re-send into a pane that already went busy - that would be a
+      # second submit of an already-started turn (submitEnterAndConfirm).
+      if pane_busy; then confirmed=1; break; fi
+      sleep %[5]s
+    fi
+    # codex's submit sequence is Escape THEN Enter, never a lone Enter: a
+    # send-keys burst lands as a bracketed paste, and codex reads a trailing
+    # lone Enter as a composer newline rather than submit.
+    tmux send-keys -t main Escape
+    tmux send-keys -t main Enter
+    poll=0
+    while [ "$poll" -lt %[6]d ]; do
+      if pane_busy; then confirmed=1; break; fi
+      sleep %[7]s
+      poll=$((poll + 1))
+    done
+    [ "$confirmed" -eq 1 ] && break
+    send=$((send + 1))
+  done
+  date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ > "$DIR/prompted_at"
+  if [ "$confirmed" -eq 1 ]; then
     printf 'delivered\n' > "$DIR/status"
   else
-    printf 'nudge_failed\n' > "$DIR/status"
+    printf 'submit_unconfirmed\n' > "$DIR/status"
   fi
 else
   printf 'not_ready\n' > "$DIR/status"
 fi
 `
 
-// primeScript is primeScriptTemplate with its budget/interval filled in — a
-// var rather than a const because it is built with fmt.Sprintf, but fixed at
+// seconds formats a millisecond count as the fractional-seconds argument
+// POSIX sleep accepts (coreutils sleep, present on the task image; not
+// busybox ash, which this pack does not target).
+func seconds(ms int) string {
+	return fmt.Sprintf("%g", float64(ms)/1000)
+}
+
+// primeScript is primeScriptTemplate with its tuning filled in — a var
+// rather than a const because it is built with fmt.Sprintf, but fixed at
 // init and never mutated afterward.
-var primeScript = fmt.Sprintf(primeScriptTemplate, primeReadyBudget, primeInterval)
+var primeScript = fmt.Sprintf(primeScriptTemplate,
+	primeReadyBudget, primeInterval,
+	seconds(primeSubmitDebounceMs), primeSubmitMaxSends, seconds(primeSubmitBackoffMs),
+	primeConfirmPollsPerSend, seconds(primeConfirmPollMs))
 
 // buildPrimeFiles returns the tar payload staged into
 // $NOMAD_SECRETS_DIR/gc-prime: the script, the resolved prompt text (never
@@ -242,9 +320,17 @@ func (l *lifecycle) syncPromptedMarker(ctx context.Context, sessionName string) 
 			delivered = time.Now().UTC()
 		}
 		b.PromptedAt = &delivered
-		b.PromptStatus = promptStatusDelivered
-	} else if status != "" {
+	}
+	if status != "" {
+		// The status file's own word wins (delivered / submit_unconfirmed /
+		// nudge_failed / not_ready, from run.sh) rather than being collapsed
+		// to "delivered" whenever a marker is present: run.sh writes
+		// prompted_at even on an unconfirmed submit (cr-gdeav.6.14, matching
+		// gc's own "handed to tmux" best-effort contract), so the marker
+		// alone cannot tell confirmed from best-effort.
 		b.PromptStatus = status
+	} else if marker != "" {
+		b.PromptStatus = promptStatusDelivered
 	}
 	if err := l.sidecar.save(*b); err != nil {
 		l.logDecision("startup-prime session=%s marker sync could not save: %v", sessionName, err)

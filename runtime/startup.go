@@ -56,6 +56,16 @@ const (
 	promptStatusDelivered   = "delivered"
 	promptStatusNotReady    = "not_ready"
 	promptStatusNudgeFailed = "nudge_failed"
+
+	// promptStatusSubmitUnconfirmed marks a detached prime window (prime.go)
+	// that pasted the nudge and sent its submit sequence (cr-gdeav.6.14) but
+	// never observed the agent's busy indicator within the confirm budget.
+	// gc's own local nudge path treats this identically — a stderr warning,
+	// not a start failure (cmd/gc's ErrNudgeSubmitUnconfirmed handling) —
+	// since the keystrokes did reach tmux; this pack records it distinctly
+	// from promptStatusDelivered rather than collapsing the two so an
+	// operator can tell "confirmed" from "best-effort" from the binding.
+	promptStatusSubmitUnconfirmed = "submit_unconfirmed"
 )
 
 // startupIO bundles the side effects the priming step performs against a live

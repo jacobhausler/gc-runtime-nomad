@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -76,5 +79,65 @@ func TestPrimeScriptSubmitsLikeGcsNudgeSession(t *testing.T) {
 	sendLoopIdx := strings.Index(script, "while [ \"$send\"")
 	if sendLoopIdx < 0 || sendLoopIdx > escapeIdx {
 		t.Fatal("primeScript's resend loop must wrap the submit sequence, guarding every re-send with a pane_busy re-check")
+	}
+}
+
+// TestPrimeStatusHonorsUnconfirmedSubmit pins syncPromptedMarker's other half
+// of cr-gdeav.6.14: a detached window that pasted and submitted but never
+// observed the busy indicator writes prompted_at (the keystrokes did reach
+// tmux, gc's own "handed to tmux" best-effort contract) alongside
+// status=submit_unconfirmed, and that status word - not a hardcoded
+// "delivered" - is what must land on the binding.
+func TestPrimeStatusHonorsUnconfirmedSubmit(t *testing.T) {
+	l, _ := newTestLifecycle(t)
+	ctx := context.Background()
+	const session = "sess-unconfirmed-submit"
+	withAgentLaunchScript(t, "true")
+
+	fakeBin := t.TempDir()
+	fakeTmux := filepath.Join(fakeBin, "tmux")
+	if err := os.WriteFile(fakeTmux, []byte(`#!/bin/sh
+case "$1" in
+new-session|has-session) exit 0 ;;
+list-panes) exit 1 ;;
+list-windows) printf 'main\n' ;;
+new-window) exit 0 ;;
+*) exit 1 ;;
+esac
+`), 0o700); err != nil {
+		t.Fatalf("write fake tmux: %v", err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cfg := stageConfig{Nudge: "hi", ReadyPromptPrefix: "› Ask Codex"}
+	if err := l.opProvisionWithConfig(ctx, session, cfg); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	launch := []string{"/bin/sh", "-c", `'tmux' 'new-session' '-d' '-s' 'main' 'sleep 60'`}
+	if code, out, err := l.opExec(ctx, session, launch); err != nil || code != 0 {
+		t.Fatalf("exec transport launch = (%d, %q, %v)", code, out, err)
+	}
+
+	// Simulate the detached window's other outcome: it pasted and submitted,
+	// but never observed codex's busy indicator within its confirm budget.
+	if code, out, err := l.opExec(ctx, session, []string{"/bin/sh", "-c",
+		`date -u +%Y-%m-%dT%H:%M:%SZ > "$NOMAD_SECRETS_DIR/gc-prime/prompted_at" && printf '` + promptStatusSubmitUnconfirmed + `' > "$NOMAD_SECRETS_DIR/gc-prime/status"`}); err != nil || code != 0 {
+		t.Fatalf("write marker: (%d, %q, %v)", code, out, err)
+	}
+
+	running, err := l.opIsRunning(ctx, session)
+	if err != nil || !running {
+		t.Fatalf("opIsRunning = (%v, %v), want (true, nil)", running, err)
+	}
+
+	b, ok, err := l.sidecar.load(session)
+	if err != nil || !ok {
+		t.Fatalf("sidecar.load = (%+v, %v, %v)", b, ok, err)
+	}
+	if b.PromptedAt == nil {
+		t.Fatal("an unconfirmed-but-submitted attempt must still record prompted_at (keystrokes reached tmux)")
+	}
+	if b.PromptStatus != promptStatusSubmitUnconfirmed {
+		t.Fatalf("prompt_status = %q, want %q (the status file's own word, not a hardcoded \"delivered\")", b.PromptStatus, promptStatusSubmitUnconfirmed)
 	}
 }
