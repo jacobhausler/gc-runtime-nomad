@@ -141,7 +141,7 @@ func TestExtraSecretKeysStagedFromProcessEnv(t *testing.T) {
 	// It must also never ride the launch command's argv, regardless of the
 	// fact that it was sourced outside cfg.Env — an extra secret key is
 	// always secret by declaration.
-	cmd := buildLaunchCommand(cfg.Env)
+	cmd := buildLaunchCommand(cfg.Env, "")
 	if strings.Contains(strings.Join(cmd, " "), secretValue) {
 		t.Fatalf("launch command %v carries the extra secret value", cmd)
 	}
@@ -401,7 +401,7 @@ func TestBuildLaunchCommandClassifiesEnv(t *testing.T) {
 	cmd := buildLaunchCommand(map[string]string{
 		"GC_SESSION":     "safe-value",
 		"OPENAI_API_KEY": "must-not-appear-on-argv",
-	})
+	}, "")
 	joined := strings.Join(cmd, " ")
 	if !strings.Contains(joined, "GC_SESSION=safe-value") {
 		t.Fatalf("launch command %v missing argvSafe env GC_SESSION", cmd)
@@ -414,7 +414,7 @@ func TestBuildLaunchCommandClassifiesEnv(t *testing.T) {
 // TestBuildLaunchCommandSourcesStagedEnvironment ensures launch imports the
 // values staged under NOMAD_SECRETS_DIR before creating tmux.
 func TestBuildLaunchCommandSourcesStagedEnvironment(t *testing.T) {
-	cmd := buildLaunchCommand(nil)
+	cmd := buildLaunchCommand(nil, "")
 	joined := strings.Join(cmd, " ")
 	if !strings.Contains(joined, `NOMAD_SECRETS_DIR/env.sh`) {
 		t.Fatalf("launch command %v does not source staged environment", cmd)
@@ -439,7 +439,7 @@ func withAgentLaunchScript(t *testing.T, script string) {
 // and the seam's rollback path.
 func TestBuildLaunchCommandDefaultIsBareTmuxPlaceholder(t *testing.T) {
 	withAgentLaunchScript(t, "")
-	cmd := buildLaunchCommand(nil)
+	cmd := buildLaunchCommand(nil, "")
 	if got, want := cmd[len(cmd)-1], tmuxSessionName; got != want {
 		t.Fatalf("launch command %v ends with %q, want tmux session name %q as the last argv (no configured pane command)", cmd, got, want)
 	}
@@ -461,7 +461,7 @@ fi
 exec codex`
 	withAgentLaunchScript(t, script)
 
-	cmd := buildLaunchCommand(map[string]string{"GC_SESSION": "safe-value"})
+	cmd := buildLaunchCommand(map[string]string{"GC_SESSION": "safe-value"}, "")
 	joined := strings.Join(cmd, " ")
 
 	if !strings.Contains(joined, "/mnt/nomad/codex/bin/current") {
@@ -474,10 +474,20 @@ exec codex`
 		t.Fatalf("launch command %v unexpectedly carries credential-shaped content", cmd)
 	}
 	// The pane's initial command is the configured script with the staged
-	// environment sourced ahead of it (cr-gdeav.6.8): the prelude plus the
-	// script, still exactly one /bin/sh -c argument.
-	if got, want := cmd[len(cmd)-3:], []string{"/bin/sh", "-c", paneStagedEnvPrelude + script}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("launch command %v does not exec the configured agent script as the tmux pane's initial command", cmd)
+	// environment sourced ahead of it (cr-gdeav.6.8) and the pane cwd chosen
+	// in between (cr-gdeav.6.10), still exactly one /bin/sh -c argument.
+	body := cmd[len(cmd)-1]
+	if cmd[len(cmd)-3] != "/bin/sh" || cmd[len(cmd)-2] != "-c" {
+		t.Fatalf("launch command %v does not end in one /bin/sh -c pane body", cmd)
+	}
+	if !strings.HasPrefix(body, paneStagedEnvPrelude) {
+		t.Fatalf("pane body %q does not start by sourcing the staged environment", body)
+	}
+	if !strings.HasSuffix(body, script) {
+		t.Fatalf("pane body %q does not end with the configured agent script", body)
+	}
+	if !strings.Contains(body, paneCwdPrelude("")) {
+		t.Fatalf("pane body %q does not choose a cwd between the env prelude and the agent", body)
 	}
 }
 
@@ -500,7 +510,7 @@ func TestLaunchCommandPaneSourcesStagedEnv(t *testing.T) {
 		{"new-session", "-d", "-s", tmuxSessionName},
 		{"respawn-pane", "-k", "-t", tmuxSessionName},
 	} {
-		cmd := buildLaunchCommandForTmux(nil, tmuxArgs)
+		cmd := buildLaunchCommandForTmux(nil, tmuxArgs, "")
 		if len(cmd) < 3 || cmd[len(cmd)-3] != "/bin/sh" || cmd[len(cmd)-2] != "-c" {
 			t.Fatalf("%s: launch command %v does not end in a /bin/sh -c pane body", tmuxArgs[0], cmd)
 		}
@@ -543,4 +553,48 @@ func (r *requestRecorder) dump() string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return strings.Join(r.logs, "\n---\n")
+}
+
+// TestLaunchCommandPaneCdToStagedWorkDir is deliverable 3 of cr-gdeav.6.10:
+// attempt 3's agent ran in "/" because nothing ever cd'd the pane, and gc's
+// cfg.WorkDir is a supervisor-host path that usually does not exist inside the
+// alloc. The pane must therefore try the staged work dir first and fall back to
+// the per-alloc scratch directory in the SAME shell, so neither a rig checkout
+// that is present nor one that is absent can fail the launch. Unit tier: it
+// inspects the built argv and must not exec tmux.
+func TestLaunchCommandPaneCdToStagedWorkDir(t *testing.T) {
+	const script = `. /mnt/nomad/gc/agent-launch.sh`
+	withAgentLaunchScript(t, script)
+
+	cmd := buildLaunchCommand(nil, "/tmp/staged-rig")
+	body := cmd[len(cmd)-1]
+	wantCd := `cd '/tmp/staged-rig' 2>/dev/null || `
+	if !strings.Contains(body, wantCd) {
+		t.Fatalf("pane body %q does not cd to the staged work dir first", body)
+	}
+	scratch := `cd "$NOMAD_ALLOC_DIR/work"`
+	idxCd := strings.Index(body, wantCd)
+	if !strings.Contains(body, scratch) {
+		t.Fatalf("pane body %q has no scratch-directory fallback after the staged work dir", body)
+	}
+	if strings.Index(body, scratch) < idxCd {
+		t.Fatalf("pane body %q tries the scratch directory before the staged work dir", body)
+	}
+	if !strings.HasSuffix(body, script) {
+		t.Fatalf("pane body %q no longer ends with the agent script the cd must precede", body)
+	}
+}
+
+// TestLaunchCommandPaneCdQuotesWorkDir pins that a work dir is data, not
+// pane-shell code.
+func TestLaunchCommandPaneCdQuotesWorkDir(t *testing.T) {
+	withAgentLaunchScript(t, `exec codex`)
+	cmd := buildLaunchCommand(nil, "/tmp/it's a trap;touch /tmp/pwned")
+	body := cmd[len(cmd)-1]
+	if strings.Contains(body, "cd /tmp/it") {
+		t.Fatalf("pane body %q interpolates the work dir unquoted", body)
+	}
+	if !strings.Contains(body, shellQuote("/tmp/it's a trap;touch /tmp/pwned")) {
+		t.Fatalf("pane body %q does not carry the work dir single-quoted", body)
+	}
 }

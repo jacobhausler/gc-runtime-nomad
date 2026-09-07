@@ -39,6 +39,36 @@ type stageConfig struct {
 	WorkDir string            `json:"work_dir,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`
 	Files   []stageFile       `json:"files,omitempty"`
+
+	// The launch/priming half of the same `start` payload (cr-gdeav.6.10).
+	// The fields above are the STAGING subset this pack originally read;
+	// these are the ones gc's marshalStartConfig
+	// (internal/runtime/exec/json.go:26-67) has been sending all along and
+	// this pack dropped on the floor — which is why an ordinary
+	// nomad-canary launch produced a live agent that nothing ever primed
+	// (cr-gdeav.6.9 receipt §1.4: "command, nudge, process_names, ready_*
+	// are silently discarded"). Field names are gc's, verbatim, and
+	// startup_test.go pins them against gc's own struct, so a rename
+	// upstream is a test failure here rather than another silent drop.
+	Command           string   `json:"command,omitempty"`
+	Nudge             string   `json:"nudge,omitempty"`
+	ProcessNames      []string `json:"process_names,omitempty"`
+	ReadyPromptPrefix string   `json:"ready_prompt_prefix,omitempty"`
+	ReadyDelayMs      int      `json:"ready_delay_ms,omitempty"`
+
+	// PromptSuffix / PromptFlag are named for payload gc does NOT serialize
+	// today: both exist on runtime.Config
+	// (internal/runtime/runtime.go:660-671) and the native tmux provider
+	// consumes them in-process (internal/runtime/tmux/adapter.go:1462-1483),
+	// but marshalStartConfig has no such key — so under the default
+	// `prompt_mode=arg` an RPP lane CANNOT receive the startup prompt on
+	// argv at all. That is the gc-side gap the EDGE twin carries
+	// (cr-gdeav.6.9 receipt §4). Decoding them costs nothing and lets the
+	// pack pick the prompt up with no further change if upstream fix (a) —
+	// put them on the wire — lands; until then the provider must set
+	// `prompt_mode = "none"` so the prompt arrives in Nudge.
+	PromptSuffix string `json:"prompt_suffix,omitempty"`
+	PromptFlag   string `json:"prompt_flag,omitempty"`
 }
 
 // readStageConfig decodes a stageConfig from stdin. Empty/whitespace-only
@@ -58,6 +88,60 @@ func readStageConfig(stdin io.Reader) (stageConfig, error) {
 		return stageConfig{}, fmt.Errorf("decoding start config: %w", err)
 	}
 	return cfg, nil
+}
+
+// startupPrompt returns the text this pack owes the launched pane as its
+// first turn, and which wire field it came from. Empty text means nothing is
+// owed — there was no startup prompt, or gc routed it to argv (the default
+// `prompt_mode=arg`), which it cannot deliver to an RPP lane.
+//
+// Nudge wins: it is the field gc actually sends, and under
+// `prompt_mode="none"` the startup prompt is already prepended to the
+// agent's configured nudge (cmd/gc/prompt_delivery.go:43-45). PromptSuffix is
+// consulted only as the forward-compat branch documented on the field above.
+func (c stageConfig) startupPrompt() (text, source string) {
+	if strings.TrimSpace(c.Nudge) != "" {
+		return c.Nudge, "nudge"
+	}
+	if strings.TrimSpace(c.PromptSuffix) != "" {
+		return unshellQuote(c.PromptSuffix), "prompt_suffix"
+	}
+	return "", ""
+}
+
+// unshellQuote decodes one single-quoted shell word back to its value — the
+// inverse of this file's shellQuote, and the same quote-escaping grammar
+// parseExecWireArgv already decodes on the exec wire. gc builds PromptSuffix
+// with shellquote.Quote, so an undecoded suffix would type literal quote
+// characters into the agent. Anything outside that grammar is returned
+// verbatim rather than guessed at.
+func unshellQuote(word string) string {
+	if len(word) < 2 || word[0] != '\'' {
+		return word
+	}
+	rest := word[1:]
+	var b strings.Builder
+	for rest != "" {
+		end := strings.IndexByte(rest, '\'')
+		if end < 0 {
+			return word
+		}
+		b.WriteString(rest[:end])
+		rest = rest[end+1:]
+		if rest == "" {
+			return b.String()
+		}
+		if !strings.HasPrefix(rest, `\'`) {
+			return word
+		}
+		b.WriteByte('\'')
+		rest = rest[2:]
+		if rest == "" || rest[0] != '\'' {
+			return word
+		}
+		rest = rest[1:]
+	}
+	return word
 }
 
 // envArgvSafeNames is this pack's reimplementation of gc's envArgvSafe

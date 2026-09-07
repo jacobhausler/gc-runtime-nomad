@@ -254,6 +254,29 @@ exec "$@"`
 const paneStagedEnvPrelude = `if [ -f "$NOMAD_SECRETS_DIR/env.sh" ]; then . "$NOMAD_SECRETS_DIR/env.sh"; fi; ` +
 	`unset GC_CITY GC_CITY_PATH GC_RIG; `
 
+// paneCwdPrelude is the shell the launched pane runs to choose its working
+// directory (cr-gdeav.6.10 deliverable 3). Nothing cd'd the pane before, so
+// it inherited the exec driver's cwd - "/" on the D3 attempt-3 canary, which
+// is why a rig-shaped session could not run one git command in the box.
+// The rule: use gc's work_dir when the alloc actually has it (gc sends its
+// OWN WorkDir, usually a supervisor-host path that does not exist inside the
+// alloc, so "exists" is the test, not "was sent"); otherwise use a per-alloc
+// scratch directory under $NOMAD_ALLOC_DIR, which is writable, is per-session
+// (one alloc per session job), and sits beside the logs/ the Vector shipper
+// already reads. Both legs degrade to "stay where you are" rather than fail
+// the launch: an agent that cannot start is worse than an agent in an
+// unexpected directory, and the directory it got is recorded in the binding.
+//
+// workDir is gc/deployment input, never a credential, and shellQuote keeps it
+// data when it reaches the pane's shell.
+func paneCwdPrelude(workDir string) string {
+	scratch := `if [ -n "${NOMAD_ALLOC_DIR:-}" ]; then mkdir -p "$NOMAD_ALLOC_DIR/work" 2>/dev/null && cd "$NOMAD_ALLOC_DIR/work" 2>/dev/null; fi; `
+	if wd := strings.TrimSpace(workDir); wd != "" {
+		return "cd " + shellQuote(wd) + " 2>/dev/null || " + scratch
+	}
+	return scratch
+}
+
 // agentLaunchScript is the POSIX shell script the launch command execs
 // inside the tmux pane once the staged environment is sourced — the bounded
 // seam a deployment uses to turn the placeholder session into a real agent
@@ -322,8 +345,8 @@ func parseExtraSecretKeys(raw string) []string {
 // deployment-owned shell logic (PATH/HOME wiring) that reads secret bytes
 // out of the already-staged $NOMAD_SECRETS_DIR files at pane-start time, so
 // nothing secret ever rides this argv either.
-func buildLaunchCommand(env map[string]string) []string {
-	return buildLaunchCommandForTmux(env, []string{"new-session", "-d", "-s", tmuxSessionName})
+func buildLaunchCommand(env map[string]string, workDir string) []string {
+	return buildLaunchCommandForTmux(env, []string{"new-session", "-d", "-s", tmuxSessionName}, workDir)
 }
 
 // buildLaunchCommandForTmux uses the pack-owned staged bootstrap with the
@@ -331,7 +354,7 @@ func buildLaunchCommand(env map[string]string) []string {
 // handshake, not the provider's bootstrap command: preserve whether GC asked
 // for a new session or a respawn, while sourcing the staged environment and
 // applying the deployment-owned agent launch script in either case.
-func buildLaunchCommandForTmux(env map[string]string, tmuxArgs []string) []string {
+func buildLaunchCommandForTmux(env map[string]string, tmuxArgs []string, workDir string) []string {
 	cmd := []string{"/bin/sh", "-c", launchEnvScript, "gc-runtime-nomad-launch", "tmux"}
 	cmd = append(cmd, tmuxArgs...)
 	keys := make([]string, 0, len(env))
@@ -347,7 +370,12 @@ func buildLaunchCommandForTmux(env map[string]string, tmuxArgs []string) []strin
 	if agentLaunchScript != "" {
 		// The pane sources the staged environment itself (see
 		// paneStagedEnvPrelude): the client-side wrapper cannot reach it.
-		cmd = append(cmd, "/bin/sh", "-c", paneStagedEnvPrelude+agentLaunchScript)
+		// The cwd prelude runs after it and before the bootstrap, so the
+		// deployment wiring is in force and the agent still starts in a
+		// directory the alloc actually has (paneCwdPrelude). With no bootstrap
+		// configured the pane stays the placeholder shell it always was, cwd
+		// included - that path is the seam's rollback.
+		cmd = append(cmd, "/bin/sh", "-c", paneStagedEnvPrelude+paneCwdPrelude(workDir)+agentLaunchScript)
 	}
 	return cmd
 }
@@ -486,7 +514,7 @@ func (l *lifecycle) opStartWithConfig(ctx context.Context, sessionName string, c
 			if err := l.stageTracked(ctx, sessionName, cfg); err != nil {
 				return err
 			}
-			return l.markLaunched(ctx, sessionName, cfg.Env)
+			return l.markLaunched(ctx, sessionName, cfg)
 		}
 		// Reaped: fall through to a fresh dispatch (same as the provision
 		// door above).
@@ -498,7 +526,7 @@ func (l *lifecycle) opStartWithConfig(ctx context.Context, sessionName string, c
 	if err := l.stageTracked(ctx, sessionName, cfg); err != nil {
 		return err
 	}
-	return l.markLaunched(ctx, sessionName, cfg.Env)
+	return l.markLaunched(ctx, sessionName, cfg)
 }
 
 // liveChild reports sessionName's sidecar binding when that binding names a
@@ -655,7 +683,7 @@ func (l *lifecycle) adoptExisting(ctx context.Context, sessionName string, b bin
 		return true, nil
 	case adoptSelfHealLaunched:
 		l.logDecision("%s %q: path=self-heal-launched-marker — %s", op, sessionName, why)
-		if err := l.confirmLaunched(ctx, sessionName); err != nil {
+		if err := l.confirmLaunched(ctx, sessionName, b.WorkDir); err != nil {
 			return false, err
 		}
 		return false, fmt.Errorf("session %q already exists", sessionName)
@@ -751,7 +779,7 @@ func (l *lifecycle) opRelaunch(ctx context.Context, sessionName string) error {
 	// No fresh env rides a relaunch (04 §7: it re-execs into the SAME alloc
 	// with no fresh dispatch) — the box's workspace/secrets were already
 	// staged at start/provision time and are still there.
-	return l.markLaunched(ctx, sessionName, nil)
+	return l.markLaunched(ctx, sessionName, stageConfig{})
 }
 
 // opExec runs command inside sessionName's current alloc over the Nomad
@@ -1093,8 +1121,8 @@ func (l *lifecycle) findOrphanByNonce(ctx context.Context, sessionName, nonce st
 // launch execs buildLaunchCommand(env) into sessionName's current alloc —
 // the detached tmux-client call that starts the agent (04 §3 provision row
 // launch invariant).
-func (l *lifecycle) launch(ctx context.Context, sessionName string, env map[string]string) error {
-	return l.launchWithCommand(ctx, sessionName, buildLaunchCommand(env))
+func (l *lifecycle) launch(ctx context.Context, sessionName string, env map[string]string, workDir string) error {
+	return l.launchWithCommand(ctx, sessionName, buildLaunchCommand(env, workDir))
 }
 
 // launchWithCommand executes a pack-owned detached tmux launch command into
@@ -1148,14 +1176,30 @@ func (l *lifecycle) capturePanePID(ctx context.Context, sessionName string) (int
 // markLaunched launches sessionName's agent and, only once that succeeds,
 // records the launched marker (and the pane pid the probe will later
 // kill -0) in the sidecar binding — shared by opStart (provision then
-// launch) and opRelaunch (launch only, no re-dispatch). env's argvSafe
-// subset rides the launch command (buildLaunchCommand); opRelaunch passes
-// nil since no fresh env accompanies a relaunch.
-func (l *lifecycle) markLaunched(ctx context.Context, sessionName string, env map[string]string) error {
-	if err := l.launch(ctx, sessionName, env); err != nil {
+// launch) and opRelaunch (launch only, no re-dispatch). cfg's argvSafe env subset rides the launch command
+// (buildLaunchCommand) and cfg.WorkDir chooses the pane's cwd
+// (paneCwdPrelude). opRelaunch passes the zero config, since no fresh env
+// or work dir accompanies a relaunch, and falls back to the WorkDir the
+// binding recorded. Once the launch is recorded, startupPrime owes the
+// pane its first prompt exactly once per session (startup.go) - which is
+// the whole point of this call site: it is the only place in the pack
+// that runs after every successful launch.
+func (l *lifecycle) markLaunched(ctx context.Context, sessionName string, cfg stageConfig) error {
+	workDir := cfg.WorkDir
+	if workDir == "" {
+		// A relaunch - or a start whose caller sent no work_dir - still gets the
+		// directory the box was first launched in, instead of "/".
+		if b, ok, err := l.sidecar.load(sessionName); err == nil && ok {
+			workDir = b.WorkDir
+		}
+	}
+	if err := l.launch(ctx, sessionName, cfg.Env, workDir); err != nil {
 		return err
 	}
-	return l.confirmLaunched(ctx, sessionName)
+	if err := l.confirmLaunched(ctx, sessionName, workDir); err != nil {
+		return err
+	}
+	return l.startupPrime(ctx, sessionName, cfg)
 }
 
 // markTransportLaunched preserves GC's canonical tmux transport verb while
@@ -1165,16 +1209,20 @@ func (l *lifecycle) markTransportLaunched(ctx context.Context, sessionName strin
 	if len(transport) != 6 {
 		return fmt.Errorf("invalid transport launch argv length %d", len(transport))
 	}
-	if err := l.launchWithCommand(ctx, sessionName, buildLaunchCommandForTmux(nil, transport[1:5])); err != nil {
+	workDir := ""
+	if b, ok, err := l.sidecar.load(sessionName); err == nil && ok {
+		workDir = b.WorkDir
+	}
+	if err := l.launchWithCommand(ctx, sessionName, buildLaunchCommandForTmux(nil, transport[1:5], workDir)); err != nil {
 		return err
 	}
-	return l.confirmLaunched(ctx, sessionName)
+	return l.confirmLaunched(ctx, sessionName, workDir)
 }
 
 // confirmLaunched records a launch that has already succeeded. Its caller
 // holds sessionName's lock: opStart/markLaunched hold it end-to-end, while
 // opExec acquires it only for gc's canonical transport-launch command.
-func (l *lifecycle) confirmLaunched(ctx context.Context, sessionName string) error {
+func (l *lifecycle) confirmLaunched(ctx context.Context, sessionName string, workDir string) error {
 	// Best-effort: a failure recording the pid does not fail the launch
 	// itself, since the tmux session already exists and answers exec — it
 	// just leaves the probe without a pid to kill -0 (falls back to a
@@ -1189,6 +1237,9 @@ func (l *lifecycle) confirmLaunched(ctx context.Context, sessionName string) err
 	}
 	b.Launched = true
 	b.AgentPID = pid
+	if workDir != "" && b.WorkDir != workDir {
+		b.WorkDir = workDir
+	}
 	return l.sidecar.save(*b)
 }
 

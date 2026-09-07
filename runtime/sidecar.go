@@ -70,6 +70,32 @@ type binding struct {
 	// before this field existed; the probe falls back to a tmux-session-only
 	// check in that case.
 	AgentPID int `json:"agent_pid,omitempty"`
+
+	// WorkDir is the pane working directory the launch was given (cr-gdeav.6.10
+	// deliverable 3). gc's cfg.WorkDir is a Mac path — the rig's checkout on the
+	// supervisor host — which does not exist inside the alloc, so the pack
+	// records what it actually used and relaunch/transport-launch reuse it
+	// rather than falling back to the exec driver's cwd ("/").
+	WorkDir string `json:"work_dir,omitempty"`
+
+	// PromptedAt receipts the moment the startup prompt was actually typed
+	// into the pane (cr-gdeav.6.10). It is what makes the delivery exactly-once
+	// across processes: gc execs this binary fresh per op, so a retried
+	// `start`, an adopt-reuse, and a relaunch are three separate chances to
+	// type the same prompt twice — only the sidecar outlives them. Absent
+	// means never delivered; see PromptStatus for which failure that was.
+	PromptedAt *time.Time `json:"prompted_at,omitempty"`
+
+	// PromptStatus is the last startup-priming outcome: "delivered",
+	// "not_ready" (the wait budget ran out with the agent never showing its
+	// prompt), or "nudge_failed" (ready, but typing into the pane errored).
+	// It exists because gc's GC_STARTUP_PROMPT_DELIVERED env marker reports
+	// that the prompt was ROUTED to a delivery mechanism
+	// (cmd/gc/prompt_delivery.go:49), not that anything reached the agent —
+	// for an RPP lane those two were indistinguishable, which is how
+	// cr-gdeav.6.9's canary read as primed for eight minutes while sitting
+	// at an empty prompt.
+	PromptStatus string `json:"prompt_status,omitempty"`
 }
 
 // sidecar is a file-based KV under a directory: one JSON file per session,
