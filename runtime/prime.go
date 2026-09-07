@@ -43,10 +43,22 @@ const (
 	primeScriptFile  = "run.sh"
 	primeNudgeFile   = "nudge.txt"
 	primePrefixFile  = "ready_prefix.txt"
+	primeDelayFile   = "ready_delay_ms.txt"
 	primeMarkerFile  = "prompted_at"
 	primeStatusFile  = "status"
 	primeReadyBudget = 180 // seconds; mirrors startupReadyBudgetDefault
 	primeInterval    = 2   // seconds; mirrors startupReadyIntervalDefault
+
+	// primeDefaultReadyDelayMs is the settle applied AFTER readiness when the
+	// wire carries no ready_delay_ms (cr-gdeav.6.16). This is a different
+	// role than gc's own ReadyDelayMs, which is a PRE-readiness fallback
+	// delay used only when no ready_prompt_prefix is configured at all
+	// (WaitForRuntimeReady, tmux.go:3388-3400) - a strict superset of that
+	// semantics, documented rather than silently diverging: here it is
+	// always honored, after the readiness rule below is satisfied, whether
+	// or not a prefix is configured, because attempt 9 showed readiness
+	// itself is not the same instant as safe-to-type (below).
+	primeDefaultReadyDelayMs = 1500
 
 	// Submit tuning below is gc's own (internal/runtime/tmux/tmux.go,
 	// nudgeSubmitDebounce / submitEnterAndConfirm's consts), copied verbatim
@@ -85,7 +97,22 @@ const (
 //     without the NBSP-fold and box-border strip the Go matcher carries;
 //     those cover TUI rendering edge cases the ready row observed in
 //     production does not need, and keeping the script this small keeps it
-//     auditable by inspection in the alloc.
+//     auditable by inspection in the alloc. cr-gdeav.6.16 adds two more
+//     conditions gc's own rule has no need for, because gc never observed
+//     this failure mode locally: Codex paints its ready row
+//     ("› Ask Codex to do anything") in the SAME first frame as
+//     "model: loading" / "directory: loading" — attempt 9's captured
+//     agent.stdout (testdata/codex-loading-not-ready.raw) shows both at
+//     once — so a prefix-only match fires while Codex is still inside its
+//     startup terminal-query/discard window, and typing there is what
+//     killed it (cr-gdeav.6.14's crash, again). Readiness is now: the ready
+//     prefix row is present, AND the pane contains no "loading" marker
+//     (model:/directory: have resolved), AND the capture is IDENTICAL to
+//     the previous poll (one full interval of no repaint at all - the
+//     screen has actually settled, not merely between two different
+//     "loading" frames). Only then is ready_delay_ms honored as a POST-ready
+//     settle before anything is typed (primeDefaultReadyDelayMs above if the
+//     wire sent none) - a strict superset of gc's own ReadyDelayMs role.
 //   - tmux.NudgeSession's submit sequence for the codex family: literal
 //     paste, a fixed debounce, then Escape+Enter as the submit unit,
 //     confirmed by polling the pane for codex's busy indicator and re-sent
@@ -98,23 +125,48 @@ set -u
 DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 PREFIX=""
 if [ -f "$DIR/ready_prefix.txt" ]; then PREFIX="$(cat "$DIR/ready_prefix.txt")"; fi
-elapsed=0
-ready=0
-while [ "$elapsed" -le %[1]d ]; do
-  if [ -z "$PREFIX" ]; then
-    ready=1
-  else
-    pane="$(tmux capture-pane -p -t main 2>/dev/null || true)"
-    if printf '%%s\n' "$pane" | awk -v p="$PREFIX" '{
+DELAY_MS=%[8]d
+if [ -f "$DIR/ready_delay_ms.txt" ]; then
+  staged="$(cat "$DIR/ready_delay_ms.txt")"
+  case "$staged" in ''|*[!0-9]*) : ;; *) DELAY_MS="$staged" ;; esac
+fi
+
+# pane_ready FILE: exit 0 when FILE (a tmux capture-pane -p rendering)
+# shows the configured ready prefix AND carries no "loading" marker
+# (cr-gdeav.6.16 - Codex paints its ready row in the SAME frame as
+# "model: loading"/"directory: loading", so the prefix alone is not
+# enough). PREFIX empty (no ready_prompt_prefix configured) skips the
+# prefix half only, matching the Go matcher's own fallback. Named and kept
+# this small on purpose: it is the exact unit TestPrimeReadinessRejects...
+# extracts and runs against real captured fixtures.
+pane_ready() {
+  f="$1"
+  if [ -n "$PREFIX" ] && ! awk -v p="$PREFIX" '{
       line=$0
       sub(/^[ \t]+/, "", line)
       sub(/[ \t]+$/, "", line)
       if (length(p) <= length(line) && substr(line, 1, length(p)) == p) found=1
-    } END { exit !found }'; then
-      ready=1
-    fi
+    } END { exit !found }' "$f"; then
+    return 1
   fi
-  [ "$ready" -eq 1 ] && break
+  if grep -q 'loading' "$f"; then
+    return 1
+  fi
+  return 0
+}
+
+PANEFILE="$DIR/.pane_now"
+PREVFILE="$DIR/.pane_prev"
+: > "$PREVFILE"
+elapsed=0
+ready=0
+while [ "$elapsed" -le %[1]d ]; do
+  tmux capture-pane -p -t main >"$PANEFILE" 2>/dev/null || : >"$PANEFILE"
+  if pane_ready "$PANEFILE" && cmp -s "$PANEFILE" "$PREVFILE"; then
+    ready=1
+    break
+  fi
+  cp "$PANEFILE" "$PREVFILE"
   sleep %[2]d
   elapsed=$((elapsed + %[2]d))
 done
@@ -124,6 +176,8 @@ pane_busy() {
 }
 
 if [ "$ready" -eq 1 ]; then
+  settle="$(awk -v ms="$DELAY_MS" 'BEGIN{printf "%%.3f", ms/1000}')"
+  sleep "$settle"
   if ! tmux send-keys -t main -l -- "$(cat "$DIR/nudge.txt")"; then
     printf 'nudge_failed\n' > "$DIR/status"
     exit 0
@@ -177,17 +231,29 @@ func seconds(ms int) string {
 var primeScript = fmt.Sprintf(primeScriptTemplate,
 	primeReadyBudget, primeInterval,
 	seconds(primeSubmitDebounceMs), primeSubmitMaxSends, seconds(primeSubmitBackoffMs),
-	primeConfirmPollsPerSend, seconds(primeConfirmPollMs))
+	primeConfirmPollsPerSend, seconds(primeConfirmPollMs), primeDefaultReadyDelayMs)
 
 // buildPrimeFiles returns the tar payload staged into
 // $NOMAD_SECRETS_DIR/gc-prime: the script, the resolved prompt text (never
 // cfg.Env/Files, same rule promptSubset already applies), and the readiness
 // prefix the script polls for.
-func buildPrimeFiles(text, readyPromptPrefix string) []stageFile {
+// readyDelayMs computes the settle to write to ready_delay_ms.txt: the wire
+// value, when positive, else primeDefaultReadyDelayMs. run.sh reads the file
+// but falls back to the same default if the file is absent or unparsable, so
+// this is belt-and-suspenders rather than the only place the default lives.
+func readyDelayMs(wireValue int) int {
+	if wireValue > 0 {
+		return wireValue
+	}
+	return primeDefaultReadyDelayMs
+}
+
+func buildPrimeFiles(text, readyPromptPrefix string, readyDelayMsValue int) []stageFile {
 	return []stageFile{
 		{Path: primeScriptFile, Content: []byte(primeScript), Mode: 0o755},
 		{Path: primeNudgeFile, Content: []byte(text), Mode: 0o600},
 		{Path: primePrefixFile, Content: []byte(readyPromptPrefix), Mode: 0o600},
+		{Path: primeDelayFile, Content: []byte(fmt.Sprintf("%d", readyDelayMs(readyDelayMsValue))), Mode: 0o600},
 	}
 }
 
@@ -223,7 +289,7 @@ func (l *lifecycle) startupPrimeDetached(ctx context.Context, sessionName string
 		return nil // already running, or finished - syncPromptedMarker will catch that
 	}
 
-	files := buildPrimeFiles(text, cfg.ReadyPromptPrefix)
+	files := buildPrimeFiles(text, cfg.ReadyPromptPrefix, cfg.ReadyDelayMs)
 	data, err := buildTar(files)
 	if err != nil {
 		return fmt.Errorf("building prime script for %q: %w", sessionName, err)

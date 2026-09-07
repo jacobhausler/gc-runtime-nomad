@@ -191,9 +191,16 @@ func runPaneReady(t *testing.T, fn, prefix string, fixture []byte) bool {
 // immediately and types into Codex's startup terminal-query/discard window.
 //
 // pane_ready() must reject that frame (prefix present, but "loading" is
-// still on screen) and accept testdata/codex-startup-pane.raw's frame
-// (attempt 4, fully resolved: "model: qwen3.8-27b-nvfp4 medium",
-// "directory: /alloc/work", "permissions: YOLO mode", no "loading" anywhere).
+// still on screen) and accept testdata/codex-loaded-ready.raw's frame - the
+// FINAL redraw sliced out of attempt 4's own capture
+// (testdata/codex-startup-pane.raw, already in the tree and used by
+// startup_ready_pane_test.go), once the model has resolved: "model:
+// qwen3.8-27b-nvfp4 medium", "directory: /alloc/work", "permissions: YOLO
+// mode", no "loading" anywhere. It has to be sliced to the final redraw
+// rather than reusing the whole multi-frame capture verbatim: that capture
+// is the TUI's entire repaint HISTORY, "loading" mentions from its own
+// earlier frames included, whereas a real `tmux capture-pane -p` (what
+// pane_ready actually reads in the box) only ever shows the CURRENT frame.
 func TestPrimeReadinessRejectsLoadingFrameAcceptsLoadedFrame(t *testing.T) {
 	fn, ok := extractPaneReadyFunc(primeScript)
 	if !ok {
@@ -204,7 +211,7 @@ func TestPrimeReadinessRejectsLoadingFrameAcceptsLoadedFrame(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read attempt-9 loading fixture: %v", err)
 	}
-	loaded, err := os.ReadFile("testdata/codex-startup-pane.raw")
+	loaded, err := os.ReadFile("testdata/codex-loaded-ready.raw")
 	if err != nil {
 		t.Fatalf("read attempt-4 loaded fixture: %v", err)
 	}
@@ -218,8 +225,32 @@ func TestPrimeReadinessRejectsLoadingFrameAcceptsLoadedFrame(t *testing.T) {
 	}
 }
 
-// TestPrimeScriptHonorsReadyDelayAsPostReadySettle: see the GREEN commit,
-// which adds this alongside the readyDelayMs/primeDefaultReadyDelayMs
-// symbols it exercises (kept out of the RED commit so RED compiles
-// standalone against the pre-fix pack, per this repo's own RED/GREEN
-// convention).
+// TestPrimeScriptHonorsReadyDelayAsPostReadySettle pins cr-gdeav.6.16's
+// second half: ready_delay_ms.txt (staged from cfg.ReadyDelayMs, defaulting
+// to primeDefaultReadyDelayMs when the wire sends none or zero) is read and
+// applied as a settle AFTER the stability-gated readiness above, not as a
+// pre-readiness fallback the way gc's own ReadyDelayMs is used locally
+// (WaitForRuntimeReady) - a strict superset, documented in prime.go.
+func TestPrimeScriptHonorsReadyDelayAsPostReadySettle(t *testing.T) {
+	if !strings.Contains(primeScript, `if [ -f "$DIR/ready_delay_ms.txt" ]`) {
+		t.Fatal("primeScript never reads a staged ready_delay_ms.txt")
+	}
+	settleIdx := strings.Index(primeScript, `sleep "$settle"`)
+	readyIdx := strings.Index(primeScript, `ready=1`)
+	pasteIdx := strings.Index(primeScript, `send-keys -t main -l --`)
+	if settleIdx < 0 {
+		t.Fatal(`primeScript never sleeps "$settle" (the ready_delay_ms settle) at all`)
+	}
+	if settleIdx < readyIdx {
+		t.Fatalf("the ready_delay_ms settle (%d) runs before readiness is even decided (%d) - it must be a POST-ready settle", settleIdx, readyIdx)
+	}
+	if settleIdx > pasteIdx {
+		t.Fatalf("the ready_delay_ms settle (%d) runs after the nudge is already pasted (%d) - it must settle BEFORE typing anything", settleIdx, pasteIdx)
+	}
+	if got := readyDelayMs(0); got != primeDefaultReadyDelayMs {
+		t.Fatalf("readyDelayMs(0) = %d, want the documented default %d", got, primeDefaultReadyDelayMs)
+	}
+	if got := readyDelayMs(4000); got != 4000 {
+		t.Fatalf("readyDelayMs(4000) = %d, want the wire value honored verbatim", got)
+	}
+}
