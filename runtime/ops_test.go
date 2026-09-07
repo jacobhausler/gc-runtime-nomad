@@ -496,50 +496,45 @@ esac
 	}
 }
 
-// TestOpExecPrimesTransportLaunchFromStagedPromptFields is the RED/GREEN pair
-// for cr-gdeav.6.12: live attempt 5 (pack ac6f0de) still never primed, because
-// startupPrime was only ever called from markLaunched (opStart/opRelaunch),
-// while gc drives this lane's actual launch through opExec's transport-launch
-// handshake (markTransportLaunched) — which ran with no stageConfig of its
-// own, so the nudge/ready_prompt_prefix gc sent at provision time never
-// reached it and the binding gained no prompt_status at all.
+// TestOpExecPrimesTransportLaunchAsynchronouslyViaDetachedWindow is the
+// RED/GREEN pair for cr-gdeav.6.13. Attempt 6 (pack 6d13b8f, which fixed
+// cr-gdeav.6.12 by calling startupPrime synchronously from
+// markTransportLaunched) looped in production: supervisor.log showed
+// op=start cycling provider_error(~5s) -> stale_async_start(~30.5-30.7s),
+// with a FRESH dispatch every cycle, because the blocking readiness wait now
+// ran INSIDE the launch op and pushed it well past gc's ~30s async-start
+// budget.
 //
-// The fake tmux here answers capture-pane with the real captured Codex ready
-// row (testdata/codex-startup-pane.raw, the same fixture
-// startup_ready_pane_test.go pins the matcher against), so this proves the
-// fix end to end: provision stages the prompt, the transport launch primes
-// from it, and prompted_at lands on the binding.
-func TestOpExecPrimesTransportLaunchFromStagedPromptFields(t *testing.T) {
+// This asserts the two halves of the fix: (1) the transport-launch op
+// returns the instant launch is confirmed — no prompted_at yet, no matter
+// how long the agent takes to become ready — while still having staged the
+// prime script and spawned the detached tmux window that will do the
+// waiting; and (2) once that window's work is done (simulated here by
+// writing the marker files it would have written), the NEXT opIsRunning
+// call — gc's own regular liveness poll, not a bespoke loop of this pack's
+// — copies prompted_at/prompt_status onto the binding via syncPromptedMarker.
+func TestOpExecPrimesTransportLaunchAsynchronouslyViaDetachedWindow(t *testing.T) {
 	l, _ := newTestLifecycle(t)
 	ctx := context.Background()
-	const session = "sess-transport-prime"
+	const session = "sess-async-prime"
 	withAgentLaunchScript(t, "true")
 
-	readyPane, err := os.ReadFile("testdata/codex-startup-pane.raw")
-	if err != nil {
-		t.Fatalf("read captured pane fixture: %v", err)
-	}
-	paneFixture := filepath.Join(t.TempDir(), "pane.raw")
-	if err := os.WriteFile(paneFixture, readyPane, 0o600); err != nil {
-		t.Fatalf("write pane fixture: %v", err)
-	}
-	sendKeysRecord := filepath.Join(t.TempDir(), "tmux-send-keys-argv")
+	windowRecord := filepath.Join(t.TempDir(), "tmux-new-window-argv")
 	fakeBin := t.TempDir()
 	fakeTmux := filepath.Join(fakeBin, "tmux")
 	if err := os.WriteFile(fakeTmux, []byte(`#!/bin/sh
 case "$1" in
 new-session|has-session) exit 0 ;;
-capture-pane) cat "$PANE_FIXTURE" ;;
-send-keys) printf '%s\n' "$*" >> "$SEND_KEYS_RECORD" ;;
 list-panes) exit 1 ;;
+list-windows) printf 'main\n' ;;
+new-window) printf '%s\n' "$*" >> "$WINDOW_RECORD" ;;
 *) exit 1 ;;
 esac
 `), 0o700); err != nil {
 		t.Fatalf("write fake tmux: %v", err)
 	}
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("PANE_FIXTURE", paneFixture)
-	t.Setenv("SEND_KEYS_RECORD", sendKeysRecord)
+	t.Setenv("WINDOW_RECORD", windowRecord)
 
 	cfg := stageConfig{Nudge: "Run gc hook --claim --json now.", ReadyPromptPrefix: "› Ask Codex"}
 	if err := l.opProvisionWithConfig(ctx, session, cfg); err != nil {
@@ -547,26 +542,66 @@ esac
 	}
 
 	launch := []string{"/bin/sh", "-c", `'tmux' 'new-session' '-d' '-s' 'main' 'sleep 60'`}
+	start := time.Now()
 	if code, out, err := l.opExec(ctx, session, launch); err != nil || code != 0 {
 		t.Fatalf("exec transport launch = (%d, %q, %v), want (0, _, nil)", code, out, err)
 	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("transport launch op took %s, want it to return immediately rather than block on readiness (this is exactly what looped attempt 6's start past gc's async budget)", elapsed)
+	}
 
+	// (1) The op itself must never carry prompted_at - only the detached
+	// window may set it, and only once it has actually seen the ready row.
 	b, ok, err := l.sidecar.load(session)
 	if err != nil || !ok {
 		t.Fatalf("sidecar.load after transport launch = (%+v, %v, %v)", b, ok, err)
 	}
+	if b.PromptedAt != nil {
+		t.Fatal("the launch op set prompted_at itself - the wait must happen in the detached window, not the op")
+	}
+
+	// It must, however, have staged the prime script/nudge and spawned
+	// exactly one detached window for it.
+	if code, out, err := l.opExec(ctx, session, []string{"/bin/sh", "-c",
+		`cat "$NOMAD_SECRETS_DIR/gc-prime/nudge.txt"`}); err != nil || code != 0 || string(out) != cfg.Nudge {
+		t.Fatalf("staged nudge.txt = (%d, %q, %v), want (0, %q, nil)", code, out, err, cfg.Nudge)
+	}
+	if code, out, err := l.opExec(ctx, session, []string{"/bin/sh", "-c",
+		`cat "$NOMAD_SECRETS_DIR/gc-prime/ready_prefix.txt"`}); err != nil || code != 0 || string(out) != cfg.ReadyPromptPrefix {
+		t.Fatalf("staged ready_prefix.txt = (%d, %q, %v), want (0, %q, nil)", code, out, err, cfg.ReadyPromptPrefix)
+	}
+	windowArgv, err := os.ReadFile(windowRecord)
+	if err != nil {
+		t.Fatalf("read tmux new-window argv: %v", err)
+	}
+	if !strings.Contains(string(windowArgv), "gc-prime") || !strings.Contains(string(windowArgv), "gc-prime/run.sh") {
+		t.Fatalf("tmux new-window argv = %q, want it to spawn the gc-prime window running run.sh", windowArgv)
+	}
+	if n := strings.Count(string(windowArgv), "\n"); n != 1 {
+		t.Fatalf("tmux new-window was invoked %d times, want exactly 1", n)
+	}
+
+	// (2) Simulate the detached window having done its job (this pack's own
+	// primeScript, run for real, is out of scope for a Go unit test), then
+	// let opIsRunning's marker sync pick it up.
+	if code, _, err := l.opExec(ctx, session, []string{"/bin/sh", "-c",
+		`date -u +%Y-%m-%dT%H:%M:%SZ > "$NOMAD_SECRETS_DIR/gc-prime/prompted_at" && printf 'delivered' > "$NOMAD_SECRETS_DIR/gc-prime/status"`}); err != nil || code != 0 {
+		t.Fatalf("simulate detached window completion: (%d, %v)", code, err)
+	}
+
+	running, err := l.opIsRunning(ctx, session)
+	if err != nil || !running {
+		t.Fatalf("opIsRunning = (%v, %v), want (true, nil)", running, err)
+	}
+	b, ok, err = l.sidecar.load(session)
+	if err != nil || !ok {
+		t.Fatalf("sidecar.load after opIsRunning = (%+v, %v, %v)", b, ok, err)
+	}
 	if b.PromptedAt == nil {
-		t.Fatal("transport launch never primed the startup prompt staged at provision time")
+		t.Fatal("opIsRunning's marker sync never copied the detached window's prompted_at marker onto the binding")
 	}
 	if b.PromptStatus != promptStatusDelivered {
 		t.Fatalf("prompt_status = %q, want %q", b.PromptStatus, promptStatusDelivered)
-	}
-	recorded, err := os.ReadFile(sendKeysRecord)
-	if err != nil {
-		t.Fatalf("read tmux send-keys argv: %v", err)
-	}
-	if !strings.Contains(string(recorded), cfg.Nudge) {
-		t.Fatalf("send-keys argv = %q, want the staged nudge text %q", recorded, cfg.Nudge)
 	}
 }
 
