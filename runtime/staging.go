@@ -233,6 +233,30 @@ func mergeExtraSecretEnv(base map[string]string, keys []string) (map[string]stri
 	return merged, extra
 }
 
+// stripLocalCityStoreEnv removes the local target/store family when a
+// session is explicitly staged for a remote city. gc's remote selector is
+// intentionally fail-closed when these families coexist: preserving local
+// identity in a remote allocation would make every nested gc invocation
+// reject the otherwise valid remote target. Keep the remote city name, actor,
+// and session identity keys; they are not local target selectors.
+func stripLocalCityStoreEnv(env map[string]string) map[string]string {
+	if strings.TrimSpace(env["GC_CITY_URL"]) == "" && strings.TrimSpace(env["GC_CITY_CONTEXT"]) == "" {
+		return env
+	}
+	filtered := make(map[string]string, len(env))
+	for key, value := range env {
+		switch {
+		case key == "GC_CITY", key == "GC_CITY_PATH", key == "GC_CITY_ROOT", key == "GC_CITY_RUNTIME_DIR":
+			continue
+		case strings.HasPrefix(key, "GC_BEADS"):
+			continue
+		default:
+			filtered[key] = value
+		}
+	}
+	return filtered
+}
+
 const stagedEnvScriptName = "env.sh"
 
 // validShellEnvName accepts the portable shell identifier form used by

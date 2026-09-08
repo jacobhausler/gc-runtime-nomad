@@ -411,6 +411,93 @@ func TestBuildLaunchCommandClassifiesEnv(t *testing.T) {
 	}
 }
 
+// TestRemoteStageStripsLocalCityStoreEnv prevents a remote allocation from
+// inheriting the local city/store selectors that gc rejects beside
+// GC_CITY_URL/GC_CITY_CONTEXT. Identity and session metadata remain part of
+// the remote worker contract.
+func TestRemoteStageStripsLocalCityStoreEnv(t *testing.T) {
+	l, _ := newTestLifecycle(t)
+	cfg := stageConfig{Env: map[string]string{
+		"GC_CITY":               "local-city",
+		"GC_CITY_PATH":          "/local/city",
+		"GC_CITY_ROOT":          "/local/root",
+		"GC_CITY_RUNTIME_DIR":   "/local/runtime",
+		"GC_BEADS":              "file",
+		"GC_BEADS_SCOPE_ROOT":   "/local/scope",
+		"GC_CITY_NAME":          "remote-city",
+		"GC_CITY_URL":           "https://relay.example:8443",
+		"BEADS_ACTOR":           "mechanic-review-2-pool",
+		"GC_SESSION_ID":         "session-123",
+		"GC_SESSION_EPOCH":      "epoch-123",
+		"UNRELATED_RUNTIME_ENV": "preserve-me",
+	}}
+	if err := l.opStartWithConfig(context.Background(), "sess-remote-local-env", cfg); err != nil {
+		t.Fatalf("start with remote environment: %v", err)
+	}
+
+	envSh, err := l.opExec2(context.Background(), "sess-remote-local-env", `cat "$NOMAD_SECRETS_DIR/env.sh"`)
+	if err != nil {
+		t.Fatalf("read staged environment: %v", err)
+	}
+	for _, key := range []string{
+		"GC_CITY", "GC_CITY_PATH", "GC_CITY_ROOT", "GC_CITY_RUNTIME_DIR",
+		"GC_BEADS", "GC_BEADS_SCOPE_ROOT",
+	} {
+		if strings.Contains(envSh, "export "+key+"=") {
+			t.Fatalf("remote env.sh exports local key %s: %s", key, envSh)
+		}
+	}
+	for _, want := range []string{
+		"export GC_CITY_NAME='remote-city'",
+		"export GC_CITY_URL='https://relay.example:8443'",
+		"export BEADS_ACTOR='mechanic-review-2-pool'",
+		"export GC_SESSION_ID='session-123'",
+		"export GC_SESSION_EPOCH='epoch-123'",
+		"export UNRELATED_RUNTIME_ENV='preserve-me'",
+	} {
+		if !strings.Contains(envSh, want) {
+			t.Fatalf("remote env.sh missing %q: %s", want, envSh)
+		}
+	}
+
+	launch := strings.Join(buildLaunchCommand(cfg.Env, ""), " ")
+	if strings.Contains(launch, "GC_CITY=local-city") {
+		t.Fatalf("remote launch forwards local GC_CITY: %s", launch)
+	}
+}
+
+// TestLocalStagePreservesLocalCityStoreEnv is the rollback guard: without a
+// remote selector, local city/store routing remains unchanged.
+func TestLocalStagePreservesLocalCityStoreEnv(t *testing.T) {
+	l, _ := newTestLifecycle(t)
+	cfg := stageConfig{Env: map[string]string{
+		"GC_CITY":             "local-city",
+		"GC_CITY_PATH":        "/local/city",
+		"GC_CITY_ROOT":        "/local/root",
+		"GC_CITY_RUNTIME_DIR": "/local/runtime",
+		"GC_BEADS":            "file",
+	}}
+	if err := l.opStartWithConfig(context.Background(), "sess-local-env", cfg); err != nil {
+		t.Fatalf("start with local environment: %v", err)
+	}
+
+	envSh, err := l.opExec2(context.Background(), "sess-local-env", `cat "$NOMAD_SECRETS_DIR/env.sh"`)
+	if err != nil {
+		t.Fatalf("read staged environment: %v", err)
+	}
+	for _, want := range []string{
+		"export GC_CITY='local-city'",
+		"export GC_CITY_PATH='/local/city'",
+		"export GC_CITY_ROOT='/local/root'",
+		"export GC_CITY_RUNTIME_DIR='/local/runtime'",
+		"export GC_BEADS='file'",
+	} {
+		if !strings.Contains(envSh, want) {
+			t.Fatalf("local env.sh missing %q: %s", want, envSh)
+		}
+	}
+}
+
 // TestBuildLaunchCommandSourcesStagedEnvironment ensures launch imports the
 // values staged under NOMAD_SECRETS_DIR before creating tmux.
 func TestBuildLaunchCommandSourcesStagedEnvironment(t *testing.T) {

@@ -355,6 +355,7 @@ func buildLaunchCommand(env map[string]string, workDir string) []string {
 // for a new session or a respawn, while sourcing the staged environment and
 // applying the deployment-owned agent launch script in either case.
 func buildLaunchCommandForTmux(env map[string]string, tmuxArgs []string, workDir string) []string {
+	env = stripLocalCityStoreEnv(env)
 	cmd := []string{"/bin/sh", "-c", launchEnvScript, "gc-runtime-nomad-launch", "tmux"}
 	cmd = append(cmd, tmuxArgs...)
 	keys := make([]string, 0, len(env))
@@ -1368,6 +1369,7 @@ func (l *lifecycle) stage(ctx context.Context, sessionName string, cfg stageConf
 	}
 
 	secretEnv, extraKeys := mergeExtraSecretEnv(cfg.Env, extraSecretKeys)
+	secretEnv = stripLocalCityStoreEnv(secretEnv)
 
 	var secretFiles []stageFile
 	for k, v := range secretEnv {
