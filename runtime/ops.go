@@ -1379,7 +1379,7 @@ func (l *lifecycle) stage(ctx context.Context, sessionName string, cfg stageConf
 		secretFiles = append(secretFiles, stageFile{Path: k, Content: []byte(v), Mode: 0o600})
 	}
 	if len(secretEnv) > 0 {
-		envScript := buildEnvScript(secretEnv)
+		envScript := buildEnvScript(remoteContextEnvScriptInput(secretEnv))
 		// The remote-context bridge (cr-gdeav.6.15) rides the same env.sh:
 		// GC_HOME/GC_CITY_CONTEXT are a no-op append when GC_CITY_NAME or
 		// GC_CITY_URL is absent from the wire, so this costs nothing for a

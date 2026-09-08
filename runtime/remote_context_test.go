@@ -84,11 +84,13 @@ func TestRemoteContextStagedWhenCityNameAndURLPresent(t *testing.T) {
 	for _, want := range []string{
 		`export GC_HOME="$NOMAD_SECRETS_DIR/gc-home"`,
 		`export GC_CITY_CONTEXT='nomad-canary'`,
-		`export GC_CITY_URL='https://192.168.0.107:8443'`,
 	} {
 		if !strings.Contains(envSh, want) {
 			t.Fatalf("env.sh missing %q: %s", want, envSh)
 		}
+	}
+	if strings.Contains(envSh, "export GC_CITY_URL=") {
+		t.Fatalf("env.sh exports GC_CITY_URL after the staged context took ownership of the URL: %s", envSh)
 	}
 
 	contextsToml, err := l.opExec2(ctx, session, `cat "$NOMAD_SECRETS_DIR/gc-home/contexts.toml"`)

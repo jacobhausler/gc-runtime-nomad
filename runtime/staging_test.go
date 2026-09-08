@@ -449,7 +449,6 @@ func TestRemoteStageStripsLocalCityStoreEnv(t *testing.T) {
 	}
 	for _, want := range []string{
 		"export GC_CITY_NAME='remote-city'",
-		"export GC_CITY_URL='https://relay.example:8443'",
 		"export BEADS_ACTOR='mechanic-review-2-pool'",
 		"export GC_SESSION_ID='session-123'",
 		"export GC_SESSION_EPOCH='epoch-123'",

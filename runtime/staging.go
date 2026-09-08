@@ -433,6 +433,25 @@ func buildRemoteContextEnvLines(secretEnv map[string]string) []byte {
 	return []byte(b.String())
 }
 
+// remoteContextEnvScriptInput removes the provider URL from env.sh once the
+// staged gc context owns it. Keeping both GC_CITY_URL and GC_CITY_CONTEXT
+// would select two remote targets and make gc fail closed; the URL remains in
+// contexts.toml, where the context resolver reads it together with the mTLS
+// file paths. Deployments without a complete staged context keep the original
+// environment unchanged.
+func remoteContextEnvScriptInput(secretEnv map[string]string) map[string]string {
+	if strings.TrimSpace(secretEnv["GC_CITY_NAME"]) == "" || strings.TrimSpace(secretEnv["GC_CITY_URL"]) == "" {
+		return secretEnv
+	}
+	filtered := make(map[string]string, len(secretEnv))
+	for key, value := range secretEnv {
+		if key != "GC_CITY_URL" {
+			filtered[key] = value
+		}
+	}
+	return filtered
+}
+
 // tomlQuote renders s as a TOML basic string. contexts.toml carries only a
 // city name, a URL, and this pack's own fixed secrets-dir file paths - none
 // expected to need escaping - but this is written defensively rather than
