@@ -1,3 +1,130 @@
+# v1.0.4 (draft — cut after D4)
+
+Four fixes from the D3/D4 Nomad dogfood windows: a remote-context session in
+which every `gc` call failed, a Codex seat that silently ran Qwen, and bridge
+allocs with no resolvers (`cr-bo8en.12`, `cr-tzsxk.14.1`, `cr-tzsxk.18`).
+
+## What broke
+
+D3 window 1 provisioned two worker-local seats on rhuidean, primed them, and
+watched them drain: `{"action":"drain","reason":"no_work"}` five times, while
+the city hook listed their steps as ready. Inside the box, every `gc` call
+exited 1 with
+
+    conflicting targets: a remote city (GC_CITY_URL/GC_CITY_CONTEXT) cannot be
+    combined with a local city env (GC_CITY/GC_CITY_PATH/GC_CITY_ROOT); unset one
+
+The pack was forwarding the supervisor's own local city identity into a
+remote-context alloc, and the pin those windows ran on enforces that
+exclusivity where the earlier lineage tolerated it. The launch path was patched
+around it in place on the shared volume; these are the pack halves
+(`cr-bo8en.12`). Same window, second shape: with an mTLS context staged,
+`env.sh` exported BOTH `GC_CITY_URL` and `GC_CITY_CONTEXT`, so gc refused the
+session for selecting two remote targets.
+
+D4 lane 3 broke twice more, in ways that read as provider failures and are not.
+A "Codex lane" ran Qwen, because gc renders a seat's model and reasoning effort
+as *command flags* on the argv the pack's launch seam replaces with the
+deployment-owned bootstrap — the flags never reached the box — and
+`GC_PROVIDER` carries only the provider *family*, so Qwen and Luna both read
+"codex" (`cr-tzsxk.14.1`). And the allocs had no resolvers: a bridge alloc with
+no `network.DNS` stanza inherits the *client host's* `/etc/resolv.conf`, which
+on a systemd-resolved host is the `127.0.0.53` stub, unreachable from the alloc
+netns — `getent hosts api.openai.com` empty, `curl` dead in ~1 ms, IP dials
+fine. The same window needed a placement fence (`${node.unique.name} !=
+prod-nomad`) after seats landed on a node the estate had retired from its relay
+firewall, which until now meant re-registering the parent job by hand — and the
+runtime's own next register dropped it (`cr-tzsxk.18`, lane-1 finding 1).
+
+## What changed
+
+- `stripLocalCityStoreEnv` (`runtime/staging.go`) drops the local target/store
+  family — `GC_CITY`, `GC_CITY_PATH`, `GC_CITY_ROOT`, `GC_CITY_RUNTIME_DIR`,
+  `GC_BEADS*` — from any staged environment that names a remote city
+  (`GC_CITY_URL` or `GC_CITY_CONTEXT` present), on the `stage` half and on the
+  staged-bootstrap launch half (`buildLaunchCommandForTmux`) — the only
+  launch path a real session takes; the legacy bare-tmux placeholder is
+  untouched. The remote city name, `BEADS_ACTOR`, and the session identity
+  keys stay; they are not local target selectors. A local-only session's
+  environment is untouched.
+- `remoteContextEnvScriptInput` drops `GC_CITY_URL` from `env.sh` once a
+  complete staged context owns it — gc reads the URL from `contexts.toml`
+  alongside the mTLS file paths, and exporting both selects two remote targets.
+  A deployment without a complete staged context keeps the environment it has.
+- `mergeLaunchOptionEnv` recovers gc's rendered provider options from the
+  launch command (`--model`/`-m`/`--model=`/`-c model=…`/
+  `model_reasoning_effort=`) and exports them into the same `env.sh` the
+  deployment launcher sources, as `GC_MODEL` / `GC_REASONING_EFFORT`. An
+  explicit provider env entry always beats a value recovered from the command,
+  and a value containing anything outside `[A-Za-z0-9._:-]` is dropped rather
+  than passed through. This is the pack half; the consumer is the
+  deployment-owned `ops/nomad/agent-launch.sh` (`55d9ef4`, `cr-tzsxk.14`) — a
+  Qwen seat's config stays byte-identical, a non-Qwen seat gets its model and
+  effort with no `model_provider` override, so default OpenAI auth comes from
+  the staged `auth.json`. A non-Qwen lane needs a launcher at or after that
+  commit.
+- Two deployment knobs now render into the parent job the runtime registers
+  itself: `GC_NOMAD_DNS_SERVERS` (comma-separated resolver addresses the session
+  group's bridge network writes into the alloc's `/etc/resolv.conf`) and
+  `GC_NOMAD_NODE_CONSTRAINT` (Nomad-syntax constraints, `;`-separated because
+  list operands already use commas inside the value), appended *after* the
+  pack's linux-kernel fatal rule so an operator fence can never displace it.
+  Both ride the provider-env passthrough that already carries
+  `GC_NOMAD_LOG_SINK`/`GC_NOMAD_ARTIFACT_VOLUME`/`GC_NOMAD_NODE_POOL`, and both
+  are empty by default: an unset deployment renders the jobspec byte-for-byte as
+  before, jobspec hash included — which is also the rollback, unset the
+  variable. A malformed value is a config error that fails the op closed, not a
+  silently dropped line, and `gc runtime check` now warns when
+  `GC_NOMAD_DNS_SERVERS` is unset. Placement lands before the jobspec hash is
+  stamped, so a placement change is drift-visible to `ensureParentRegistered`
+  instead of being ignored on an already-registered parent (`fnrt-t4l.9`).
+  Values stay out of the pack (value-blind), like every other `GC_NOMAD_*` knob.
+
+Still open, and not this pack's: the `501` on `bd update --claim`/
+`bd heartbeat` and the `409` typed-close identity gap for remote work-class
+beads (`cr-gdeav.5.10` family — D4 lane 1 and its rerun both stopped there),
+the reconciler reusing session identity across a runtime re-provision so a seat
+sleeps until nudged (D3 finding #2, lane-1 finding 2), and the Codex standalone
+package layout that the Luna execution host needs (`cr-tzsxk.20` — an estate
+toolchain restage). Staging a seat credential needed no pack change: the
+existing `GC_NOMAD_EXTRA_SECRET_KEYS` bridge carried `CODEX_AUTH_JSON`
+(`cr-tzsxk.10`, `cr-tzsxk.11`).
+
+## Coverage
+
+Each fix rides its own tests in `runtime`: the conditional strip
+(`TestRemoteStageStripsLocalCityStoreEnv`, and
+`TestLocalStagePreservesLocalCityStoreEnv` proving the local case is
+untouched); the remote-context `env.sh` test re-pointed to assert
+`GC_CITY_URL` is *absent* once the staged context owns the URL; the
+launch-option recovery (`TestMergeLaunchOptionEnv…` for extraction and the
+explicit-env-wins precedence, `TestStageEnvScriptIncludesRenderedLaunchOptions`
+that it reaches the staged `env.sh`); and the placement pair —
+`TestParentJobSpecDeclaresNoDNSByDefault` /
+`TestParentJobSpecCarriesDeploymentDNS`,
+`TestParentJobSpecAppendsNodeConstraintsAfterKernelFatalRule`,
+`TestJobspecHashChangesWhenPlacementConfigured`, `TestParseDNSServers` /
+`TestParseNodeConstraints` over the config-error cases, the `gc runtime check`
+warning pair, and the two `newLifecycle` tests that a configured value is read
+and a malformed one refuses to start.
+
+The proofs are lived, not simulated — see
+`ops/receipts/nrt-d3/2026-09-08-d3-window-1.md` and the three
+`2026-09-08-d4-lane*-*.md` receipts: window 2 PASS (two pool seats claimed,
+worked and typed-closed city beads through the mTLS relay on pin
+`e6c792597`), lane 2 PASS (a Nomad verifier closed a formula step and its
+source from the box on `1afd6736a`), lane 3 PASS on the runtime path with the
+seat's own TUI footer reading `gpt-5.6-luna xhigh` after the launcher/env
+pair landed. The estate-side twins are re-runnable:
+`ops/tests/agent-launch-provider-model-test.sh` for the launcher half and
+`ops/tests/session-dns-env-staging-test.sh` for the staged DNS keys.
+
+`CONFORMANCE-RECEIPT.md` is regenerated by `./receipt.sh` at the cut; at this
+draft it is still stamped `4a08d08`, and this section does not claim a fresh
+ladder run at the cut commit. `pack.toml` still reads `1.0.3` — the version
+bump, the install guide naming the gc PR/EDGE dependencies, and the D4 cut
+decision are the rest of `cr-i24rc`.
+
 # v1.0.3
 
 Provision idempotency and start-retry adoption (`fnrt-t4l.46`).
