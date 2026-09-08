@@ -28,6 +28,8 @@ owner-unit: runtime-nomad
 | `GC_NOMAD_TOKEN` | no | ACL token, sent as `X-Nomad-Token` |
 | `GC_NOMAD_NAMESPACE` | no | Nomad namespace (default `default`) |
 | `GC_NOMAD_NODE_POOL` | no | parent job's node pool (empty = Nomad's default pool) |
+| `GC_NOMAD_DNS_SERVERS` | no | resolver IPs the bridge network writes into the alloc's resolv.conf; unset ⇒ the alloc inherits the client host's (a systemd-resolved stub is dead in a bridge netns) |
+| `GC_NOMAD_NODE_CONSTRAINT` | no | `;`-separated Nomad node constraints appended to the parent job, e.g. `${node.unique.name} != prod-nomad` |
 | `GC_NOMAD_PARENT_JOB` | no | parent job ID (default `gc-sessions`) |
 | `GC_NOMAD_EGRESS_DIR` | no | stop-path transcript/evidence dir; unset disables egress |
 | `GC_NOMAD_FORBID_REGISTER` | no | `true` = never attempt a parent registration; fail closed |

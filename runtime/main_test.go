@@ -409,3 +409,86 @@ func TestParseAdoptMaxAge(t *testing.T) {
 		}
 	}
 }
+
+// TestRunCheckWarnsWhenDNSServersUnset keeps cr-tzsxk.18's failure mode from
+// being silent again: with no resolver configured the pack still registers a
+// working-looking box that cannot resolve a single name.
+func TestRunCheckWarnsWhenDNSServersUnset(t *testing.T) {
+	t.Setenv(envDNSServers, "")
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := run([]string{"check"}, strings.NewReader(""), w, w)
+	w.Close()
+	out, _ := io.ReadAll(r)
+	r.Close()
+	if got != exitOK {
+		t.Fatalf("run(check) = %d, want %d", got, exitOK)
+	}
+	if !strings.Contains(string(out), "GC_NOMAD_DNS_SERVERS unset") {
+		t.Fatalf("run(check) output = %q, want the unset-resolver warning", out)
+	}
+}
+
+func TestRunCheckOmitsDNSWarningWhenResolversConfigured(t *testing.T) {
+	t.Setenv(envDNSServers, "192.168.0.202")
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := run([]string{"check"}, strings.NewReader(""), w, w)
+	w.Close()
+	out, _ := io.ReadAll(r)
+	r.Close()
+	if got != exitOK {
+		t.Fatalf("run(check) = %d, want %d", got, exitOK)
+	}
+	if strings.Contains(string(out), "GC_NOMAD_DNS_SERVERS unset") {
+		t.Fatalf("run(check) output = %q, want no unset-resolver warning", out)
+	}
+}
+
+// TestNewLifecycleReadsPlacementConfig proves both knobs reach the lifecycle
+// that builds the parent job — the register path this bead exists to close.
+func TestNewLifecycleReadsPlacementConfig(t *testing.T) {
+	srv := fakenomad.NewServer()
+	t.Cleanup(srv.Close)
+
+	t.Setenv(envAddr, srv.URL())
+	t.Setenv(envSidecarDir, t.TempDir())
+	t.Setenv(envDNSServers, "192.168.0.202")
+	t.Setenv(envNodeConstraint, `${node.unique.name} != prod-nomad`)
+
+	l, err := newLifecycle()
+	if err != nil {
+		t.Fatalf("newLifecycle: %v", err)
+	}
+	if len(l.placement.dnsServers) != 1 || l.placement.dnsServers[0] != "192.168.0.202" {
+		t.Fatalf("placement.dnsServers = %v, want [192.168.0.202]", l.placement.dnsServers)
+	}
+	if len(l.placement.nodeConstraints) != 1 || l.placement.nodeConstraints[0].RTarget != "prod-nomad" {
+		t.Fatalf("placement.nodeConstraints = %+v, want the prod-nomad fence", l.placement.nodeConstraints)
+	}
+}
+
+// TestNewLifecycleRejectsBadPlacementConfig is the fail-closed half: a typo in
+// either knob must stop the op with the variable named, not register a parent
+// that silently drops the placement it was configured with.
+func TestNewLifecycleRejectsBadPlacementConfig(t *testing.T) {
+	srv := fakenomad.NewServer()
+	t.Cleanup(srv.Close)
+	t.Setenv(envAddr, srv.URL())
+	t.Setenv(envSidecarDir, t.TempDir())
+
+	t.Setenv(envDNSServers, "resolver.example.internal")
+	if _, err := newLifecycle(); err == nil || !strings.Contains(err.Error(), envDNSServers) {
+		t.Fatalf("newLifecycle with a non-IP resolver: err = %v, want one naming %s", err, envDNSServers)
+	}
+
+	t.Setenv(envDNSServers, "")
+	t.Setenv(envNodeConstraint, `${node.unique.name} ~= prod-nomad`)
+	if _, err := newLifecycle(); err == nil || !strings.Contains(err.Error(), envNodeConstraint) {
+		t.Fatalf("newLifecycle with a bad operand: err = %v, want one naming %s", err, envNodeConstraint)
+	}
+}

@@ -77,6 +77,13 @@ type lifecycle struct {
 	// host name hard-coded into the runtime pack; empty means no mount.
 	artifactVolumeSource string
 
+	// placement is the deployment-configured DNS servers and node constraints
+	// that ride the parent job body parentJobSpec builds (cr-tzsxk.18), read
+	// from GC_NOMAD_DNS_SERVERS / GC_NOMAD_NODE_CONSTRAINT by newLifecycle.
+	// Zero value renders the pre-cr-tzsxk.18 jobspec unchanged — same rollback
+	// shape as logShipper and artifactVolumeSource above.
+	placement placementConfig
+
 	// adoptMaxAge bounds how old a live-but-unlaunched box may be before
 	// provision/start refuse to ADOPT it and reap it instead (cr-gdeav.6.1).
 	// Before it existed, adoption was unbounded: the DF-03 canary's box,
@@ -1071,7 +1078,7 @@ func (l *lifecycle) dispatch(ctx context.Context, sessionName string) error {
 // attempt entirely for a deployment that wants a config-time guarantee of
 // that, rather than discovering it from a 403 at the first drifted Start.
 func (l *lifecycle) ensureParentRegistered(ctx context.Context) error {
-	spec := parentJobSpecWithArtifactVolume(l.client.namespace, l.nodePool, l.parentJobID, l.logShipper, l.artifactVolumeSource)
+	spec := parentJobSpecWithArtifactVolume(l.client.namespace, l.nodePool, l.parentJobID, l.logShipper, l.artifactVolumeSource, l.placement)
 
 	nodePool, meta, ok, err := l.client.getJob(ctx, l.parentJobID)
 	if err != nil {

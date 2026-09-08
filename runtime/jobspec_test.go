@@ -54,7 +54,7 @@ func TestSessionTaskReservesSecretsSpace(t *testing.T) {
 // declaration nor the task mount may permit writes.
 func TestParentJobSpecMountsGCArtifactsReadOnly(t *testing.T) {
 	const volumeSource = "test-nomad-shared"
-	spec := parentJobSpecWithArtifactVolume("default", "", "gc-sessions", logShipperConfig{}, volumeSource)
+	spec := parentJobSpecWithArtifactVolume("default", "", "gc-sessions", logShipperConfig{}, volumeSource, placementConfig{})
 	data, err := json.Marshal(spec.TaskGroups[0])
 	if err != nil {
 		t.Fatalf("marshal task group: %v", err)
@@ -113,7 +113,7 @@ func TestParentJobSpecOmitsGCArtifactsWhenVolumeUnset(t *testing.T) {
 
 func TestJobspecHashChangesWhenArtifactVolumeToggled(t *testing.T) {
 	off := parentJobSpec("default", "", "gc-sessions", logShipperConfig{})
-	on := parentJobSpecWithArtifactVolume("default", "", "gc-sessions", logShipperConfig{}, "test-nomad-shared")
+	on := parentJobSpecWithArtifactVolume("default", "", "gc-sessions", logShipperConfig{}, "test-nomad-shared", placementConfig{})
 	if off.Meta[jobspecHashMetaKey] == on.Meta[jobspecHashMetaKey] {
 		t.Fatalf("jobspec hash unchanged after enabling the artifact volume")
 	}
@@ -778,4 +778,165 @@ func TestVectorSessionCaptureSources(t *testing.T) {
 	if len(sinkInputs) != 1 || sinkInputs[0] != "label" {
 		t.Errorf("gc_log_sink inputs = %v, want [label] — every capture channel must ride the labeled stream", sinkInputs)
 	}
+}
+
+// TestParentJobSpecDeclaresNoDNSByDefault protects every deployment that never
+// sets GC_NOMAD_DNS_SERVERS: the session group must render exactly the network
+// stanza it rendered before cr-tzsxk.18 — no DNS key at all — so that deploy-
+// ment's jobspecHash (and therefore ensureParentRegistered's drift decision) is
+// unchanged by this pack's upgrade.
+func TestParentJobSpecDeclaresNoDNSByDefault(t *testing.T) {
+	spec := parentJobSpecWithArtifactVolume("default", "", "gc-sessions", logShipperConfig{}, "", placementConfig{})
+	data, err := json.Marshal(spec.TaskGroups[0].Networks)
+	if err != nil {
+		t.Fatalf("marshal networks: %v", err)
+	}
+	if strings.Contains(string(data), `"DNS"`) {
+		t.Fatalf("networks = %s, want no DNS stanza with no DNS servers configured", data)
+	}
+	baseline := parentJobSpec("default", "", "gc-sessions", logShipperConfig{})
+	if baseline.Meta[jobspecHashMetaKey] != spec.Meta[jobspecHashMetaKey] {
+		t.Fatalf("jobspec hash changed for a deployment that configured no placement")
+	}
+}
+
+// TestParentJobSpecCarriesDeploymentDNS is the bug cr-tzsxk.18 filed: an alloc
+// on a systemd-resolved client host inherits the 127.0.0.53 stub, which is
+// unreachable from its bridge netns, so no name resolves inside the box. The
+// configured resolvers must reach Nomad's network.DNS.Servers on the wire —
+// fakenomad ignores that stanza, so the assertion is on the marshalled shape.
+func TestParentJobSpecCarriesDeploymentDNS(t *testing.T) {
+	dep := placementConfig{dnsServers: []string{"192.168.0.202", "1.1.1.1"}}
+	spec := parentJobSpecWithArtifactVolume("default", "", "gc-sessions", logShipperConfig{}, "", dep)
+
+	nets := spec.TaskGroups[0].Networks
+	if len(nets) != 1 || nets[0].Mode != "bridge" {
+		t.Fatalf("networks = %+v, want one bridge network", nets)
+	}
+	if nets[0].DNS == nil || len(nets[0].DNS.Servers) != 2 || nets[0].DNS.Servers[0] != "192.168.0.202" {
+		t.Fatalf("networks[0].DNS = %+v, want the configured resolvers in order", nets[0].DNS)
+	}
+	data, err := json.Marshal(nets)
+	if err != nil {
+		t.Fatalf("marshal networks: %v", err)
+	}
+	want := `"DNS":{"Servers":["192.168.0.202","1.1.1.1"]}`
+	if !strings.Contains(string(data), want) {
+		t.Fatalf("networks json = %s, want it to contain %s", data, want)
+	}
+}
+
+// TestParentJobSpecAppendsNodeConstraintsAfterKernelFatalRule pins the ordering
+// an operator fence must never disturb: the host-network fatal rule stays first
+// and a deployment constraint rides beside it, not in its place.
+func TestParentJobSpecAppendsNodeConstraintsAfterKernelFatalRule(t *testing.T) {
+	constraint, err := parseNodeConstraints(`${node.unique.name} != prod-nomad`)
+	if err != nil {
+		t.Fatalf("parseNodeConstraints: %v", err)
+	}
+	spec := parentJobSpecWithArtifactVolume("default", "", "gc-sessions", logShipperConfig{}, "", placementConfig{nodeConstraints: constraint})
+
+	if len(spec.Constraints) != 2 {
+		t.Fatalf("constraints = %+v, want the kernel rule plus the deployment fence", spec.Constraints)
+	}
+	if first := spec.Constraints[0]; first.LTarget != "${attr.kernel.name}" || first.RTarget != "linux" || first.Operand != "=" {
+		t.Fatalf("constraints[0] = %+v, want the linux-kernel fatal rule first", first)
+	}
+	want := nomadConstraint{LTarget: "${node.unique.name}", RTarget: "prod-nomad", Operand: "!="}
+	if got := spec.Constraints[1]; got != want {
+		t.Fatalf("constraints[1] = %+v, want %+v", got, want)
+	}
+}
+
+// TestJobspecHashChangesWhenPlacementConfigured wires the two knobs into
+// fnrt-t4l.9's drift detection: ensureParentRegistered decides to re-register
+// purely from jobspecHash, so a deployment that configures a resolver or a
+// fence on an already-registered parent must see the parent actually change —
+// which is the whole point of cr-tzsxk.18 (an out-of-band re-registration is
+// not needed once the runtime's own register carries the placement).
+func TestJobspecHashChangesWhenPlacementConfigured(t *testing.T) {
+	off := parentJobSpecWithArtifactVolume("default", "", "gc-sessions", logShipperConfig{}, "", placementConfig{})
+
+	dns := parentJobSpecWithArtifactVolume("default", "", "gc-sessions", logShipperConfig{}, "", placementConfig{dnsServers: []string{"192.168.0.202"}})
+	if off.Meta[jobspecHashMetaKey] == dns.Meta[jobspecHashMetaKey] {
+		t.Fatalf("jobspec hash unchanged after configuring DNS servers")
+	}
+
+	fence := parentJobSpecWithArtifactVolume("default", "", "gc-sessions", logShipperConfig{}, "", placementConfig{nodeConstraints: []nomadConstraint{
+		{LTarget: "${node.unique.name}", RTarget: "prod-nomad", Operand: "!="},
+	}})
+	if off.Meta[jobspecHashMetaKey] == fence.Meta[jobspecHashMetaKey] {
+		t.Fatalf("jobspec hash unchanged after configuring a node constraint")
+	}
+}
+
+func TestParseDNSServers(t *testing.T) {
+	t.Run("empty configures nothing", func(t *testing.T) {
+		for _, raw := range []string{"", "  ", ",", " , "} {
+			got, err := parseDNSServers(raw)
+			if err != nil || got != nil {
+				t.Fatalf("parseDNSServers(%q) = %v, %v; want nil, nil", raw, got, err)
+			}
+		}
+	})
+	t.Run("list of addresses", func(t *testing.T) {
+		got, err := parseDNSServers(" 192.168.0.202 , 10.0.0.1 ")
+		if err != nil {
+			t.Fatalf("parseDNSServers: %v", err)
+		}
+		if len(got) != 2 || got[0] != "192.168.0.202" || got[1] != "10.0.0.1" {
+			t.Fatalf("parseDNSServers = %v, want [192.168.0.202 10.0.0.1]", got)
+		}
+	})
+	t.Run("a hostname is a config error", func(t *testing.T) {
+		// dns.servers takes addresses; a name here silently reintroduces the
+		// unresolvable-box bug, so it must fail the op rather than register.
+		_, err := parseDNSServers("resolver.example.internal")
+		if err == nil || !strings.Contains(err.Error(), envDNSServers) {
+			t.Fatalf("parseDNSServers(hostname) error = %v, want one naming %s", err, envDNSServers)
+		}
+	})
+}
+
+func TestParseNodeConstraints(t *testing.T) {
+	t.Run("empty configures nothing", func(t *testing.T) {
+		got, err := parseNodeConstraints("  ")
+		if err != nil || got != nil {
+			t.Fatalf("parseNodeConstraints = %v, %v; want nil, nil", got, err)
+		}
+	})
+	t.Run("nomad syntax", func(t *testing.T) {
+		got, err := parseNodeConstraints(`${node.unique.name} != prod-nomad`)
+		if err != nil {
+			t.Fatalf("parseNodeConstraints: %v", err)
+		}
+		want := nomadConstraint{LTarget: "${node.unique.name}", RTarget: "prod-nomad", Operand: "!="}
+		if len(got) != 1 || got[0] != want {
+			t.Fatalf("parseNodeConstraints = %+v, want [%+v]", got, want)
+		}
+	})
+	t.Run("semicolon separates; a comma list stays in the value", func(t *testing.T) {
+		got, err := parseNodeConstraints(`${node.class} in gpu,large; ${attr.kernel.name} != darwin`)
+		if err != nil {
+			t.Fatalf("parseNodeConstraints: %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("parseNodeConstraints = %+v, want 2 constraints", got)
+		}
+		if got[0].Operand != "in" || got[0].RTarget != "gpu,large" {
+			t.Fatalf("constraints[0] = %+v, want the comma list kept intact in RTarget", got[0])
+		}
+	})
+	t.Run("malformed shapes fail closed", func(t *testing.T) {
+		for _, raw := range []string{
+			`${node.unique.name} !=`,            // no right-hand side
+			`prod-nomad`,                        // no operand at all
+			`${node.unique.name} ~= prod-nomad`, // an operand Nomad does not accept
+		} {
+			_, err := parseNodeConstraints(raw)
+			if err == nil || !strings.Contains(err.Error(), envNodeConstraint) {
+				t.Fatalf("parseNodeConstraints(%q) error = %v, want one naming %s", raw, err, envNodeConstraint)
+			}
+		}
+	})
 }

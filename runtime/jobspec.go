@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 )
@@ -76,14 +77,14 @@ const (
 // on a lab cluster's named pool (e.g. lab-session) — so a deployment that
 // needs non-default placement must set GC_NOMAD_NODE_POOL.
 func parentJobSpec(namespace, nodePool, parentID string, logShipper logShipperConfig) nomadJob {
-	return parentJobSpecWithArtifactVolume(namespace, nodePool, parentID, logShipper, "")
+	return parentJobSpecWithArtifactVolume(namespace, nodePool, parentID, logShipper, "", placementConfig{})
 }
 
 // parentJobSpecWithArtifactVolume is the deployment-configured variant of
 // parentJobSpec. An empty artifactVolumeSource deliberately produces no
 // volume declaration or task mount, preserving compatibility for deployments
 // that provide their toolchain through another mechanism.
-func parentJobSpecWithArtifactVolume(namespace, nodePool, parentID string, logShipper logShipperConfig, artifactVolumeSource string) nomadJob {
+func parentJobSpecWithArtifactVolume(namespace, nodePool, parentID string, logShipper logShipperConfig, artifactVolumeSource string, dep placementConfig) nomadJob {
 	job := nomadJob{
 		ID:        parentID,
 		Namespace: namespace,
@@ -109,13 +110,19 @@ func parentJobSpecWithArtifactVolume(namespace, nodePool, parentID string, logSh
 			MetaOptional: []string{"gc_session", "gc_nonce"},
 			Payload:      "forbidden",
 		},
-		TaskGroups: []nomadTaskGroup{sessionTaskGroup(logShipper, artifactVolumeSource)},
+		TaskGroups: []nomadTaskGroup{sessionTaskGroup(logShipper, artifactVolumeSource, dep)},
 	}
 	// Stamp the jobspec's own fingerprint into its Meta (fnrt-t4l.9): a
 	// registered parent that still exists and still matches on NodePool can
 	// nonetheless carry a stale task (04 §3, e.g. t4l.7's supervisor-script
 	// swap) that a NodePool-only comparison can never see. Computed over job
 	// BEFORE this field is set, so the hash never includes itself.
+	// Deployment-configured node constraints ride AFTER the linux fatal rule, so
+	// an operator placement fence can never displace it (jobspec_test guards the
+	// ordering). Appended before the hash is stamped, so a placement change is
+	// drift-visible to ensureParentRegistered rather than silently ignored on an
+	// already-registered parent (fnrt-t4l.9).
+	job.Constraints = append(job.Constraints, dep.nodeConstraints...)
 	job.Meta = map[string]string{jobspecHashMetaKey: jobspecHash(job)}
 	return job
 }
@@ -139,12 +146,85 @@ func jobspecHash(job nomadJob) string {
 	return hex.EncodeToString(sum[:])[:16]
 }
 
-func sessionTaskGroup(logShipper logShipperConfig, artifactVolumeSource string) nomadTaskGroup {
+// placementConfig carries the deployment-configured placement input that rides
+// the parent job: the resolvers the bridge network writes into the alloc's
+// /etc/resolv.conf, and any node constraints the estate fences sessions to.
+// Both are EMPTY by default and an empty value renders the jobspec byte-for-byte
+// as it was before cr-tzsxk.18 — including its jobspecHash — so an unset
+// deployment sees no drift and no behavior change. That is also the rollback:
+// unset the variable and the pack goes back to the spec it shipped.
+type placementConfig struct {
+	dnsServers      []string
+	nodeConstraints []nomadConstraint
+}
+
+// parseDNSServers reads GC_NOMAD_DNS_SERVERS: a comma-separated list of
+// resolver IP addresses for the session group's bridge network. An address (not
+// a hostname) is what Nomad's dns.servers takes, and a typo there reproduces
+// this bug in a form nobody sees — the box starts fine and just cannot resolve
+// anything — so a non-IP item is a config error that fails the op closed rather
+// than a value logged and dropped.
+func parseDNSServers(raw string) ([]string, error) {
+	var servers []string
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if net.ParseIP(part) == nil {
+			return nil, fmt.Errorf("parsing %s: %q is not an IP address (the value is a comma-separated list of resolver addresses such as 192.168.0.202)", envDNSServers, part)
+		}
+		servers = append(servers, part)
+	}
+	return servers, nil
+}
+
+// parseNodeConstraints reads GC_NOMAD_NODE_CONSTRAINT: node constraints to
+// append to the parent job, written in Nomad's own syntax, e.g.
+// "${node.unique.name} != prod-nomad". Several are separated by ';' rather than
+// ',' because Nomad's list operands (in/not) already use commas inside the
+// right-hand side. An unparsable entry is a config error: a silently dropped
+// constraint would let sessions place where the estate said they may not.
+func parseNodeConstraints(raw string) ([]nomadConstraint, error) {
+	var constraints []nomadConstraint
+	for _, part := range strings.Split(raw, ";") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		fields := strings.Fields(part)
+		if len(fields) != 3 {
+			return nil, fmt.Errorf("parsing %s: %q is not \"<ltarget> <operand> <rtarget>\" (e.g. \"${node.unique.name} != prod-nomad\")", envNodeConstraint, part)
+		}
+		operand := fields[1]
+		if !nomadConstraintOperands[operand] {
+			return nil, fmt.Errorf("parsing %s: %q in %q is not an operand Nomad accepts (want one of = == != =~ !~ > < >= <= in not is bitset)", envNodeConstraint, operand, part)
+		}
+		constraints = append(constraints, nomadConstraint{LTarget: fields[0], RTarget: fields[2], Operand: operand})
+	}
+	return constraints, nil
+}
+
+// nomadConstraintOperands is the operand set Nomad's constraint block accepts;
+// anything else is a typo that Nomad would reject at register time anyway, and
+// catching it here names the offending variable instead of failing a start.
+var nomadConstraintOperands = map[string]bool{
+	"=": true, "==": true, "!=": true, "=~": true, "!~": true,
+	">": true, "<": true, ">=": true, "<=": true,
+	"in": true, "not": true, "is": true, "bitset": true,
+}
+
+func sessionTaskGroup(logShipper logShipperConfig, artifactVolumeSource string, dep placementConfig) nomadTaskGroup {
 	agent := sessionTask(artifactVolumeSource)
 	tasks := []nomadTask{agent}
 	// bridge networking so the host-network fatal-rule constraint above
 	// has a placement to fail closed against (04 §4, R2a-05).
 	networks := []nomadNetwork{{Mode: "bridge"}}
+	if len(dep.dnsServers) > 0 {
+		// A bridge alloc gets a resolv.conf written by Nomad from this stanza,
+		// not one copied from the client host (cr-tzsxk.18).
+		networks[0].DNS = &nomadDNS{Servers: dep.dnsServers}
+	}
 
 	if logShipper.enabled() {
 		// Leader:true makes Nomad stop the OTHER tasks in this group only
@@ -601,6 +681,12 @@ type nomadDisconnect struct {
 
 type nomadNetwork struct {
 	Mode string `json:"Mode"`
+	// DNS is the group's network.DNS stanza: the resolver addresses Nomad
+	// writes into the alloc's /etc/resolv.conf. nil declares nothing, which
+	// leaves a bridge alloc inheriting the CLIENT HOST's resolv.conf — on a
+	// systemd-resolved host that is the 127.0.0.53 stub, unreachable from the
+	// alloc netns, so every name lookup in the box dies in ~1ms (cr-tzsxk.18).
+	DNS *nomadDNS `json:"DNS,omitempty"`
 	// DynamicPorts declares group-local ports every task in the group sees
 	// as $NOMAD_PORT_<Label> — only populated when the log-shipper task
 	// exists to bind one (fnrt-t4l.13's prometheus_exporter port).
@@ -609,6 +695,13 @@ type nomadNetwork struct {
 
 type nomadPort struct {
 	Label string `json:"Label"`
+}
+
+// nomadDNS is the network.DNS subset this pack renders. Only Servers is used;
+// Searches/Options stay undeclared so the stanza stays exactly as wide as the
+// knob that sets it.
+type nomadDNS struct {
+	Servers []string `json:"Servers,omitempty"`
 }
 
 type nomadTask struct {

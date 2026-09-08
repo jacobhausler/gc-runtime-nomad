@@ -79,6 +79,8 @@ Lifecycle ops need Nomad API configuration on the environment:
 | `GC_NOMAD_LOG_SINK_TOKEN_FILE` | no | In-box path the `log-shipper` task reads its `Authorization: Bearer` token's value from; unset ⇒ an unauthenticated sink |
 | `GC_NOMAD_LOG_LABELS` | no | `k=v,k=v` labels merged onto every shipped log line alongside the fixed `session_name`/`alloc_id`/`node`/`runtime=nomad` set |
 | `GC_NOMAD_ARTIFACT_VOLUME` | no | Nomad client host-volume name mounted read-only at `/mnt/nomad` for the pinned Linux `gc` artifact; unset ⇒ no artifact volume mount |
+| `GC_NOMAD_DNS_SERVERS` | no | Comma-separated resolver **addresses** the session group's bridge network writes into the alloc's `/etc/resolv.conf` (e.g. `192.168.0.202`). Unset ⇒ Nomad declares no `dns` stanza and the alloc inherits the *client host's* resolv.conf — on a systemd-resolved host that is the `127.0.0.53` stub, unreachable from the alloc netns, so nothing in the box resolves a name (`cr-tzsxk.18`). A non-address value is a config error, not a dropped warning |
+| `GC_NOMAD_NODE_CONSTRAINT` | no | Extra parent-job node constraints in Nomad's own syntax, e.g. `${node.unique.name} != prod-nomad`; several separated by `;` (Nomad list operands already use commas inside the value). Always appended *after* the pack's linux-kernel fatal rule, never in its place |
 
 ### Allocation environment contract
 

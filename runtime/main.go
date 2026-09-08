@@ -46,6 +46,8 @@
 //	GC_NOMAD_LOG_SHIPPER_ARTIFACT  optional: URL or local path for the pinned Vector archive; unset uses the upstream release URL
 //	GC_NOMAD_ADOPT_MAX_AGE  optional: Go duration (e.g. "30m", "2h") capping how old a live-but-unlaunched session box may be before provision/start reap it (stop + tombstone) and dispatch a fresh one instead of adopting it; unset means the 30m default, an unparseable value is a config error (cr-gdeav.6.1)
 //	GC_NOMAD_ARTIFACT_VOLUME  optional: Nomad client host-volume name mounted read-only at /mnt/nomad for the pinned Linux gc artifact; unset declares no artifact mount
+//	GC_NOMAD_DNS_SERVERS  optional: comma-separated resolver IP addresses the session group's bridge network writes into the alloc's /etc/resolv.conf (e.g. "192.168.0.202"); unset means Nomad declares no dns stanza and the alloc inherits the CLIENT HOST's resolv.conf — on a systemd-resolved host that is the unreachable 127.0.0.53 stub, so nothing in the box can resolve a name (cr-tzsxk.18)
+//	GC_NOMAD_NODE_CONSTRAINT  optional: Nomad-syntax node constraints appended to the parent job, e.g. "${node.unique.name} != prod-nomad"; several separated by ";" (Nomad list operands already use commas). Unset adds only the pack's own linux-kernel fatal rule
 //	GC_NOMAD_AGENT_LAUNCH_SCRIPT  optional: POSIX shell script the launch command execs inside the tmux pane after sourcing the staged environment (ops.go's buildLaunchCommand) — deployment-owned, so PATH prepends and HOME-style secrets-dir wiring for a specific agent (e.g. Codex) live in configuration, never in this pack; unset preserves the legacy bare-tmux placeholder session
 package main
 
@@ -73,6 +75,8 @@ const (
 	envLogArtifact    = "GC_NOMAD_LOG_SHIPPER_ARTIFACT"
 	envArtifactVolume = "GC_NOMAD_ARTIFACT_VOLUME"
 	envAdoptMaxAge    = "GC_NOMAD_ADOPT_MAX_AGE"
+	envDNSServers     = "GC_NOMAD_DNS_SERVERS"
+	envNodeConstraint = "GC_NOMAD_NODE_CONSTRAINT"
 
 	defaultParentJob = "gc-sessions"
 
@@ -139,6 +143,9 @@ func run(args []string, stdin io.Reader, stdout, stderr *os.File) int {
 		}
 		if os.Getenv(envArtifactVolume) == "" {
 			fmt.Fprintln(stderr, "warning: gc artifact volume is not configured (GC_NOMAD_ARTIFACT_VOLUME unset)")
+		}
+		if os.Getenv(envDNSServers) == "" {
+			fmt.Fprintln(stderr, "warning: session boxes will declare no dns stanza and inherit the client host's resolv.conf (GC_NOMAD_DNS_SERVERS unset) — on a systemd-resolved host that stub resolver is unreachable from a bridge alloc (cr-tzsxk.18)")
 		}
 		return exitOK
 	}
@@ -373,6 +380,14 @@ func newLifecycle() (*lifecycle, error) {
 	if err != nil {
 		return nil, err
 	}
+	dnsServers, err := parseDNSServers(os.Getenv(envDNSServers))
+	if err != nil {
+		return nil, err
+	}
+	nodeConstraints, err := parseNodeConstraints(os.Getenv(envNodeConstraint))
+	if err != nil {
+		return nil, err
+	}
 	return &lifecycle{
 		client:             c,
 		sidecar:            sc,
@@ -388,6 +403,10 @@ func newLifecycle() (*lifecycle, error) {
 		},
 		artifactVolumeSource: os.Getenv(envArtifactVolume),
 		adoptMaxAge:          adoptMaxAge,
+		placement: placementConfig{
+			dnsServers:      dnsServers,
+			nodeConstraints: nodeConstraints,
+		},
 		logf: func(format string, args ...any) {
 			fmt.Fprintf(os.Stderr, "gc-runtime-nomad: "+format+"\n", args...)
 		},
