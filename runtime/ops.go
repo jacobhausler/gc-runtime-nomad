@@ -1335,6 +1335,8 @@ func stagesAnything(cfg stageConfig) bool {
 		return true
 	}
 	secretEnv, _ := mergeExtraSecretEnv(cfg.Env, extraSecretKeys)
+	secretEnv = stripLocalCityStoreEnv(secretEnv)
+	secretEnv = mergeLaunchOptionEnv(secretEnv, cfg.Command)
 	return len(secretEnv) > 0
 }
 
@@ -1370,6 +1372,7 @@ func (l *lifecycle) stage(ctx context.Context, sessionName string, cfg stageConf
 
 	secretEnv, extraKeys := mergeExtraSecretEnv(cfg.Env, extraSecretKeys)
 	secretEnv = stripLocalCityStoreEnv(secretEnv)
+	secretEnv = mergeLaunchOptionEnv(secretEnv, cfg.Command)
 
 	var secretFiles []stageFile
 	for k, v := range secretEnv {

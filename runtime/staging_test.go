@@ -200,6 +200,61 @@ func TestExtraSecretKeysUnsetIsNoop(t *testing.T) {
 	}
 }
 
+func TestMergeLaunchOptionEnvExtractsRenderedCodexDefaultsWithoutOverwritingEnv(t *testing.T) {
+	env := map[string]string{
+		"GC_MODEL":                 "explicit-model",
+		"GC_CONTEXT_WINDOW_TOKENS": "350000",
+	}
+
+	got := mergeLaunchOptionEnv(env, `codex --model gpt-5.6-luna -c model_reasoning_effort=xhigh`)
+
+	if got["GC_MODEL"] != "explicit-model" {
+		t.Fatalf("GC_MODEL = %q, want explicit-model from explicit provider env", got["GC_MODEL"])
+	}
+	if got["GC_REASONING_EFFORT"] != "xhigh" {
+		t.Fatalf("GC_REASONING_EFFORT = %q, want xhigh from rendered command", got["GC_REASONING_EFFORT"])
+	}
+	if got["GC_CONTEXT_WINDOW_TOKENS"] != "350000" {
+		t.Fatalf("GC_CONTEXT_WINDOW_TOKENS = %q, want explicit context window preserved", got["GC_CONTEXT_WINDOW_TOKENS"])
+	}
+}
+
+func TestMergeLaunchOptionEnvExtractsCodexConfigModel(t *testing.T) {
+	got := mergeLaunchOptionEnv(nil, `codex exec --skip-git-repo-check -c model=gpt-5.6-luna -c model_reasoning_effort=xhigh`)
+
+	if got["GC_MODEL"] != "gpt-5.6-luna" {
+		t.Fatalf("GC_MODEL = %q, want gpt-5.6-luna from -c model=...", got["GC_MODEL"])
+	}
+	if got["GC_REASONING_EFFORT"] != "xhigh" {
+		t.Fatalf("GC_REASONING_EFFORT = %q, want xhigh from -c model_reasoning_effort=...", got["GC_REASONING_EFFORT"])
+	}
+}
+
+func TestStageEnvScriptIncludesRenderedLaunchOptions(t *testing.T) {
+	l, _ := newTestLifecycle(t)
+	ctx := context.Background()
+	const session = "sess-rendered-launch-options"
+
+	if err := l.opStartWithConfig(ctx, session, stageConfig{
+		Command: `codex --model gpt-5.6-luna -c model_reasoning_effort=xhigh`,
+	}); err != nil {
+		t.Fatalf("start with rendered launch options: %v", err)
+	}
+
+	exitCode, out, err := l.opExec(ctx, session, []string{"/bin/sh", "-c", `cat "$NOMAD_SECRETS_DIR/env.sh"`})
+	if err != nil || exitCode != 0 {
+		t.Fatalf("read staged env.sh = (%d, %q, %v)", exitCode, out, err)
+	}
+	for _, want := range []string{
+		"export GC_MODEL='gpt-5.6-luna'",
+		"export GC_REASONING_EFFORT='xhigh'",
+	} {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("env.sh = %q, missing %q", out, want)
+		}
+	}
+}
+
 // TestExtraSecretKeysNoCanaryLeak extends TestM3StagingReceiptNoCanaryLeak's
 // style to the extra-secret-key path: the value never appears in any Nomad
 // API request, sidecar file, or CLI stderr — only the declared KEY name

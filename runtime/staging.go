@@ -90,6 +90,101 @@ func readStageConfig(stdin io.Reader) (stageConfig, error) {
 	return cfg, nil
 }
 
+// mergeLaunchOptionEnv carries the provider options that gc renders into the
+// launch command into the same sourceable env.sh contract as the provider's
+// explicit environment. The Nomad pack replaces gc's canonical tmux pane
+// command with its deployment bootstrap, so those rendered flags otherwise
+// never reach the agent. Existing env entries win: an explicit provider value
+// is authoritative over a value recovered from the rendered command.
+func mergeLaunchOptionEnv(env map[string]string, command string) map[string]string {
+	merged := make(map[string]string, len(env)+2)
+	for key, value := range env {
+		merged[key] = value
+	}
+	for key, value := range launchOptionEnv(command) {
+		if _, exists := merged[key]; !exists {
+			merged[key] = value
+		}
+	}
+	return merged
+}
+
+func launchOptionEnv(command string) map[string]string {
+	words := strings.Fields(command)
+	options := make(map[string]string, 2)
+	for i := 0; i < len(words); i++ {
+		word := strings.Trim(words[i], "'\"")
+		switch {
+		case word == "--model" || word == "-m":
+			if i+1 < len(words) {
+				if value := safeLaunchOptionValue(words[i+1], false); value != "" {
+					options["GC_MODEL"] = value
+				}
+				i++
+			}
+		case strings.HasPrefix(word, "--model="):
+			if value := safeLaunchOptionValue(strings.TrimPrefix(word, "--model="), false); value != "" {
+				options["GC_MODEL"] = value
+			}
+		case strings.HasPrefix(word, "-m="):
+			if value := safeLaunchOptionValue(strings.TrimPrefix(word, "-m="), false); value != "" {
+				options["GC_MODEL"] = value
+			}
+		case word == "-c":
+			if i+1 < len(words) {
+				if key, value := parseCodexSetting(words[i+1]); key != "" {
+					options[key] = value
+				}
+				i++
+			}
+		case strings.HasPrefix(word, "model="):
+			if value := safeLaunchOptionValue(strings.TrimPrefix(word, "model="), false); value != "" {
+				options["GC_MODEL"] = value
+			}
+		case strings.HasPrefix(word, "model_reasoning_effort="):
+			if key, value := parseCodexSetting(word); key != "" {
+				options[key] = value
+			}
+		}
+	}
+	return options
+}
+
+func parseCodexSetting(word string) (string, string) {
+	word = strings.Trim(strings.TrimSpace(word), "'\"")
+	if strings.HasPrefix(word, "model=") {
+		value := safeLaunchOptionValue(strings.TrimPrefix(word, "model="), false)
+		if value != "" {
+			return "GC_MODEL", value
+		}
+	}
+	if strings.HasPrefix(word, "model_reasoning_effort=") {
+		value := safeLaunchOptionValue(strings.TrimPrefix(word, "model_reasoning_effort="), true)
+		if value != "" {
+			return "GC_REASONING_EFFORT", value
+		}
+	}
+	return "", ""
+}
+
+func safeLaunchOptionValue(raw string, effort bool) string {
+	value := strings.Trim(strings.TrimSpace(raw), "'\"")
+	if value == "" {
+		return ""
+	}
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') || r == '.' || r == '_' || r == ':' || r == '-' {
+			continue
+		}
+		return ""
+	}
+	if effort && strings.ContainsAny(value, ".:_") {
+		return ""
+	}
+	return value
+}
+
 // startupPrompt returns the text this pack owes the launched pane as its
 // first turn, and which wire field it came from. Empty text means nothing is
 // owed — there was no startup prompt, or gc routed it to argv (the default
