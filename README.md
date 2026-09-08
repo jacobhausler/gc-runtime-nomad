@@ -113,63 +113,65 @@ shipped; disabling shipping is therefore explicit and visible.
 
 > **Draft.** The shape below is the install this pack supports as built; the
 > cutover decision that turns it into the estate's running configuration (D4)
-> has not ruled. Anything estate-specific is labelled as such rather than
-> stated as a value to copy.
+> has not ruled. Anything estate-specific is confined to part 3 and labelled
+> there as an example, not stated as a value to copy.
 
-1. **Prerequisites.**
-   - `gc` on PATH, installed at a pin:
-     `go install github.com/gastownhall/gascity/cmd/gc@<pin>`. `gc` is a tool
-     dependency of this pack, never a Go import — the pack keeps zero gascity
-     Go dependencies.
-   - A **pin that carries the remote-worker families** listed in
-     [`docs/PIN-DEPENDENCIES.md`](docs/PIN-DEPENDENCIES.md). This is the gate
-     that silently decides whether a box can do work: the identities the
-     allocation sends must be a superset of the identities the claim gate
-     matches, or every session on a lane whose work arrives as a step bead
-     assigned to the pool template answers `drain/no_work` and looks healthy
-     while doing nothing. A fix for such a gate that has shipped on a branch
-     **is not in effect until the pin moves onto a commit that is an ancestor
-     of it** — verify with `git merge-base --is-ancestor <fix-sha> <pin>`, and
-     treat the result as a pin-roll action, not a defect to re-investigate.
-   - A Go toolchain where `go install` may run. On an estate that forbids
-     Mac-side Go runs (this one does), build off-Mac and install the artifact
-     from there; `./install.sh agent-launch` remains runnable from the
-     operator seat because that half is pure ssh+scp.
-   - A reachable Nomad API, plus **two tokens**: a management token holding
-     `submit-job` for the one-time parent-job registration (step 4), and the
-     narrowed runtime token every session-path op runs on.
-   - Network reach from an allocation to the machine running the `gc`
-     supervisor (step 8), and to a resolver (step 7).
+The runtime and the agent **provider** are separate abstractions: this pack
+schedules a box and feeds it; it does not know, name, or ship what runs inside
+it. Parts 1 and 3 are therefore the runtime and one estate that runs it; part 2
+is the contract the provider side must satisfy.
 
-2. **Install the executable.** `./install.sh` runs `go install .` in
+### Part 1 — Runtime requirements
+
+Provider-agnostic: what any deployment of this pack needs.
+
+1. **`gc`, installed at a pin that carries the remote-worker families.**
+   `go install github.com/gastownhall/gascity/cmd/gc@<pin>`. `gc` is a tool
+   dependency of this pack, never a Go import — the pack keeps zero gascity
+   Go dependencies. The families the pin must carry, their upstream twins, and
+   the first pin that carried each are the checklist in
+   [`docs/PIN-DEPENDENCIES.md`](docs/PIN-DEPENDENCIES.md). Pin choice is the
+   gate that silently decides whether a box can do work: the identities the
+   allocation sends must be a superset of the identities the claim gate
+   matches, or every session on a lane whose work arrives as a step bead
+   assigned to the pool template answers `drain/no_work` and looks healthy
+   while doing nothing. A fix for such a gate that has shipped on a branch
+   **is not in effect until the pin moves onto a commit that is an ancestor
+   of it** — verify with `git merge-base --is-ancestor <fix-sha> <pin>`, and
+   treat the result as a pin-roll action, not a defect to re-investigate.
+2. **A Go toolchain where `go install` may run.** On an estate that forbids
+   Mac-side Go runs, build off-Mac and install the artifact from there;
+   `./install.sh agent-launch` remains runnable from the operator seat because
+   that half is pure ssh+scp.
+3. **A reachable Nomad API, plus two tokens:** a management token holding
+   `submit-job` for the one-time parent-job registration (step 6), and the
+   narrowed runtime token every session-path op runs on.
+4. **Install the executable.** `./install.sh` runs `go install .` in
    `runtime/` and confirms `gc-runtime-nomad` landed on `PATH` (adding
    `$(go env GOBIN)` if it did not). This file *is* the pack's install step —
    the `pack-runtimes` `gc doctor` check then verifies the binary is installed
    and answers the RPP handshake (RUNTIME-SEL-011).
-
-3. **Deploy the agent launcher.** `install.sh` also deploys the deployment-owned
-   bootstrap the launched tmux pane execs — but only when
+5. **Deploy the agent launcher.** `install.sh` also deploys the
+   deployment-owned bootstrap the launched tmux pane execs — but only when
    `GC_NOMAD_AGENT_LAUNCH_SOURCE` is set (unset ⇒ the deploy prints a skip line
-   and does nothing else, which is also the rollback path). Host and path
-   default to `GC_NOMAD_AGENT_LAUNCH_HOST=rhuidean` and
-   `GC_NOMAD_AGENT_LAUNCH_TARGET=/mnt/nomad/gc/agent-launch.sh`; both are
-   estate-specific pointers, not defaults to adopt. `./install.sh agent-launch`
-   runs this half alone. The deploy verifies by sha256 (a matching live copy is
-   left alone), takes a dated rollback copy before overwriting, preserves the
-   live file's owner/group/mode, and fails closed on any mismatch. Point
+   and does nothing else, which is also the rollback path). Host and path come
+   from `GC_NOMAD_AGENT_LAUNCH_HOST` / `GC_NOMAD_AGENT_LAUNCH_TARGET`; both are
+   estate-supplied pointers with estate-specific defaults in `install.sh`
+   (part 3), not defaults to adopt. `./install.sh agent-launch` runs this half
+   alone. The deploy verifies by sha256 (a matching live copy is left alone),
+   takes a dated rollback copy before overwriting, preserves the live file's
+   owner/group/mode, and fails closed on any mismatch. Point
    `GC_NOMAD_AGENT_LAUNCH_SCRIPT` at the deployed path in the provider config.
    **A launcher edit does not take effect via `go install`** — the live copy on
    the shared volume is what the launch path execs.
-
-4. **Register the parent job once, with the management token.** Run
+6. **Register the parent job once, with the management token.** Run
    `provision` or `start` once with `GC_NOMAD_TOKEN` set to that token; the
    registration is idempotent and stamps the jobspec fingerprint. After **any**
    jobspec change — task spec, node pool, DNS, constraints — re-register it the
    same way, or the pack reports the parent stale and refuses to dispatch.
    `GC_NOMAD_FORBID_REGISTER=true` makes an absent or drifted parent a
    fail-closed error instead of an attempted registration.
-
-5. **Configure the runtime's environment.** These keys are read by the
+7. **Configure the runtime's environment.** These keys are read by the
    `gc-runtime-nomad` process, i.e. the **supervisor's** environment — none of
    them belong in the allocation. Landing a change here means the supervisor
    process env (`GC_SUPERVISOR_ENV` → the launchd plist on this estate) and a
@@ -185,11 +187,11 @@ shipped; disabling shipping is therefore explicit and visible.
    | `GC_NOMAD_PARENT_JOB` | no | Parameterized parent job ID (default `gc-sessions`) |
    | `GC_NOMAD_NODE_POOL` | no | Parent job's node pool (empty = Nomad's own default pool) |
    | `GC_NOMAD_NODE_CONSTRAINT` | no | `;`-separated Nomad-syntax constraints appended *after* the pack's linux-kernel fatal rule, e.g. `${node.unique.name} != prod-nomad` |
-   | `GC_NOMAD_DNS_SERVERS` | no | Resolver addresses the session group's bridge network writes into the alloc's `/etc/resolv.conf` — see step 7 |
+   | `GC_NOMAD_DNS_SERVERS` | no | Resolver addresses the session group's bridge network writes into the alloc's `/etc/resolv.conf` — see step 10 |
    | `GC_NOMAD_ARTIFACT_VOLUME` | no | Client host-volume name mounted read-only at `/mnt/nomad` for the pinned Linux `gc` artifact |
-   | `GC_NOMAD_AGENT_LAUNCH_SCRIPT` | no | The bootstrap from step 3; unset preserves the bare-tmux placeholder pane |
+   | `GC_NOMAD_AGENT_LAUNCH_SCRIPT` | no | The bootstrap from step 5; unset preserves the bare-tmux placeholder pane |
    | `GC_NOMAD_EXEC_TASK` | no | Task name alloc-exec targets, when it is not the pack's session task |
-   | `GC_NOMAD_EXTRA_SECRET_KEYS` | no | Comma-separated names to bridge from the supervisor's own process env into `$NOMAD_SECRETS_DIR` — the value-blind channel for a secret `gc`'s provider env map cannot interpolate (e.g. `CODEX_AUTH_JSON`). Naming a key is what stages it; an unnamed key is never staged, and an extra key is always routed to the secrets dir, never to the launch argv |
+   | `GC_NOMAD_EXTRA_SECRET_KEYS` | no | Comma-separated names to bridge from the supervisor's own process env into `$NOMAD_SECRETS_DIR` — the value-blind channel for a secret `gc`'s provider env map cannot interpolate. Naming a key is what stages it; an unnamed key is never staged, and an extra key is always routed to the secrets dir, never to the launch argv. The names themselves belong to the deployment (part 2 works one Codex name through it) |
    | `GC_NOMAD_EGRESS_DIR` | no | Stop-path transcript/evidence directory; unset disables egress |
    | `GC_NOMAD_FORBID_REGISTER` | no | `true` = never register the parent; fail closed instead |
    | `GC_NOMAD_ADOPT_MAX_AGE` | no | Go duration capping how old a live-but-unlaunched box may be before it is reaped and replaced instead of adopted (default `30m`; unparseable is a config error) |
@@ -199,71 +201,120 @@ shipped; disabling shipping is therefore explicit and visible.
    | `GC_NOMAD_LOG_SHIPPER_ARTIFACT` | no | URL or local path for the pinned Vector archive; unset uses the upstream release URL |
 
    The identity/config side of the allocation is *not* configured here:
-   `GC_CITY_URL`, `GC_CITY_NAME`, and the relay's three PEM keys arrive through
-   the provider env / secrets channel, and session identity
-   (`GC_SESSION_ID`/`GC_AGENT`/`GC_SESSION_NAME`) is added by the lifecycle.
-   When the provider env carries a complete remote context, the pack stages
-   `gc-home/contexts.toml`, exports `GC_HOME` + `GC_CITY_CONTEXT`, and then
-   **drops `GC_CITY_URL` from `env.sh`** — a target named twice makes `gc` fail
-   closed. It also strips the local-target family (`GC_CITY`, `GC_CITY_PATH`,
-   `GC_CITY_ROOT`, `GC_CITY_RUNTIME_DIR`, `GC_BEADS*`) before the launch argv
-   filter runs. Do not work around either by re-adding them to the provider env.
-
-6. **Stage the agent toolchain as a full standalone package.** For Codex that
-   means `codex-package-<target>.tar.gz` — **not** the bare
-   `codex-<target>.tar.gz`. The standalone package is what carries
-   `bin/codex-code-mode-host`, `codex-resources/` (bwrap, zsh), `codex-path/`
-   (rg) and `codex-package.json`; staged as a single file, the entrypoint runs
-   and reports its execution host as unavailable, which degrades the agent to a
-   chat window that cannot run a tool and reads like a runtime failure. Pick the
-   target triple from the box (`file`/`ldd` on the binary you are replacing),
-   confirm the sha against the release's own `codex-package_SHA256SUMS`, keep a
-   dated rollback copy, and verify by running the launcher's own `PATH` line:
-   `env -i PATH=<staged bin dir>:/usr/bin:/bin sh -c 'command -v codex;
-   command -v codex-code-mode-host'`. A toolchain staging receipt must name the
-   artifact, its sha256, and the layout it asserts — a missing sha is the
-   symptom that the layout was never checked. Credentials reach the box the same
-   way the other secrets do: `CODEX_AUTH_JSON` named in
-   `GC_NOMAD_EXTRA_SECRET_KEYS`, staged value-blind into
-   `$NOMAD_SECRETS_DIR`, and installed to `$CODEX_HOME/auth.json` by the
-   launcher in step 3.
-
-7. **DNS and placement.** `GC_NOMAD_DNS_SERVERS` is not cosmetic: unset, Nomad
-   declares no `dns` stanza, the alloc inherits the **client host's**
-   `resolv.conf`, and on a systemd-resolved host that is the `127.0.0.53` stub —
-   unreachable from the alloc netns, so nothing inside the box resolves a name
-   and every failure downstream looks like an agent or network defect. Give it
-   real resolver addresses (a non-address value is a config error, not a
-   warning). Placement has the same trap in a different shape: the node pool
-   must actually span the boxes you expect work to land on, and the pack appends
-   `GC_NOMAD_NODE_POOL` / `GC_NOMAD_NODE_CONSTRAINT` to the parent job — so
-   either is a jobspec change and needs step 4's re-registration to take effect.
-
-8. **Reach the control plane through the relay, and check the host firewall.**
-   An allocation cannot reach the supervisor's loopback listeners, so remote
-   sessions point `GC_CITY_URL` at the LAN mTLS relay (on this estate
-   `https://192.168.0.107:8443/api`) which requires and verifies a client
-   certificate signed by the control-plane CA and forwards `/api/*`, `/hose/*`,
-   `/llm/*` to their loopback upstreams; the three PEM paths ride in the staged
-   secrets. Two properties to check rather than assume, because both fail as
-   timeouts and neither names itself:
-   - Clients reach the relay by **bare IP** — allocations have no DNS for the
-     host, so there is no SNI. The relay's site is deliberately host-less and
-     `strict_sni_host` is relaxed so the client-auth policy applies to every
-     connection instead of leaking SNI-less ones to a default policy without it.
-   - The Mac's pf anchor `/etc/pf.anchors/gc-nomad-nodes` admits `:8443` only
-     from an explicit table of node addresses. A box that is not in that table
-     pings fine, reaches every other port, and times out on the relay — and the
-     retired nodes in the table do not announce themselves. Read the live table
-     and the source (`ops/pf/gc-nomad-nodes.anchor`) before blaming the relay;
-     this is defence in depth only, the CA-verified client certificate is the
-     gate. Adding a node is an owner action.
-
-9. **Check it without a cluster.** `gc-runtime-nomad check` warns when log
+   `GC_CITY_URL`, `GC_CITY_NAME`, and whatever transport credentials the
+   endpoint needs arrive through the provider env / secrets channel, and session
+   identity (`GC_SESSION_ID`/`GC_AGENT`/`GC_SESSION_NAME`) is added by the
+   lifecycle.
+8. **Give the allocations a city endpoint they can actually reach — named
+   exactly once.** An allocation cannot reach the supervisor's loopback
+   listeners, so a remote session needs either a complete **remote context**
+   (`GC_HOME` + `GC_CITY_CONTEXT`, staged by the pack as `gc-home/contexts.toml`
+   — an mTLS context on this estate) or `GC_CITY_URL`. Both at once is a
+   failure, not a redundancy: when the provider env carries a complete remote
+   context, the pack stages `gc-home/contexts.toml`, exports `GC_HOME` +
+   `GC_CITY_CONTEXT`, and then **drops `GC_CITY_URL` from `env.sh`** — a target
+   named twice makes `gc` fail closed. It also strips the local-target family
+   (`GC_CITY`, `GC_CITY_PATH`, `GC_CITY_ROOT`, `GC_CITY_RUNTIME_DIR`,
+   `GC_BEADS*`) before the launch argv filter runs. Do not work around either
+   by re-adding them to the provider env.
+9. **Stage what must be secret at runtime, value-blind.**
+   `GC_NOMAD_EXTRA_SECRET_KEYS` is generic: name a key and the pack bridges that
+   *name* from the supervisor's own process env into `$NOMAD_SECRETS_DIR`
+   without the value ever entering a jobspec, an argv, or this repository. The
+   credential NAME is the deployer's choice — the runtime has no credential
+   vocabulary and none of its own keys to reserve; the box installs what it
+   finds there.
+10. **Resolvers and placement are configuration, not cosmetics.**
+    `GC_NOMAD_DNS_SERVERS` unset means Nomad declares no `dns` stanza, the alloc
+    inherits the **client host's** `resolv.conf`, and on a systemd-resolved host
+    that is the `127.0.0.53` stub — unreachable from the alloc netns, so nothing
+    inside the box resolves a name and every failure downstream looks like an
+    agent or network defect. Give it real resolver addresses (a non-address
+    value is a config error, not a warning). Placement has the same trap in a
+    different shape: the node pool must actually span the boxes you expect work
+    to land on, and the pack appends `GC_NOMAD_NODE_POOL` /
+    `GC_NOMAD_NODE_CONSTRAINT` to the parent job — so either is a jobspec change
+    and needs step 6's re-registration to take effect.
+11. **Check it without a cluster.** `gc-runtime-nomad check` warns when log
    shipping or the artifact volume is unconfigured.
    `GC_BIN=$(command -v gc) ./conformance.sh` runs `gc runtime check` and the
    full RPP lifecycle round-trip against the in-memory fake Nomad API — no
    cluster, no network.
+
+### Part 2 — Provider toolchain in the box
+
+The rule, in the abstract: **the box must provide the seat's provider command on
+`PATH` exactly as `gc` renders it.** The command line the provider config
+produces for a session has to resolve and run inside the allocation, unchanged,
+with whatever siblings that command assumes present alongside it. Nothing
+provider-specific lives in the runtime: `gc-runtime-nomad` never names,
+downloads, installs, or inspects a provider — it launches a pane and execs the
+launcher from part 1 step 5, which execs what it is told. If a provider needs a
+file, a binary, or a credential, that is the deployment staging it (the toolchain
+volume, the launcher, the value-blind secret channel). A seat that comes up but
+cannot run a tool is a toolchain-staging defect wearing a runtime costume.
+
+**Worked example — Codex.** Stage the agent toolchain as a **full standalone
+package**: `codex-package-<target>.tar.gz` — **not** the bare
+`codex-<target>.tar.gz`. The standalone package is what carries
+`bin/codex-code-mode-host`, `codex-resources/` (bwrap, zsh), `codex-path/` (rg)
+and `codex-package.json`; staged as a single file, the entrypoint runs and
+reports its execution host as unavailable, which degrades the agent to a chat
+window that cannot run a tool and reads like a runtime failure. Pick the target
+triple from the box (`file`/`ldd` on the binary you are replacing), confirm the
+sha against the release's own `codex-package_SHA256SUMS`, keep a dated rollback
+copy, and verify by running the launcher's own `PATH` line:
+`env -i PATH=<staged bin dir>:/usr/bin:/bin sh -c 'command -v codex;
+command -v codex-code-mode-host'`. A toolchain staging receipt must name the
+artifact, its sha256, and the layout it asserts — a missing sha is the symptom
+that the layout was never checked. Its credential rides the generic channel from
+part 1 step 9 under whatever name the deployment chose (here `CODEX_AUTH_JSON`),
+staged value-blind into `$NOMAD_SECRETS_DIR`, and the launcher from step 5
+installs it to `$CODEX_HOME/auth.json`.
+
+Prebaking the toolchain into the box image is the intended 1.0.x shape —
+`gc build-image` is the prebake verb and epic `cr-u7b0s` is that work; manual
+staging as above is what runs today.
+
+### Part 3 — Estate deployment example (Westlands)
+
+**An example, not a template.** Every value below is one estate's choice, and
+the D4 cutover decision has not ruled. Read it as "what a filled-in deployment
+looks like", not as defaults.
+
+- **City endpoint** — the LAN mTLS relay, `https://192.168.0.107:8443/api` in
+  `GC_CITY_URL`: a caddy listener that requires and verifies a client
+  certificate signed by the control-plane CA and forwards `/api/*`, `/hose/*`,
+  `/llm/*` to their loopback upstreams. The three PEM paths ride in the staged
+  secrets. Two properties to check rather than assume, because both fail as
+  timeouts and neither names itself: clients reach the relay by **bare IP** —
+  allocations have no DNS for the host, so there is no SNI — and the relay's
+  site is deliberately host-less with `strict_sni_host` relaxed, so the
+  client-auth policy applies to every connection instead of leaking SNI-less
+  ones to a default policy without it.
+- **Host firewall** — the Mac's pf anchor `/etc/pf.anchors/gc-nomad-nodes`
+  admits `:8443` only from an explicit table of node addresses. A box that is
+  not in that table pings fine, reaches every other port, and times out on the
+  relay — and the retired nodes in the table do not announce themselves. Read
+  the live table and the source (`ops/pf/gc-nomad-nodes.anchor`) before blaming
+  the relay; this is defence in depth only, the CA-verified client certificate
+  is the gate. Adding a node is an owner action.
+- **Resolver** — `GC_NOMAD_DNS_SERVERS=192.168.0.202`, the estate's AdGuard
+  DNS. rhuidean's own `/etc/resolv.conf` is the systemd-resolved `127.0.0.53`
+  stub, which is precisely the case part 1 step 10 warns about.
+- **Placement** — worker boxes run on rhuidean only:
+  `GC_NOMAD_NODE_POOL=prod-services` plus
+  `GC_NOMAD_NODE_CONSTRAINT='${node.unique.name} != prod-nomad'` (both live in
+  `~/.gc/secrets.env`, read 2026-09-08). Either is a jobspec change, so part 1
+  step 6's re-registration is what makes it real.
+- **Agent-launch pointers** — `GC_NOMAD_AGENT_LAUNCH_HOST=rhuidean`,
+  `GC_NOMAD_AGENT_LAUNCH_TARGET=/mnt/nomad/gc/agent-launch.sh`, and the
+  provider config's `GC_NOMAD_AGENT_LAUNCH_SCRIPT` pointed at that deployed
+  path. They are `install.sh`'s defaults on this estate and nothing more.
+- **Go runs off-Mac** — this estate forbids Mac-side `go build`/`test`/`vet`/
+  `install`, so the `go install` behind step 1 and step 4 runs on an admitted
+  builder and the artifact is installed from there; `./install.sh agent-launch`
+  still runs from the operator seat because that half is pure ssh+scp.
 
 ## Conformance
 
