@@ -109,12 +109,11 @@ Add `GC_NOMAD_LOG_SINK_TOKEN_FILE` when the firehose requires bearer auth and
 the pack prints a warning during its check and session logs will not be
 shipped; disabling shipping is therefore explicit and visible.
 
-## Install (draft — pending D4)
+## Install
 
-> **Draft.** The shape below is the install this pack supports as built; the
-> cutover decision that turns it into the estate's running configuration (D4)
-> has not ruled. Anything estate-specific is confined to part 3 and labelled
-> there as an example, not stated as a value to copy.
+D4 has ruled: this pack is now the estate default for every lane except the
+executive. Anything estate-specific below is confined to part 3 and labelled
+there as an example, not stated as a value to copy.
 
 The runtime and the agent **provider** are separate abstractions: this pack
 schedules a box and feeds it; it does not know, name, or ship what runs inside
