@@ -30,6 +30,22 @@ const (
 	allocExecReadyDelay    = 250 * time.Millisecond
 )
 
+var (
+	// errBindingNoMatch is returned when Nomad's children-of-parent read has
+	// no child attributable to the requested session. Callers that are
+	// looking for a current allocation translate this into the existing
+	// session-not-found contract; the recovery helper keeps it distinct so a
+	// caller cannot mistake an empty read for a recovered binding.
+	errBindingNoMatch = errors.New("sidecar binding recovery: no matching child")
+	// errBindingAmbiguous prevents a recovery from guessing when more than one
+	// child carries the same session Meta. The safe answer is a loud refusal.
+	errBindingAmbiguous = errors.New("sidecar binding recovery: matching children are ambiguous")
+	// errBindingTerminal prevents a terminal Meta-matching child from being
+	// silently skipped. A terminal match is evidence of a stale or disputed
+	// binding, not permission to dispatch another child.
+	errBindingTerminal = errors.New("sidecar binding recovery: matching child is terminal")
+)
+
 // lifecycle implements the RPP ops this pack scopes so far: the four
 // dispatch/deregister/blocking-read lifecycle ops (start, stop, is-running,
 // list-running, NRT-P1-03), the provision/launch split and warm relaunch
@@ -557,29 +573,66 @@ func (l *lifecycle) opStartWithConfig(ctx context.Context, sessionName string, c
 // already has a box" test opProvision, opStart, and dispatch all key off, so
 // the three cannot drift apart on what counts as an existing session.
 //
-// Reported not-live (false, nil) for anything that should fall through to a
-// fresh dispatch: no binding, a dispatch-intent record with no ChildJobID
-// yet (dispatch's own nonce-adoption path handles that one), an all-terminal
-// child, or a failed alloc lookup. A lookup failure is NOT proof of absence,
-// but wedging start/provision behind an unreachable API is worse than
-// risking a duplicate — the cluster-side duplicate suppression a full
-// implementation would add (04 §6) is out of scope for the provision split.
+// When the binding is missing, liveChild first attempts Meta recovery. An
+// exactly-one live child is returned as live after the atomic repair. A
+// missing binding with no matching child, or only a terminal child, follows
+// the normal fresh-dispatch path; the recovery helper itself reports those
+// cases, so they are never silently treated as a recoverable binding. A
+// failed alloc lookup on a recovered child is an error rather than permission
+// to dispatch around an unknown live state. For an existing binding, the
+// historical best-effort lookup behavior remains unchanged.
 func (l *lifecycle) liveChild(ctx context.Context, sessionName string) (binding, bool, error) {
 	b, ok, err := l.sidecar.load(sessionName)
 	if err != nil {
 		return binding{}, false, err
 	}
+	recovered := false
 	if !ok || b.ChildJobID == "" {
+		// Preserve dispatch's existing nonce-specific crash recovery for an
+		// intent record. A completed dispatch with no binding is recovered by
+		// session Meta below; an intent with no matching child still follows
+		// dispatch's normal fresh-dispatch path.
+		if ok && b.ChildJobID == "" && b.Nonce != "" {
+			return binding{}, false, nil
+		}
+		var recoveredBinding binding
+		if ok {
+			recoveredBinding, err = l.recoverBinding(ctx, sessionName, b)
+		} else {
+			recoveredBinding, err = l.recoverBinding(ctx, sessionName, nil)
+		}
+		if err != nil {
+			// A session that has never been provisioned has no binding and no
+			// matching child. A terminal match is also the established post-stop
+			// and post-reap state, so report both cases and preserve the existing
+			// fresh-dispatch path. Ambiguity, malformed Meta, and lookup errors
+			// remain fail-closed rather than guessing or dispatching.
+			if errors.Is(err, errBindingNoMatch) || errors.Is(err, errBindingTerminal) {
+				l.logDecision("provision/start %q: Meta binding recovery not used: %v", sessionName, err)
+				return binding{}, false, nil
+			}
+			return binding{}, false, err
+		}
+		b = &recoveredBinding
+		recovered = true
+	}
+	if b.ChildJobID == "" {
 		return binding{}, false, nil
 	}
 	allocs, _, err := l.client.listAllocsForJob(ctx, b.ChildJobID, 0, 0)
 	if err != nil {
+		if recovered {
+			return binding{}, false, fmt.Errorf("checking recovered child %q for session %q: %w", b.ChildJobID, sessionName, err)
+		}
 		return binding{}, false, nil
 	}
 	for _, a := range allocs {
 		if !isTerminalStatus(a.ClientStatus) {
 			return *b, true, nil
 		}
+	}
+	if recovered {
+		return binding{}, false, fmt.Errorf("recovered child %q for session %q has no non-terminal allocation", b.ChildJobID, sessionName)
 	}
 	return binding{}, false, nil
 }
@@ -626,7 +679,14 @@ const (
 func (l *lifecycle) classifyAdoption(ctx context.Context, sessionName string, b binding) (adoptPath, string) {
 	age := time.Since(b.CreatedAt).Round(time.Second)
 	limit := l.adoptAgeLimit()
-	if !b.CreatedAt.IsZero() && time.Since(b.CreatedAt) > limit {
+	if b.CreatedAt.IsZero() {
+		// Nomad's jobs-list response does not carry a creation timestamp, so
+		// a binding reconstructed from Meta cannot be sent through the age
+		// gate with a fabricated zero/now value. Refuse explicitly; otherwise
+		// an arbitrarily old child would look young and be adopted forever.
+		return adoptReject, fmt.Sprintf("binding creation age is unknown; refusing adoption because the adoption age limit %s cannot be enforced", limit)
+	}
+	if time.Since(b.CreatedAt) > limit {
 		return adoptReap, fmt.Sprintf("binding age %s exceeds the adoption age limit %s", age, limit)
 	}
 	alive, known := l.bindingAgentStatus(ctx, b)
@@ -718,7 +778,7 @@ func (l *lifecycle) adoptExisting(ctx context.Context, sessionName string, b bin
 		return false, nil
 	default:
 		l.logDecision("%s %q: path=reject-already-exists — %s", op, sessionName, why)
-		return false, fmt.Errorf("session %q already exists", sessionName)
+		return false, fmt.Errorf("session %q already exists: %s", sessionName, why)
 	}
 }
 
@@ -1127,6 +1187,73 @@ func (l *lifecycle) parentJobSpec() nomadJob {
 	return parentJobSpecWithArtifactVolume(l.client.namespace, l.nodePool, l.parentJobID, l.logShipper, l.artifactVolumeSource, l.placement)
 }
 
+// recoverBinding reconstructs the part of a sidecar binding that Nomad's
+// native children-of-parent jobs list can answer. The list is intentionally
+// filtered by the child namespace as well as gc_session: the request's
+// namespace query is not a substitute for checking each returned row.
+//
+// Exactly one attributable, non-terminal child is required. Zero matches,
+// multiple matches, a terminal match, or a missing nonce are all loud errors;
+// the caller must never guess a child or dispatch around a disputed binding.
+// CreatedAt remains zero because the jobs-list response does not provide a
+// creation timestamp. Adoption handles that unknown age explicitly instead
+// of silently bypassing the bounded adoption-age rule.
+func (l *lifecycle) recoverBinding(ctx context.Context, sessionName string, prior *binding) (binding, error) {
+	children, err := l.client.listChildJobs(ctx, l.parentJobID)
+	if err != nil {
+		return binding{}, fmt.Errorf("recovering sidecar binding for session %q: %w", sessionName, err)
+	}
+
+	matches := make([]childJob, 0, 1)
+	for _, child := range children {
+		if child.Namespace != l.client.namespace || child.Meta["gc_session"] != sessionName {
+			continue
+		}
+		matches = append(matches, child)
+	}
+	switch len(matches) {
+	case 0:
+		return binding{}, fmt.Errorf("%w for session %q in parent %q", errBindingNoMatch, sessionName, l.parentJobID)
+	case 1:
+		// Continue with the guard checks below.
+	default:
+		return binding{}, fmt.Errorf("%w for session %q in parent %q: found %d children", errBindingAmbiguous, sessionName, l.parentJobID, len(matches))
+	}
+
+	child := matches[0]
+	if child.Terminal {
+		return binding{}, fmt.Errorf("%w for session %q: child %q", errBindingTerminal, sessionName, child.ID)
+	}
+	nonce := strings.TrimSpace(child.Meta["gc_nonce"])
+	if nonce == "" {
+		return binding{}, fmt.Errorf("sidecar binding recovery: child %q for session %q has no gc_nonce", child.ID, sessionName)
+	}
+
+	recovered := binding{SessionName: sessionName, ChildJobID: child.ID, Namespace: child.Namespace, Nonce: nonce}
+	if prior != nil {
+		// A dispatch-intent record may already carry the local residue that
+		// Nomad cannot answer. Preserve it while replacing only the fields
+		// recovered from Meta. currentAlloc can retain an intent's timestamp
+		// and staging state; a nil prior means the sidecar record was
+		// completely lost.
+		base := *prior
+		recovered.CreatedAt = base.CreatedAt
+		recovered.EgressComplete = base.EgressComplete
+		recovered.EvidenceLost = base.EvidenceLost
+		recovered.StagePending = base.StagePending
+		recovered.Launched = base.Launched
+		recovered.AgentPID = base.AgentPID
+		recovered.WorkDir = base.WorkDir
+		recovered.PromptedAt = base.PromptedAt
+		recovered.PromptStatus = base.PromptStatus
+		recovered.PromptPending = base.PromptPending
+	}
+	if err := l.sidecar.save(recovered); err != nil {
+		return binding{}, fmt.Errorf("repairing sidecar binding for session %q: %w", sessionName, err)
+	}
+	return recovered, nil
+}
+
 // findOrphanByNonce looks up the parent job's dispatched children (04 §2.1
 // rule 2: "list the city parent's children with meta=true") for one whose
 // Meta gc_session/gc_nonce match, and reports it only if it is still
@@ -1532,15 +1659,49 @@ var errSessionNotFound = errors.New("session not found")
 var errAllocNotReady = errors.New("allocation not ready")
 
 // currentAlloc resolves the non-terminal Nomad alloc ID backing
-// sessionName's current child job, sidecar-binding-primary (04 §2.1 rule 1).
+// sessionName's current child job, sidecar-binding-primary (04 §2.1 rule 1),
+// recovering a missing binding from Nomad Meta under the session lock.
 func (l *lifecycle) currentAlloc(ctx context.Context, sessionName string) (string, error) {
 	b, ok, err := l.sidecar.load(sessionName)
 	if err != nil {
 		return "", err
 	}
 	if !ok || b.ChildJobID == "" {
-		return "", fmt.Errorf("session %q has no provisioned box: %w", sessionName, errSessionNotFound)
+		// Recovery is a read-modify-write against the same session binding
+		// that dispatch uses. Acquire the existing cross-process lock before
+		// re-reading so a concurrent fresh dispatch cannot interleave with
+		// the Meta lookup and atomic repair. The normal provision/start doors
+		// already hold this lock; their liveChild path repairs first, so this
+		// branch is for direct resolution verbs such as exec/peek/nudge.
+		unlock, err := l.lockSession(ctx, sessionName)
+		if err != nil {
+			return "", err
+		}
+		defer unlock()
+		b, ok, err = l.sidecar.load(sessionName)
+		if err != nil {
+			return "", err
+		}
+		if ok && b.ChildJobID != "" {
+			// Another process repaired or dispatched the binding while this
+			// caller waited for the lock. Use its authoritative record.
+		} else {
+			var recovered binding
+			if ok {
+				recovered, err = l.recoverBinding(ctx, sessionName, b)
+			} else {
+				recovered, err = l.recoverBinding(ctx, sessionName, nil)
+			}
+			if err != nil {
+				if errors.Is(err, errBindingNoMatch) || errors.Is(err, errBindingTerminal) {
+					return "", fmt.Errorf("session %q has no provisioned box: %w", sessionName, errSessionNotFound)
+				}
+				return "", err
+			}
+			b = &recovered
+		}
 	}
+
 	allocs, _, err := l.client.listAllocsForJob(ctx, b.ChildJobID, 0, 0)
 	if err != nil {
 		return "", fmt.Errorf("resolving alloc for session %q: %w", sessionName, err)

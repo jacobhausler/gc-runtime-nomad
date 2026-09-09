@@ -306,9 +306,10 @@ func dispatchIdempotencyToken(sessionName, nonce string) string {
 // children — never the job ID itself, which is not invertible back to a
 // session name (e2a-job-id-charset-gap).
 type childJob struct {
-	ID       string
-	Meta     map[string]string
-	Terminal bool
+	ID        string
+	Namespace string
+	Meta      map[string]string
+	Terminal  bool
 }
 
 // listChildJobs lists every job dispatched from parentID via the Nomad jobs
@@ -322,10 +323,11 @@ func (c *client) listChildJobs(ctx context.Context, parentID string) ([]childJob
 	q := c.nsQuery()
 	q.Set("meta", "true")
 	var out []struct {
-		ID       string
-		ParentID string
-		Status   string
-		Meta     map[string]string
+		ID        string
+		ParentID  string
+		Namespace string
+		Status    string
+		Meta      map[string]string
 	}
 	if _, err := c.doIndexed(ctx, defaultTimeout, http.MethodGet, []string{"v1", "jobs"}, q, nil, &out); err != nil {
 		return nil, fmt.Errorf("listing nomad jobs: %w", err)
@@ -335,7 +337,12 @@ func (c *client) listChildJobs(ctx context.Context, parentID string) ([]childJob
 		if j.ParentID != parentID {
 			continue
 		}
-		children = append(children, childJob{ID: j.ID, Meta: j.Meta, Terminal: j.Status != "running"})
+		children = append(children, childJob{
+			ID:        j.ID,
+			Namespace: j.Namespace,
+			Meta:      j.Meta,
+			Terminal:  j.Status != "running",
+		})
 	}
 	return children, nil
 }
