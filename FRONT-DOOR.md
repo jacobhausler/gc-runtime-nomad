@@ -32,7 +32,7 @@ owner-unit: runtime-nomad
 | `GC_NOMAD_NODE_CONSTRAINT` | no | `;`-separated Nomad node constraints appended to the parent job, e.g. `${node.unique.name} != prod-nomad` |
 | `GC_NOMAD_PARENT_JOB` | no | parent job ID (default `gc-sessions`) |
 | `GC_NOMAD_EGRESS_DIR` | no | stop-path transcript/evidence dir; unset disables egress |
-| `GC_NOMAD_FORBID_REGISTER` | no | `true` = never attempt a parent registration; fail closed |
+| `GC_NOMAD_FORBID_REGISTER` | no | `true` = never attempt a parent registration; fail closed. Unset = allowed; a non-boolean value stops the op naming this variable instead of reading as allowed |
 | `GC_NOMAD_LOG_SINK` | no | HTTP JSON-lines sink; the one key that adds the `log-shipper` task |
 | `GC_NOMAD_LOG_SINK_TOKEN_FILE` | no | in-box path the shipper reads its bearer token from |
 | `GC_NOMAD_LOG_LABELS` | no | `k=v,k=v` labels merged onto the fixed `session_name`/`alloc_id`/`node`/`runtime=nomad` set |

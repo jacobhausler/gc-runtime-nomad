@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -508,5 +510,93 @@ func TestNewLifecycleRejectsBadPlacementConfig(t *testing.T) {
 	t.Setenv(envNodeConstraint, `${node.unique.name} ~= prod-nomad`)
 	if _, err := newLifecycle(); err == nil || !strings.Contains(err.Error(), envNodeConstraint) {
 		t.Fatalf("newLifecycle with a bad operand: err = %v, want one naming %s", err, envNodeConstraint)
+	}
+}
+
+// TestProtocolHandshakeDeclaresOnlyNativeCapabilities is the exact-set guard
+// the presence-only check above cannot be: gc probes every declared env.*
+// capability (internal/runtime/runtimecapability probes.go/runner.go at the
+// pin), so one invented token in this list turns a SKIP row of `gc runtime
+// conformance` into a FAIL this pack cannot serve. A strings.Contains loop
+// passes with the invented capability present AND absent, which is how
+// env.workspace survived here while nothing materialized its sentinel.
+func TestProtocolHandshakeDeclaresOnlyNativeCapabilities(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	if got := run([]string{"protocol"}, strings.NewReader(""), w, w); got != exitOK {
+		t.Fatalf("run(protocol) = %d, want %d", got, exitOK)
+	}
+	w.Close()
+	line, err := bufio.NewReader(r).ReadString('\n')
+	if err != nil {
+		t.Fatalf("reading protocol output: %v", err)
+	}
+	var hs struct {
+		Version      int      `json:"version"`
+		Capabilities []string `json:"capabilities"`
+	}
+	if err := json.Unmarshal([]byte(line), &hs); err != nil {
+		t.Fatalf("decoding protocol handshake %q: %v", line, err)
+	}
+	want := []string{"proc.exec", "proc.provision"}
+	got := append([]string(nil), hs.Capabilities...)
+	sort.Strings(got)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("declared capabilities = %v, want exactly %v", hs.Capabilities, want)
+	}
+	for _, c := range hs.Capabilities {
+		if strings.HasPrefix(c, "env.") {
+			t.Fatalf("declared capability %q is an env.* code: gc probes those, and the start wire here does not materialize the fixture they check", c)
+		}
+	}
+}
+
+// TestNewLifecycleForbidRegistrationParsesFailClosed drives the
+// GC_NOMAD_FORBID_REGISTER env parse itself. The ops-level fence cases set the
+// lifecycle struct field and never reach newLifecycle's parse, which is exactly
+// how a swallowed ParseBool error survived: unset must keep the default
+// (strconv.ParseBool("") errors, so a naive fail-closed would stop every
+// deployment that never sets the knob), and a value that is present but not a
+// boolean must stop the op naming the key instead of reading as "registration
+// allowed" — the inverse of what the operator who typed it meant.
+func TestNewLifecycleForbidRegistrationParsesFailClosed(t *testing.T) {
+	srv := fakenomad.NewServer()
+	t.Cleanup(srv.Close)
+	t.Setenv(envAddr, srv.URL())
+	t.Setenv(envSidecarDir, t.TempDir())
+
+	t.Setenv(envForbidReg, "")
+	l, err := newLifecycle()
+	if err != nil {
+		t.Fatalf("newLifecycle with %s unset: %v", envForbidReg, err)
+	}
+	if l.forbidRegistration {
+		t.Fatalf("%s unset: forbidRegistration = true, want the default false", envForbidReg)
+	}
+
+	for _, tc := range []struct {
+		raw  string
+		want bool
+	}{
+		{"true", true}, {"1", true}, {"false", false}, {"0", false},
+	} {
+		t.Setenv(envForbidReg, tc.raw)
+		l, err := newLifecycle()
+		if err != nil {
+			t.Fatalf("newLifecycle with %s=%q: %v", envForbidReg, tc.raw, err)
+		}
+		if l.forbidRegistration != tc.want {
+			t.Fatalf("%s=%q: forbidRegistration = %v, want %v", envForbidReg, tc.raw, l.forbidRegistration, tc.want)
+		}
+	}
+
+	for _, junk := range []string{"yes", "True ", "maybe", "2"} {
+		t.Setenv(envForbidReg, junk)
+		if _, err := newLifecycle(); err == nil || !strings.Contains(err.Error(), envForbidReg) {
+			t.Fatalf("newLifecycle with %s=%q: err = %v, want one naming %s", envForbidReg, junk, err, envForbidReg)
+		}
 	}
 }

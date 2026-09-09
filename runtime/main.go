@@ -39,7 +39,7 @@
 //	GC_NOMAD_PARENT_JOB   optional: the city's parameterized parent job ID (default "gc-sessions")
 //	GC_NOMAD_SIDECAR_DIR  required for lifecycle ops: directory for the sidecar session->job-ID bindings (04 §1)
 //	GC_NOMAD_EGRESS_DIR   optional: local directory for stop-path transcript/evidence egress (NRT-P1-07); unset disables egress
-//	GC_NOMAD_FORBID_REGISTER  optional: "true" forbids ever registering the parent job (04 §4 lab ACL model) — start/provision fail closed instead of attempting a register call that needs the submit-job capability
+//	GC_NOMAD_FORBID_REGISTER  optional: "true" forbids ever registering the parent job (04 §4 lab ACL model) — start/provision fail closed instead of attempting a register call that needs the submit-job capability; unset means the default (registration allowed), and a value that is not a boolean is a config error that stops the op rather than reading as "allowed"
 //	GC_NOMAD_LOG_SINK     optional: HTTP JSON-lines endpoint for the session task group's log-shipper task (fnrt-t4l.13); unset disables the task entirely — session logs are not shipped
 //	GC_NOMAD_LOG_SINK_TOKEN_FILE  optional: in-box path the log-shipper task reads its Authorization bearer token's value from; unset means an unauthenticated sink
 //	GC_NOMAD_LOG_LABELS   optional: "k=v,k=v" labels merged onto every shipped log line alongside the fixed session_name/alloc_id/node/runtime=nomad set
@@ -93,12 +93,20 @@ const (
 	exitUnknown = 2
 )
 
-// protocolHandshakeJSON is the response to the `protocol` op. proc.provision
-// and proc.exec are declared now that both are implemented (04 §3);
-// env.workspace joins them as of NRT-P1-06 (workspace/secret staging over
-// exec-stdin). The remaining v0-target capabilities (env.tooling/
-// env.identity/env.transcripts) stay undeclared — out of scope here.
-const protocolHandshakeJSON = `{"version":0,"capabilities":["proc.provision","proc.exec","env.workspace"]}`
+// protocolHandshakeJSON is the response to the `protocol` op: the capability
+// set gc actually consumes — proc.provision and proc.exec, both implemented
+// (04 §3). Nothing else is declared, env.workspace included. gc does not
+// ignore that code the way it ignores an unknown token: the capability runner
+// probes every declared env.* entry (internal/runtime/runtimecapability/
+// probes.go probeWorkspace execs `cat .gc-cb-sentinel` inside the session),
+// and the conformance start payload carries only work_dir/command/env, so the
+// declaration converts a SKIP row in `gc runtime conformance` into a FAIL the
+// pack cannot serve — the work_dir sentinel is never materialized in the
+// alloc. The workspace/secret staging itself stays (see README: that path is
+// real, it is the claim that was invented); re-declare env.workspace only once
+// the start wire materializes work_dir in the session. env.tooling/
+// env.identity/env.transcripts stay undeclared — out of scope here.
+const protocolHandshakeJSON = `{"version":0,"capabilities":["proc.provision","proc.exec"]}`
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
@@ -380,7 +388,10 @@ func newLifecycle() (*lifecycle, error) {
 	if parentJob == "" {
 		parentJob = defaultParentJob
 	}
-	forbidRegistration, _ := strconv.ParseBool(os.Getenv(envForbidReg))
+	forbidRegistration, err := parseForbidRegistration(os.Getenv(envForbidReg))
+	if err != nil {
+		return nil, err
+	}
 	adoptMaxAge, err := parseAdoptMaxAge(os.Getenv(envAdoptMaxAge))
 	if err != nil {
 		return nil, err
@@ -417,6 +428,26 @@ func newLifecycle() (*lifecycle, error) {
 			fmt.Fprintf(os.Stderr, "gc-runtime-nomad: "+format+"\n", args...)
 		},
 	}, nil
+}
+
+// parseForbidRegistration reads GC_NOMAD_FORBID_REGISTER. Empty means the
+// default — registration allowed — which has to be an explicit branch
+// because strconv.ParseBool("") errors. A value that is present but not a
+// boolean is a config error rather than a silent false: the flag exists so a
+// token-limited deployment gets a start failure with a precise cause instead of
+// a register probe across a capability boundary it cannot cross, and reading
+// "yes" or "True " as false would flip that decision in exactly the direction
+// the operator was guarding against. Same empty-means-default shape as
+// parseAdoptMaxAge below.
+func parseForbidRegistration(raw string) (bool, error) {
+	if raw == "" {
+		return false, nil
+	}
+	b, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("parsing %s=%q: %w (want true or false; omit the variable to leave parent registration allowed)", envForbidReg, raw, err)
+	}
+	return b, nil
 }
 
 // parseAdoptMaxAge reads GC_NOMAD_ADOPT_MAX_AGE. Empty means the default; a
