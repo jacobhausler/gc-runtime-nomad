@@ -20,23 +20,11 @@ owner-unit: runtime-nomad
 
 - Ops: `protocol` (RPP v0 handshake), `start`, `stop`, `is-running`, `list-running [prefix]`, `provision`, `relaunch`, `exec`, `nudge`, `peek`, `interrupt`, `send-keys`, `clear-scrollback`, `check`. Exit codes: 0 = success, 1 = error, 2 = unknown op — the RPP forward-compat signal callers treat as no-op success; `exec` is the exception (it exits with the remote command's own code).
 - Config keys (environment of the runtime process):
-
-| Key | Required | Meaning |
-|----|----|----|
-| `GC_NOMAD_ADDR` | yes | Nomad API base URL, e.g. `http://127.0.0.1:4646` |
-| `GC_NOMAD_SIDECAR_DIR` | yes | sidecar dir: session→child-job-ID bindings, launched markers |
-| `GC_NOMAD_TOKEN` | no | ACL token, sent as `X-Nomad-Token` |
-| `GC_NOMAD_NAMESPACE` | no | Nomad namespace (default `default`) |
-| `GC_NOMAD_NODE_POOL` | no | parent job's node pool (empty = Nomad's default pool) |
-| `GC_NOMAD_DNS_SERVERS` | no | resolver IPs the bridge network writes into the alloc's resolv.conf; unset ⇒ the alloc inherits the client host's (a systemd-resolved stub is dead in a bridge netns) |
-| `GC_NOMAD_NODE_CONSTRAINT` | no | `;`-separated Nomad node constraints appended to the parent job, e.g. `${node.unique.name} != prod-nomad` |
-| `GC_NOMAD_PARENT_JOB` | no | parent job ID (default `gc-sessions`) |
-| `GC_NOMAD_EGRESS_DIR` | no | stop-path transcript/evidence dir; unset disables egress |
-| `GC_NOMAD_FORBID_REGISTER` | no | `true` = never attempt a parent registration; fail closed. Unset = allowed; a non-boolean value stops the op naming this variable instead of reading as allowed |
-| `GC_NOMAD_LOG_SINK` | no | HTTP JSON-lines sink; the one key that adds the `log-shipper` task |
-| `GC_NOMAD_LOG_SINK_TOKEN_FILE` | no | in-box path the shipper reads its bearer token from |
-| `GC_NOMAD_LOG_LABELS` | no | `k=v,k=v` labels merged onto the fixed `session_name`/`alloc_id`/`node`/`runtime=nomad` set |
-
+  One canonical table, in one place: `README.md`, Install -> part 1 -> step 7
+  (20 keys, kept in sync with `runtime/*.go`). This front door deliberately does
+  not copy it - the last hand-copied subset here was missing 7 of those 20 keys,
+  `GC_NOMAD_AGENT_IMAGE` among them, and a front door that drifts from the
+  contract is worse than a pointer.
 - Token model: the management token (holds `submit-job`) registers the parent job exactly once; every session-path op (dispatch, launch, peek, stop, is-running, list-running) runs on the narrowed runtime token and never registers — a matching parent is a read-only no-op, a missing or drifted one fails the op with a re-registration error.
 
 ## Health and SLO signals
