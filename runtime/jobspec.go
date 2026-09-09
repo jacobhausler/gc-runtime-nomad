@@ -80,11 +80,24 @@ func parentJobSpec(namespace, nodePool, parentID string, logShipper logShipperCo
 	return parentJobSpecWithArtifactVolume(namespace, nodePool, parentID, logShipper, "", placementConfig{})
 }
 
+// parentJobSpecWithAgentImage is the Docker-shaped parent job. The configured
+// image carries the agent toolchain, so the optional host-volume delivery path
+// is deliberately not part of this shape. Placement, lifecycle, attribution,
+// and the optional log shipper remain the same Nomad-native fields as the
+// legacy exec shape.
+func parentJobSpecWithAgentImage(namespace, nodePool, parentID string, logShipper logShipperConfig, agentImage string, dep placementConfig) nomadJob {
+	return parentJobSpecWithConfig(namespace, nodePool, parentID, logShipper, "", agentImage, dep)
+}
+
 // parentJobSpecWithArtifactVolume is the deployment-configured variant of
 // parentJobSpec. An empty artifactVolumeSource deliberately produces no
 // volume declaration or task mount, preserving compatibility for deployments
 // that provide their toolchain through another mechanism.
 func parentJobSpecWithArtifactVolume(namespace, nodePool, parentID string, logShipper logShipperConfig, artifactVolumeSource string, dep placementConfig) nomadJob {
+	return parentJobSpecWithConfig(namespace, nodePool, parentID, logShipper, artifactVolumeSource, "", dep)
+}
+
+func parentJobSpecWithConfig(namespace, nodePool, parentID string, logShipper logShipperConfig, artifactVolumeSource, agentImage string, dep placementConfig) nomadJob {
 	job := nomadJob{
 		ID:        parentID,
 		Namespace: namespace,
@@ -110,7 +123,7 @@ func parentJobSpecWithArtifactVolume(namespace, nodePool, parentID string, logSh
 			MetaOptional: []string{"gc_session", "gc_nonce"},
 			Payload:      "forbidden",
 		},
-		TaskGroups: []nomadTaskGroup{sessionTaskGroup(logShipper, artifactVolumeSource, dep)},
+		TaskGroups: []nomadTaskGroup{sessionTaskGroup(logShipper, artifactVolumeSource, agentImage, dep)},
 	}
 	// Stamp the jobspec's own fingerprint into its Meta (fnrt-t4l.9): a
 	// registered parent that still exists and still matches on NodePool can
@@ -214,8 +227,8 @@ var nomadConstraintOperands = map[string]bool{
 	"in": true, "not": true, "is": true, "bitset": true,
 }
 
-func sessionTaskGroup(logShipper logShipperConfig, artifactVolumeSource string, dep placementConfig) nomadTaskGroup {
-	agent := sessionTask(artifactVolumeSource)
+func sessionTaskGroup(logShipper logShipperConfig, artifactVolumeSource, agentImage string, dep placementConfig) nomadTaskGroup {
+	agent := sessionTask(artifactVolumeSource, agentImage)
 	tasks := []nomadTask{agent}
 	// bridge networking so the host-network fatal-rule constraint above
 	// has a placement to fail closed against (04 §4, R2a-05).
@@ -298,14 +311,27 @@ func sessionTaskGroup(logShipper logShipperConfig, artifactVolumeSource string, 
 // than needing Nomad's SIGKILL fallback once kill_timeout elapses.
 const sessionSupervisorScript = `trap 'exit 0' TERM; while :; do sleep 5 & wait "$!"; done`
 
-func sessionTask(artifactVolumeSource string) nomadTask {
+func sessionTask(artifactVolumeSource, agentImage string) nomadTask {
+	driver := "exec"
+	config := map[string]any{
+		"command": "/bin/sh",
+		"args":    []string{"-c", sessionSupervisorScript},
+	}
+	if agentImage != "" {
+		// The image owns the agent toolchain. Keep the task alive with a
+		// signal-aware native sleep process; GC's rendered command and
+		// runtime environment still arrive later through alloc-exec/staging.
+		driver = "docker"
+		config = map[string]any{
+			"image":   agentImage,
+			"command": "/bin/sleep",
+			"args":    []string{"infinity"},
+		}
+	}
 	task := nomadTask{
 		Name:   "agent",
-		Driver: "exec",
-		Config: map[string]any{
-			"command": "/bin/sh",
-			"args":    []string{"-c", sessionSupervisorScript},
-		},
+		Driver: driver,
+		Config: config,
 		Resources: nomadResources{
 			CPU:       sessionCPU,
 			MemoryMB:  sessionMemoryMB,
@@ -317,7 +343,7 @@ func sessionTask(artifactVolumeSource string) nomadTask {
 		// keeps it that way as a named control (04 §4, R2a-05) — so nothing
 		// is declared here.
 	}
-	if artifactVolumeSource != "" {
+	if agentImage == "" && artifactVolumeSource != "" {
 		task.VolumeMounts = []nomadVolumeMount{{
 			Volume:      gcArtifactVolumeName,
 			Destination: gcArtifactMountPath,

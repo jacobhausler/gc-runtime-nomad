@@ -79,6 +79,7 @@ Lifecycle ops need Nomad API configuration on the environment:
 | `GC_NOMAD_LOG_SINK_TOKEN_FILE` | no | In-box path the `log-shipper` task reads its `Authorization: Bearer` token's value from; unset ⇒ an unauthenticated sink |
 | `GC_NOMAD_LOG_LABELS` | no | `k=v,k=v` labels merged onto every shipped log line alongside the fixed `session_name`/`alloc_id`/`node`/`runtime=nomad` set |
 | `GC_NOMAD_ARTIFACT_VOLUME` | no | Nomad client host-volume name mounted read-only at `/mnt/nomad` for the pinned Linux `gc` artifact; unset ⇒ no artifact volume mount |
+| `GC_NOMAD_AGENT_IMAGE` | no | Docker image for the session agent task, normally produced by `gc build-image`; unset ⇒ legacy `exec` task and artifact-volume rollback shape |
 | `GC_NOMAD_DNS_SERVERS` | no | Comma-separated resolver **addresses** the session group's bridge network writes into the alloc's `/etc/resolv.conf` (e.g. `192.168.0.202`). Unset ⇒ Nomad declares no `dns` stanza and the alloc inherits the *client host's* resolv.conf — on a systemd-resolved host that is the `127.0.0.53` stub, unreachable from the alloc netns, so nothing in the box resolves a name (`cr-tzsxk.18`). A non-address value is a config error, not a dropped warning |
 | `GC_NOMAD_NODE_CONSTRAINT` | no | Extra parent-job node constraints in Nomad's own syntax, e.g. `${node.unique.name} != prod-nomad`; several separated by `;` (Nomad list operands already use commas inside the value). Always appended *after* the pack's linux-kernel fatal rule, never in its place |
 
@@ -90,7 +91,7 @@ layers:
 | Layer | Delivery contract |
 |---|---|
 | Workspace/secrets | `stageConfig.Env` is staged through the existing `env.workspace` tar channel into `$NOMAD_SECRETS_DIR`, including the sourceable `env.sh` file. |
-| Toolchain | `gc`, Codex, tmux, `sh`, and `tar` are expected in the allocation toolchain. When `GC_NOMAD_ARTIFACT_VOLUME` is set, the pinned Linux `gc` artifact is mounted read-only from that client host volume at `/mnt/nomad`; remaining host-assumed binaries are node checklist items. |
+| Toolchain | With `GC_NOMAD_AGENT_IMAGE`, the configured Docker image carries the session toolchain and the agent task has no host-volume mount; without it, `gc`, Codex, tmux, `sh`, and `tar` are expected in the allocation toolchain and `GC_NOMAD_ARTIFACT_VOLUME` may mount the pinned Linux `gc` artifact read-only at `/mnt/nomad`. |
 | Identity/config | `GC_CITY_URL`, `GC_CITY_CONTEXT`, and session identity values arrive through the secrets environment channel. Remote sessions must receive `GC_CITY_URL`; the gc-side remote-worker guard fails closed when it is absent or unreachable. |
 
 The Cloudflare pack's bundle is the environment boundary for pack-provided
@@ -188,6 +189,7 @@ Provider-agnostic: what any deployment of this pack needs.
    | `GC_NOMAD_NODE_CONSTRAINT` | no | `;`-separated Nomad-syntax constraints appended *after* the pack's linux-kernel fatal rule, e.g. `${node.unique.name} != prod-nomad` |
    | `GC_NOMAD_DNS_SERVERS` | no | Resolver addresses the session group's bridge network writes into the alloc's `/etc/resolv.conf` — see step 10 |
    | `GC_NOMAD_ARTIFACT_VOLUME` | no | Client host-volume name mounted read-only at `/mnt/nomad` for the pinned Linux `gc` artifact |
+   | `GC_NOMAD_AGENT_IMAGE` | no | Docker image for the session agent task, normally produced by `gc build-image`; unset preserves the legacy `exec` task |
    | `GC_NOMAD_AGENT_LAUNCH_SCRIPT` | no | The bootstrap from step 5; unset preserves the bare-tmux placeholder pane |
    | `GC_NOMAD_EXEC_TASK` | no | Task name alloc-exec targets, when it is not the pack's session task |
    | `GC_NOMAD_EXTRA_SECRET_KEYS` | no | Comma-separated names to bridge from the supervisor's own process env into `$NOMAD_SECRETS_DIR` — the value-blind channel for a secret `gc`'s provider env map cannot interpolate. Naming a key is what stages it; an unnamed key is never staged, and an extra key is always routed to the secrets dir, never to the launch argv. The names themselves belong to the deployment (part 2 works one Codex name through it) |

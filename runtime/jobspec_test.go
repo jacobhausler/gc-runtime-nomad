@@ -111,6 +111,73 @@ func TestParentJobSpecOmitsGCArtifactsWhenVolumeUnset(t *testing.T) {
 	}
 }
 
+func TestParentJobSpecUsesConfiguredDockerAgentImage(t *testing.T) {
+	const image = "registry.example/gc-agent:2026-09-08"
+	spec := parentJobSpecWithAgentImage("gc", "lab-session", "gc-sessions", logShipperConfig{}, image, placementConfig{})
+
+	agent := spec.TaskGroups[0].Tasks[0]
+	if agent.Driver != "docker" {
+		t.Fatalf("agent Driver = %q, want docker", agent.Driver)
+	}
+	if got := agent.Config["image"]; got != image {
+		t.Fatalf("agent Config[image] = %#v, want %q", got, image)
+	}
+	if len(spec.TaskGroups[0].Volumes) != 0 || len(agent.VolumeMounts) != 0 {
+		t.Fatalf("Docker agent retains host-volume delivery: volumes=%#v mounts=%#v", spec.TaskGroups[0].Volumes, agent.VolumeMounts)
+	}
+}
+
+func TestParentJobSpecDockerImagePreservesNomadControls(t *testing.T) {
+	constraint := nomadConstraint{LTarget: "${node.unique.name}", RTarget: "nomad-a", Operand: "="}
+	spec := parentJobSpecWithAgentImage("gc", "lab-session", "gc-sessions", logShipperConfig{}, "gc-agent:test", placementConfig{
+		dnsServers:      []string{"192.168.0.202"},
+		nodeConstraints: []nomadConstraint{constraint},
+	})
+
+	if spec.NodePool != "lab-session" || len(spec.Constraints) != 2 || spec.Constraints[1] != constraint {
+		t.Fatalf("placement = node_pool=%q constraints=%+v, want node_pool lab-session plus configured constraint", spec.NodePool, spec.Constraints)
+	}
+	group := spec.TaskGroups[0]
+	if len(group.Networks) != 1 || group.Networks[0].DNS == nil || group.Networks[0].DNS.Servers[0] != "192.168.0.202" {
+		t.Fatalf("network = %+v, want bridge DNS preserved", group.Networks)
+	}
+	agent := group.Tasks[0]
+	if agent.Resources.CPU != sessionCPU || agent.Resources.MemoryMB != sessionMemoryMB || agent.Resources.SecretsMB != sessionSecretsMB {
+		t.Fatalf("agent resources = %+v, want CPU=%d MemoryMB=%d SecretsMB=%d", agent.Resources, sessionCPU, sessionMemoryMB, sessionSecretsMB)
+	}
+	if group.RestartPolicy != (nomadRestartPolicy{Attempts: 0, Mode: "fail"}) {
+		t.Fatalf("restart policy = %+v, want no Nomad restart", group.RestartPolicy)
+	}
+	if group.ReschedulePolicy != (nomadReschedulePolicy{Attempts: 0, Unlimited: false}) {
+		t.Fatalf("reschedule policy = %+v, want no Nomad reschedule", group.ReschedulePolicy)
+	}
+	if group.Disconnect == nil || group.Disconnect.Replace == nil || *group.Disconnect.Replace || group.Disconnect.Reconcile != "keep_original" || group.Disconnect.LostAfter != lostAfter.Nanoseconds() {
+		t.Fatalf("disconnect = %+v, want keep_original/replace=false/lost_after=%d", group.Disconnect, lostAfter.Nanoseconds())
+	}
+}
+
+func TestParentJobSpecDockerImageKeepsOptionalLogShipper(t *testing.T) {
+	spec := parentJobSpecWithAgentImage("gc", "lab-session", "gc-sessions", logShipperConfig{Sink: "https://logs.example/ingest"}, "gc-agent:test", placementConfig{})
+	group := spec.TaskGroups[0]
+	if len(group.Tasks) != 2 || group.Tasks[0].Name != "agent" || group.Tasks[1].Name != logShipperTaskName {
+		t.Fatalf("Docker tasks = %+v, want agent plus optional log shipper", group.Tasks)
+	}
+	if !group.Tasks[0].Leader {
+		t.Fatalf("Docker agent Leader = false, want the existing sidecar shutdown ordering")
+	}
+	if group.Tasks[1].Lifecycle == nil || !group.Tasks[1].Lifecycle.Sidecar {
+		t.Fatalf("Docker log-shipper lifecycle = %+v, want the existing sidecar lifecycle", group.Tasks[1].Lifecycle)
+	}
+}
+
+func TestJobspecHashChangesWhenAgentImageToggled(t *testing.T) {
+	off := parentJobSpec("default", "", "gc-sessions", logShipperConfig{})
+	on := parentJobSpecWithAgentImage("default", "", "gc-sessions", logShipperConfig{}, "gc-agent:test", placementConfig{})
+	if off.Meta[jobspecHashMetaKey] == on.Meta[jobspecHashMetaKey] {
+		t.Fatalf("jobspec hash unchanged after enabling the Docker agent image")
+	}
+}
+
 func TestJobspecHashChangesWhenArtifactVolumeToggled(t *testing.T) {
 	off := parentJobSpec("default", "", "gc-sessions", logShipperConfig{})
 	on := parentJobSpecWithArtifactVolume("default", "", "gc-sessions", logShipperConfig{}, "test-nomad-shared", placementConfig{})

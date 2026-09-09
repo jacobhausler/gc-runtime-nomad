@@ -77,6 +77,12 @@ type lifecycle struct {
 	// host name hard-coded into the runtime pack; empty means no mount.
 	artifactVolumeSource string
 
+	// agentImage selects the provider-neutral Docker task shape. When empty,
+	// the legacy exec task and optional artifact volume remain the rollback
+	// path; when set, the image supplies the task toolchain and the host-volume
+	// shape is omitted.
+	agentImage string
+
 	// placement is the deployment-configured DNS servers and node constraints
 	// that ride the parent job body parentJobSpec builds (cr-tzsxk.18), read
 	// from GC_NOMAD_DNS_SERVERS / GC_NOMAD_NODE_CONSTRAINT by newLifecycle.
@@ -1085,7 +1091,7 @@ func (l *lifecycle) dispatch(ctx context.Context, sessionName string) error {
 // attempt entirely for a deployment that wants a config-time guarantee of
 // that, rather than discovering it from a 403 at the first drifted Start.
 func (l *lifecycle) ensureParentRegistered(ctx context.Context) error {
-	spec := parentJobSpecWithArtifactVolume(l.client.namespace, l.nodePool, l.parentJobID, l.logShipper, l.artifactVolumeSource, l.placement)
+	spec := l.parentJobSpec()
 
 	nodePool, meta, ok, err := l.client.getJob(ctx, l.parentJobID)
 	if err != nil {
@@ -1112,6 +1118,13 @@ func (l *lifecycle) ensureParentRegistered(ctx context.Context) error {
 		return fmt.Errorf("registering parent job %q: %w", l.parentJobID, err)
 	}
 	return nil
+}
+
+func (l *lifecycle) parentJobSpec() nomadJob {
+	if l.agentImage != "" {
+		return parentJobSpecWithAgentImage(l.client.namespace, l.nodePool, l.parentJobID, l.logShipper, l.agentImage, l.placement)
+	}
+	return parentJobSpecWithArtifactVolume(l.client.namespace, l.nodePool, l.parentJobID, l.logShipper, l.artifactVolumeSource, l.placement)
 }
 
 // findOrphanByNonce looks up the parent job's dispatched children (04 §2.1

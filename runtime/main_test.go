@@ -199,6 +199,24 @@ func TestNewLifecycleReadsArtifactVolume(t *testing.T) {
 	}
 }
 
+func TestNewLifecycleReadsAgentImage(t *testing.T) {
+	srv := fakenomad.NewServer()
+	t.Cleanup(srv.Close)
+
+	t.Setenv(envAddr, srv.URL())
+	t.Setenv(envSidecarDir, t.TempDir())
+	const image = "registry.example/gc-agent:2026-09-08"
+	t.Setenv(envAgentImage, image)
+
+	l, err := newLifecycle()
+	if err != nil {
+		t.Fatalf("newLifecycle: %v", err)
+	}
+	if l.agentImage != image {
+		t.Fatalf("agentImage = %q, want %q", l.agentImage, image)
+	}
+}
+
 // TestRunExecReadsCommandFromStdin is a regression test for the exec op's
 // calling convention: docs/reference/exec-session-provider.md carries the
 // command on stdin (invocation is just `exec <name>`), not extra argv. A
