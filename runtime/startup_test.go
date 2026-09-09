@@ -14,7 +14,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -36,27 +35,74 @@ const gcLaunchWire = `{
   "nudge": "Run gc hook --claim --json now.",
   "ready_prompt_prefix": "Ask Codex",
   "ready_delay_ms": 5000,
+  "pre_start": ["mkdir -p /mnt/nomad/gc"],
+  "session_setup": ["git -C /mnt/nomad/gc status -sb"],
+  "session_setup_script": "/tmp/session-setup.sh",
+  "session_live": ["gc runtime heartbeat"],
+  "pack_overlay_dirs": ["/Users/home/.gc/packs/gc-runtime-nomad/overlay"],
+  "overlay_dir": "/tmp/session-overlay",
   "copy_files": [{"src": "/tmp/x", "rel_dst": "x"}]
 }`
 
-// TestStageConfigCarriesEveryGcLaunchWireField is the RED half of the drop
-// cr-gdeav.6.9 receipt §1.4 named: the pack decoded only work_dir/env/files,
-// so gc's command, nudge, process_names and ready_* arrived and were thrown
-// away. It asserts on tags rather than fields so it compiles (and fails)
-// against the pre-fix pack.
+// gcStartWireFields is gc's complete `start` stdin schema: the JSON keys
+// marshalStartConfig (internal/runtime/exec/json.go:45-67 at pin 857ed398a)
+// serializes, written out here because this pack cannot import gc.
+// gcLaunchWire above carries one of each type, and the test below asserts the
+// two directions against this list.
+var gcStartWireFields = []string{
+	"work_dir", "command", "lifecycle", "env", "process_names", "nudge",
+	"ready_prompt_prefix", "ready_delay_ms", "pre_start", "session_setup",
+	"session_setup_script", "session_live", "pack_overlay_dirs",
+	"overlay_dir", "copy_files",
+}
+
+// TestStageConfigCarriesEveryGcLaunchWireField pins the wire schema in BOTH
+// directions, and it started life as the RED half of the drop cr-gdeav.6.9
+// receipt §1.4 named: the pack decoded only work_dir/env/files, so gc's
+// command, nudge, process_names and ready_* arrived and were thrown away.
+//
+// The second half (cr-u7b0s.40) is the one that keeps a private schema from
+// growing back inside the wire: a key this pack decodes that gc's
+// marshalStartConfig does not serialize is a field nothing will ever send,
+// and `files`, `prompt_suffix` and `prompt_flag` were exactly that. It
+// asserts on tags rather than fields so it compiles (and fails) against any
+// pack whose struct disagrees with the pin.
 func TestStageConfigCarriesEveryGcLaunchWireField(t *testing.T) {
-	want := []string{"work_dir", "env", "files", "command", "nudge", "process_names", "ready_prompt_prefix", "ready_delay_ms"}
 	typ := reflect.TypeOf(stageConfig{})
 	have := map[string]bool{}
 	for i := 0; i < typ.NumField(); i++ {
 		tag := typ.Field(i).Tag.Get("json")
-		have[strings.Split(tag, ",")[0]] = true
+		name := strings.Split(tag, ",")[0]
+		if name == "-" || name == "" {
+			t.Errorf("field %s carries no json tag, so it cannot match the wire", typ.Field(i).Name)
+			continue
+		}
+		if have[name] {
+			t.Errorf("two fields decode json key %q", name)
+		}
+		have[name] = true
 	}
-	for _, field := range want {
+	for _, field := range gcStartWireFields {
 		if !have[field] {
 			t.Errorf("stageConfig drops the %q field gc sends on the start wire", field)
 		}
 	}
+	if len(have) != len(gcStartWireFields) {
+		for field := range have {
+			if !contains(gcStartWireFields, field) {
+				t.Errorf("stageConfig decodes %q, which gc's marshalStartConfig never serializes", field)
+			}
+		}
+	}
+}
+
+func contains(haystack []string, needle string) bool {
+	for _, item := range haystack {
+		if item == needle {
+			return true
+		}
+	}
+	return false
 }
 
 // TestReadStageConfigDecodesGcLaunchWire proves the wire reaches Go, not just
@@ -81,28 +127,53 @@ func TestReadStageConfigDecodesGcLaunchWire(t *testing.T) {
 	if len(cfg.ProcessNames) != 1 || cfg.ProcessNames[0] != "codex" {
 		t.Errorf("ProcessNames = %v", cfg.ProcessNames)
 	}
+	if cfg.Lifecycle != "one_shot" {
+		t.Errorf("Lifecycle = %q, want gc's one_shot", cfg.Lifecycle)
+	}
+	if len(cfg.CopyFiles) != 1 || cfg.CopyFiles[0].Src != "/tmp/x" || cfg.CopyFiles[0].RelDst != "x" {
+		t.Errorf("CopyFiles = %+v, want the one {src, rel_dst} entry gc sent", cfg.CopyFiles)
+	}
+	for name, got := range map[string][]string{
+		"pre_start":         cfg.PreStart,
+		"session_setup":     cfg.SessionSetup,
+		"session_live":      cfg.SessionLive,
+		"pack_overlay_dirs": cfg.PackOverlayDirs,
+	} {
+		if len(got) != 1 || got[0] == "" {
+			t.Errorf("%s = %v, want the one entry gc sent", name, got)
+		}
+	}
+	if cfg.SessionSetupScript != "/tmp/session-setup.sh" {
+		t.Errorf("SessionSetupScript = %q", cfg.SessionSetupScript)
+	}
+	if cfg.OverlayDir != "/tmp/session-overlay" {
+		t.Errorf("OverlayDir = %q", cfg.OverlayDir)
+	}
 	text, source := cfg.startupPrompt()
 	if text != cfg.Nudge || source != "nudge" {
 		t.Errorf("startupPrompt() = (%q, %q), want the nudge text from source nudge", text, source)
 	}
 }
 
-// TestStartupPromptFallsBackToPromptSuffix covers the forward-compat branch:
-// if upstream puts prompt_suffix on the wire (EDGE fix candidate (a)), the
-// pack must read it SHELL-QUOTED-DECODED, because gc builds it with
-// shellquote.Quote.
-func TestStartupPromptFallsBackToPromptSuffix(t *testing.T) {
-	body, err := json.Marshal(stageConfig{PromptSuffix: shellQuote("Do the work.\nLine two.")})
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	cfg, err := readStageConfig(strings.NewReader(string(body)))
+// TestStartupPromptIgnoresKeysGcDoesNotSerialize is the other half of the
+// cr-u7b0s.40 deletion: prompt_suffix / prompt_flag exist on runtime.Config
+// and the native tmux adapter consumes them in-process, but gc's
+// marshalStartConfig never puts either on the exec wire - so a caller that
+// sends them must NOT get a prompt out of them. `nudge` is the pack's only
+// prompt source, which is precisely why the provider runs
+// `prompt_mode = "none"`. (If a pinned-EDGE wire change ever lands the key,
+// this test is the place the decision has to be revisited, not a field
+// quietly re-added.)
+func TestStartupPromptIgnoresKeysGcDoesNotSerialize(t *testing.T) {
+	cfg, err := readStageConfig(strings.NewReader(`{"prompt_suffix": "Do the work.", "prompt_flag": "-c", "files": [{"path": "x", "content": "eA=="}]}`))
 	if err != nil {
 		t.Fatalf("readStageConfig: %v", err)
 	}
-	text, source := cfg.startupPrompt()
-	if source != "prompt_suffix" || text != "Do the work.\nLine two." {
-		t.Fatalf("startupPrompt() = (%q, %q), want the decoded prompt text from prompt_suffix", text, source)
+	if text, source := cfg.startupPrompt(); text != "" || source != "" {
+		t.Errorf("startupPrompt() = (%q, %q), want no prompt from keys gc never sends", text, source)
+	}
+	if !reflect.DeepEqual(cfg, stageConfig{}) {
+		t.Errorf("a wire body of keys gc does not serialize decoded to %+v, want the zero value", cfg)
 	}
 }
 

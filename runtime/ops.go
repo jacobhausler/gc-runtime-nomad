@@ -1358,7 +1358,7 @@ func (l *lifecycle) setStagePending(sessionName string, pending bool) error {
 // secret payload to materialize, i.e. whether stage will make an exec call
 // that can fail partway.
 func stagesAnything(cfg stageConfig) bool {
-	if len(cfg.Files) > 0 {
+	if len(cfg.CopyFiles) > 0 {
 		return true
 	}
 	secretEnv, _ := mergeExtraSecretEnv(cfg.Env, extraSecretKeys)
@@ -1369,8 +1369,8 @@ func stagesAnything(cfg stageConfig) bool {
 
 // stage materializes cfg's workspace files and secret env vars into
 // sessionName's current alloc (NRT-P1-06, 04 §5 data contract) over two
-// tar-over-exec-stdin calls: cfg.Files (the CopyFiles/workspace-in analog)
-// extracted under cfg.WorkDir, and cfg.Env's values extracted under
+// tar-over-exec-stdin calls: cfg.CopyFiles read off the orchestrator and
+// archived by copyFilesToStageFiles, extracted under cfg.WorkDir, and cfg.Env's values extracted under
 // $NOMAD_SECRETS_DIR both as individual files (legacy/value-specific access)
 // and as a sourceable env.sh contract for the launched process. Neither
 // channel ever touches the job spec, argv, or the sidecar — the only place
@@ -1378,8 +1378,12 @@ func stagesAnything(cfg stageConfig) bool {
 // residual, 05 §7 R9). A zero-value cfg is a no-op, so start/provision behave
 // exactly as before staging landed when a caller sends no config.
 func (l *lifecycle) stage(ctx context.Context, sessionName string, cfg stageConfig) error {
-	if len(cfg.Files) > 0 {
-		data, err := buildTar(cfg.Files)
+	workspaceFiles, err := copyFilesToStageFiles(cfg.CopyFiles)
+	if err != nil {
+		return fmt.Errorf("staging workspace for %q: %w", sessionName, err)
+	}
+	if len(workspaceFiles) > 0 {
+		data, err := buildTar(workspaceFiles)
 		if err != nil {
 			return fmt.Errorf("staging workspace for %q: %w", sessionName, err)
 		}

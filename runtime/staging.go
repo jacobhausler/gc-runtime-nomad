@@ -26,49 +26,170 @@ type stageFile struct {
 
 // stageConfig is the wire "start config" this pack reads from stdin for
 // `start`/`provision` (04 §5: "the wire start config is a SUBSET of
-// runtime.Config"). The exact field names are this pack's own decision, not
-// a transcription of gc's internal wire schema (RUNTIME-RPP-002 pins that
-// schema at internal/runtime/exec/json.go, which lives in the gascity repo
-// this zero-dependency pack cannot import) — it carries exactly the subset
-// 04 §5 describes as in-scope for staging: WorkDir + Env + Files (the
-// CopyFiles/overlay analog; PackOverlayDirs/OverlayDir merging is out of
-// scope for this bead). An empty/absent stdin body decodes to the zero
-// value, which stage treats as a no-op — start/provision keep working
-// exactly as before staging landed when a caller sends no config.
+// runtime.Config"). The field names below are gc's, verbatim, and they are
+// now ALL of them: gc's marshalStartConfig
+// (internal/runtime/exec/json.go:45-67 at pin 857ed398a) serializes exactly
+// 15 keys and this pack decodes all 15. That is a transcription of the
+// native schema, not a parallel one (RUNTIME-RPP-002 pins the schema at a
+// file this zero-gascity-import pack cannot read at compile time), and
+// startup_test.go pins every name against gc's own struct in BOTH
+// directions, so a rename upstream lands here as a test failure instead of
+// another silent drop (cr-gdeav.6.9 receipt §1.4).
+//
+// What this pack ACTS on today:
+//   - WorkDir + Env - the staging half it was built for;
+//   - CopyFiles - translated into this pack's own tar-over-exec-stdin
+//     transport by copyFilesToStageFiles, so a native copy needs no second
+//     file protocol (cr-u7b0s.40);
+//   - Command / Nudge / ProcessNames / ReadyPromptPrefix / ReadyDelayMs -
+//     the launch/priming half (cr-gdeav.6.10/.12), which gc has been sending
+//     all along and the pack used to drop on the floor.
+//
+// Lifecycle, PreStart, SessionSetup, SessionSetupScript, SessionLive,
+// PackOverlayDirs and OverlayDir are decoded for wire parity and pinned by
+// the wire test, but they have NO Nomad-side action yet: `pre_start` /
+// `session_setup` / `session_live` are in-box command hooks and the two
+// overlay fields are host-side directory trees, and this pack does not yet
+// own an exec window for either. That translation is the named follow-on
+// (docs/exec-wire.md names it); decoding them is what makes the gap
+// measurable in a test instead of invisible on the wire.
+//
+// An empty/absent stdin body decodes to the zero value, which stage treats
+// as a no-op - start/provision keep working exactly as before staging
+// landed when a caller sends no config.
+//
+// Two keys the pack used to decode are GONE, because gc does not and never
+// did serialize them (cr-u7b0s.40):
+//   - `files` - an inline-content file list. gc sends host-side paths in
+//     `copy_files`, never file bodies; the bodies are read off the
+//     orchestrator here, then archived.
+//   - `prompt_suffix` / `prompt_flag` - both exist on runtime.Config
+//     (internal/runtime/runtime.go:696-707) and the native tmux adapter
+//     consumes them in-process (internal/runtime/tmux/adapter.go:1554-1569),
+//     but they are not on the exec wire. An RPP lane therefore receives the
+//     startup prompt in `nudge` only, which is why the provider sets
+//     `prompt_mode = "none"`.
+//
+// Re-adding either is correct only when a pinned-EDGE wire change actually
+// lands - `git grep -n 'prompt_suffix\|prompt_flag' <pin> -- '*.go'`
+// matches config/report/telemetry readers and no internal/runtime/exec
+// writer, at the pin and at the newer edge alike.
 type stageConfig struct {
 	WorkDir string            `json:"work_dir,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`
-	Files   []stageFile       `json:"files,omitempty"`
 
 	// The launch/priming half of the same `start` payload (cr-gdeav.6.10).
-	// The fields above are the STAGING subset this pack originally read;
-	// these are the ones gc's marshalStartConfig
-	// (internal/runtime/exec/json.go:26-67) has been sending all along and
-	// this pack dropped on the floor — which is why an ordinary
-	// nomad-canary launch produced a live agent that nothing ever primed
-	// (cr-gdeav.6.9 receipt §1.4: "command, nudge, process_names, ready_*
-	// are silently discarded"). Field names are gc's, verbatim, and
-	// startup_test.go pins them against gc's own struct, so a rename
-	// upstream is a test failure here rather than another silent drop.
 	Command           string   `json:"command,omitempty"`
 	Nudge             string   `json:"nudge,omitempty"`
 	ProcessNames      []string `json:"process_names,omitempty"`
 	ReadyPromptPrefix string   `json:"ready_prompt_prefix,omitempty"`
 	ReadyDelayMs      int      `json:"ready_delay_ms,omitempty"`
 
-	// PromptSuffix / PromptFlag are named for payload gc does NOT serialize
-	// today: both exist on runtime.Config
-	// (internal/runtime/runtime.go:660-671) and the native tmux provider
-	// consumes them in-process (internal/runtime/tmux/adapter.go:1462-1483),
-	// but marshalStartConfig has no such key — so under the default
-	// `prompt_mode=arg` an RPP lane CANNOT receive the startup prompt on
-	// argv at all. That is the gc-side gap the EDGE twin carries
-	// (cr-gdeav.6.9 receipt §4). Decoding them costs nothing and lets the
-	// pack pick the prompt up with no further change if upstream fix (a) —
-	// put them on the wire — lands; until then the provider must set
-	// `prompt_mode = "none"` so the prompt arrives in Nudge.
-	PromptSuffix string `json:"prompt_suffix,omitempty"`
-	PromptFlag   string `json:"prompt_flag,omitempty"`
+	// The remaining native start-wire keys (cr-u7b0s.40), with gc's JSON
+	// names and types verbatim. See the doc above for which of them this
+	// pack acts on today.
+	Lifecycle          string      `json:"lifecycle,omitempty"`
+	PreStart           []string    `json:"pre_start,omitempty"`
+	SessionSetup       []string    `json:"session_setup,omitempty"`
+	SessionSetupScript string      `json:"session_setup_script,omitempty"`
+	SessionLive        []string    `json:"session_live,omitempty"`
+	PackOverlayDirs    []string    `json:"pack_overlay_dirs,omitempty"`
+	OverlayDir         string      `json:"overlay_dir,omitempty"`
+	CopyFiles          []copyEntry `json:"copy_files,omitempty"`
+}
+
+// copyEntry is one `copy_files` wire entry - gc's copyEntry
+// (internal/runtime/exec/json.go:17-20). Src is a path on the ORCHESTRATOR
+// filesystem (the host running this pack), RelDst is where it lands relative
+// to the session's WorkDir; empty RelDst means the WorkDir root.
+type copyEntry struct {
+	Src    string `json:"src"`
+	RelDst string `json:"rel_dst,omitempty"`
+}
+
+// copyFilesToStageFiles reads gc's `copy_files` entries off the orchestrator
+// filesystem and returns them as the stageFiles this pack already archives
+// with buildTar and ships over exec stdin. It is deliberately the pack's
+// ONE file transport (04 §5): a native copy entry becomes a stageFile, not
+// a second protocol.
+//
+// A regular file lands at RelDst, or at its own base name when RelDst is
+// empty ("the workDir root", per gc's CopyEntry). A directory is walked and
+// archived with its tree intact beneath RelDst; anything that is not a
+// regular file (symlinks, sockets, devices) is skipped rather than followed,
+// so a source tree cannot smuggle a link or a device out of its root. Every
+// destination is checked by validateStagePath before it is archived, the
+// same rule the pack's secret and prime staging already applies - so a
+// RelDst of "../x" or an absolute path is refused here, not at extraction.
+//
+// An unreadable source is an ERROR rather than a warning: gc documents
+// Provider.Start as handling the copy atomically, and an agent launched
+// without a file its config promised looks healthy while failing later.
+func copyFilesToStageFiles(entries []copyEntry) ([]stageFile, error) {
+	var files []stageFile
+	for _, entry := range entries {
+		if strings.TrimSpace(entry.Src) == "" {
+			return nil, fmt.Errorf("copy_files entry has no src")
+		}
+		info, err := os.Stat(entry.Src)
+		if err != nil {
+			return nil, fmt.Errorf("copy_files src %q: %w", entry.Src, err)
+		}
+		switch {
+		case info.Mode().IsRegular():
+			content, err := os.ReadFile(entry.Src)
+			if err != nil {
+				return nil, fmt.Errorf("copy_files src %q: %w", entry.Src, err)
+			}
+			dst := entry.RelDst
+			if dst == "" {
+				dst = filepath.Base(entry.Src)
+			}
+			files = append(files, stageFile{Path: dst, Content: content, Mode: stageMode(info)})
+		case info.IsDir():
+			srcRoot := entry.Src
+			err := filepath.Walk(srcRoot, func(path string, walked os.FileInfo, err error) error {
+				if err != nil {
+					return err
+				}
+				if path == srcRoot || !walked.Mode().IsRegular() {
+					return nil // the root itself, and anything not archivable as content
+				}
+				rel, err := filepath.Rel(srcRoot, path)
+				if err != nil {
+					return fmt.Errorf("relative path for %q: %w", path, err)
+				}
+				content, err := os.ReadFile(path)
+				if err != nil {
+					return err
+				}
+				files = append(files, stageFile{
+					Path:    filepath.Join(entry.RelDst, rel),
+					Content: content,
+					Mode:    stageMode(walked),
+				})
+				return nil
+			})
+			if err != nil {
+				return nil, fmt.Errorf("copy_files src tree %q: %w", entry.Src, err)
+			}
+		default:
+			return nil, fmt.Errorf("copy_files src %q is neither a file nor a directory", entry.Src)
+		}
+	}
+	for _, f := range files {
+		if err := validateStagePath(f.Path); err != nil {
+			return nil, fmt.Errorf("copy_files destination: %w", err)
+		}
+	}
+	return files, nil
+}
+
+// stageMode carries the source's permission bits onto the staged copy. A
+// zero is left as-is: buildTar reads that as "no mode given" and writes its
+// own 0o644 default.
+func stageMode(info os.FileInfo) int64 {
+	return int64(info.Mode().Perm())
 }
 
 // readStageConfig decodes a stageConfig from stdin. Empty/whitespace-only
@@ -192,20 +313,19 @@ func safeLaunchOptionValue(raw string, effort bool) string {
 //
 // Nudge wins: it is the field gc actually sends, and under
 // `prompt_mode="none"` the startup prompt is already prepended to the
-// agent's configured nudge (cmd/gc/prompt_delivery.go:43-45). PromptSuffix is
-// consulted only as the forward-compat branch documented on the field above.
+// agent's configured nudge (cmd/gc/prompt_delivery.go:161-164 at pin
+// 857ed398a). Nothing else is consulted: the exec wire has no prompt_suffix
+// key to fall back to, so the forward-compat branch this function carried had
+// no producer (cr-u7b0s.40).
 func (c stageConfig) startupPrompt() (text, source string) {
 	if strings.TrimSpace(c.Nudge) != "" {
 		return c.Nudge, "nudge"
-	}
-	if strings.TrimSpace(c.PromptSuffix) != "" {
-		return unshellQuote(c.PromptSuffix), "prompt_suffix"
 	}
 	return "", ""
 }
 
 // promptSubset returns only the startup-prompt/priming fields of cfg — never
-// WorkDir, Env, or Files — for persisting onto a session's binding
+// WorkDir, Env, or CopyFiles — for persisting onto a session's binding
 // (cr-gdeav.6.12). It exists because gc's proc.provision path carries these
 // fields on opProvisionWithConfig's stageConfig, but opExec's transport-launch
 // path (markTransportLaunched, ops.go) runs with no stageConfig of its own —
@@ -220,8 +340,6 @@ func (c stageConfig) promptSubset() stageConfig {
 		ProcessNames:      c.ProcessNames,
 		ReadyPromptPrefix: c.ReadyPromptPrefix,
 		ReadyDelayMs:      c.ReadyDelayMs,
-		PromptSuffix:      c.PromptSuffix,
-		PromptFlag:        c.PromptFlag,
 	}
 }
 

@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -23,17 +25,25 @@ import (
 // nested), then probes the alloc over exec to confirm both actually landed
 // under WorkDir with their real content — proof the tar-over-exec-stdin
 // channel (04 §5) genuinely materializes the workspace, not a canned reply.
+//
+// The fixture is real files on THIS host and a `copy_files` entry naming
+// their directory, because that is the wire gc actually sends: gc's
+// copyEntry (internal/runtime/exec/json.go:17-20) names orchestrator-side
+// paths, never inline bodies (cr-u7b0s.40). The bodies are read here and
+// archived onto the pack's one file transport, so the probe below is
+// unchanged — same paths, same expected content.
 func TestM3StagingReceiptWorkspaceProbe(t *testing.T) {
 	l, _ := newTestLifecycle(t)
 	ctx := context.Background()
 	const session = "sess-stage-workspace"
 
+	srcRoot := t.TempDir()
+	writeStageSource(t, srcRoot, "hello.txt", "hello from staging\n", 0o644)
+	writeStageSource(t, srcRoot, "nested/deep.txt", "deep content\n", 0o600)
+
 	cfg := stageConfig{
-		WorkDir: "workspace",
-		Files: []stageFile{
-			{Path: "hello.txt", Content: []byte("hello from staging\n")},
-			{Path: "nested/deep.txt", Content: []byte("deep content\n")},
-		},
+		WorkDir:   "workspace",
+		CopyFiles: []copyEntry{{Src: srcRoot}},
 	}
 	if err := l.opStartWithConfig(ctx, session, cfg); err != nil {
 		t.Fatalf("start with staging config: %v", err)
@@ -81,6 +91,154 @@ func TestStagingWritesSourceableEnvironmentScript(t *testing.T) {
 	want := "https://relay.example:8443|westlands|worker-123|value with spaces; $(echo must-not-run) 'quoted'\n"
 	if string(out) != want {
 		t.Fatalf("sourced environment = %q, want %q", out, want)
+	}
+}
+
+// writeStageSource writes one source file under root at the given mode,
+// creating parents. The copy_files tests need files that genuinely exist on
+// the orchestrator, because that is what gc's copy_files names.
+func writeStageSource(t *testing.T, root, rel, content string, mode os.FileMode) {
+	t.Helper()
+	path := filepath.Join(root, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir for %s: %v", path, err)
+	}
+	if err := os.WriteFile(path, []byte(content), mode); err != nil {
+		t.Fatalf("write source %s: %v", path, err)
+	}
+}
+
+// TestCopyFilesToStageFilesReadsFilesAndTrees pins the copy_files -> stageFile
+// translation gc's native wire needs and the pack's own tar transport
+// already provides: rel_dst honoured, an empty rel_dst landing at the file's
+// base name (gc documents that as "the workDir root"), a directory source
+// keeping its tree, and the source's permission bits carried through.
+func TestCopyFilesToStageFilesReadsFilesAndTrees(t *testing.T) {
+	root := t.TempDir()
+	writeStageSource(t, root, "prompt.txt", "do the work\n", 0o600)
+	writeStageSource(t, root, "hooks/pre-start.sh", "#!/bin/sh\nexit 0\n", 0o755)
+	writeStageSource(t, root, "hooks/skills/notes.md", "# notes\n", 0o644)
+
+	files, err := copyFilesToStageFiles([]copyEntry{
+		{Src: filepath.Join(root, "prompt.txt"), RelDst: "gc/prompt.txt"},
+		{Src: filepath.Join(root, "hooks")},
+		{Src: filepath.Join(root, "hooks"), RelDst: ".gc/skills"},
+	})
+	if err != nil {
+		t.Fatalf("copyFilesToStageFiles: %v", err)
+	}
+	got := map[string]stageFile{}
+	for _, f := range files {
+		got[filepath.ToSlash(f.Path)] = f
+	}
+	for path, want := range map[string]struct {
+		content string
+		mode    int64
+	}{
+		"gc/prompt.txt":              {"do the work\n", 0o600},
+		"pre-start.sh":               {"#!/bin/sh\nexit 0\n", 0o755},
+		"skills/notes.md":            {"# notes\n", 0o644},
+		".gc/skills/pre-start.sh":    {"#!/bin/sh\nexit 0\n", 0o755},
+		".gc/skills/skills/notes.md": {"# notes\n", 0o644},
+	} {
+		f, ok := got[path]
+		if !ok {
+			t.Errorf("no staged file at %q; got %v", path, keysOf(got))
+			continue
+		}
+		if string(f.Content) != want.content {
+			t.Errorf("%s content = %q, want %q", path, f.Content, want.content)
+		}
+		if f.Mode != want.mode {
+			t.Errorf("%s mode = %o, want %o", path, f.Mode, want.mode)
+		}
+	}
+	if _, err := buildTar(files); err != nil {
+		t.Errorf("translated files must archive on the pack's own transport: %v", err)
+	}
+}
+
+func keysOf(m map[string]stageFile) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// TestCopyFilesToStageFilesRefusesEscapingDestinations is the security half.
+// rel_dst arrives from the wire, so an absolute or ".."-escaping destination
+// must be refused by validateStagePath at translation time - the same rule
+// that already governs the pack's secret and prime staging - rather than
+// archived and honored by the extraction.
+func TestCopyFilesToStageFilesRefusesEscapingDestinations(t *testing.T) {
+	root := t.TempDir()
+	writeStageSource(t, root, "x.txt", "x\n", 0o644)
+	src := filepath.Join(root, "x.txt")
+	for _, relDst := range []string{"../escape.txt", "nested/../../escape.txt", "/absolute/escape.txt", ""} {
+		_, err := copyFilesToStageFiles([]copyEntry{{Src: src, RelDst: relDst}})
+		if relDst == "" {
+			if err != nil {
+				t.Fatalf("empty rel_dst (the workDir root): %v", err)
+			}
+			continue
+		}
+		if !errors.Is(err, errStagePathInvalid) {
+			t.Errorf("rel_dst %q: err = %v, want it to wrap errStagePathInvalid", relDst, err)
+		}
+	}
+}
+
+// TestCopyFilesToStageFilesSkipsNonRegularSources pins the other half of the
+// conservative boundary: a symlink inside a copied tree is skipped, not
+// followed, so a source directory cannot reach a file outside itself.
+func TestCopyFilesToStageFilesSkipsNonRegularSources(t *testing.T) {
+	root := t.TempDir()
+	writeStageSource(t, root, "real.txt", "real\n", 0o644)
+	elsewhere := t.TempDir()
+	writeStageSource(t, elsewhere, "secret.txt", "secret\n", 0o600)
+	if err := os.Symlink(filepath.Join(elsewhere, "secret.txt"), filepath.Join(root, "link.txt")); err != nil {
+		t.Skipf("symlinks unavailable here: %v", err)
+	}
+
+	files, err := copyFilesToStageFiles([]copyEntry{{Src: root, RelDst: "ws"}})
+	if err != nil {
+		t.Fatalf("copyFilesToStageFiles: %v", err)
+	}
+	if len(files) != 1 || filepath.ToSlash(files[0].Path) != "ws/real.txt" {
+		t.Fatalf("staged files = %+v, want only ws/real.txt", files)
+	}
+}
+
+// TestCopyFilesToStageFilesFailsLoudlyOnUnreadableSource pins the
+// error-not-warning rule: gc documents Provider.Start as handling the copy
+// atomically, and an agent launched without a file its config promised looks
+// healthy while it fails later.
+func TestCopyFilesToStageFilesFailsLoudlyOnUnreadableSource(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "gone.txt")
+	if _, err := copyFilesToStageFiles([]copyEntry{{Src: missing, RelDst: "gone.txt"}}); err == nil {
+		t.Fatal("missing src: err = nil, want a failure naming the source")
+	} else if !strings.Contains(err.Error(), missing) {
+		t.Errorf("error %q does not name the source %q", err, missing)
+	}
+	for _, src := range []string{"", "   "} {
+		if _, err := copyFilesToStageFiles([]copyEntry{{Src: src, RelDst: "x"}}); err == nil {
+			t.Errorf("src %q accepted, want a failure", src)
+		}
+	}
+}
+
+// TestStagesAnythingTreatsNativeCopyFilesAsStaging keeps the no-op guard
+// honest after the wire key changed: a config carrying only copy_files still
+// has a payload to materialize, and stage() makes an exec call that can fail
+// partway - which is exactly what StagePending exists to record.
+func TestStagesAnythingTreatsNativeCopyFilesAsStaging(t *testing.T) {
+	if !stagesAnything(stageConfig{WorkDir: "workspace", CopyFiles: []copyEntry{{Src: "/tmp/x", RelDst: "x"}}}) {
+		t.Error("stagesAnything ignored a copy_files payload")
+	}
+	if stagesAnything(stageConfig{WorkDir: "workspace"}) {
+		t.Error("stagesAnything reported staging for a config with no payload")
 	}
 }
 
