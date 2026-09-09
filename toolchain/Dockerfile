@@ -68,6 +68,13 @@ ARG GC_LOCAL_SHA256=
 ARG GC_PIN_COMMIT=
 ARG GIT_VERSION=1:2.43.0-1ubuntu7.3
 ARG TMUX_VERSION=3.4-1ubuntu0.1
+# libicu74 is not decoration: the estate's own built gc NEEDS it. `ldd` on the
+# digest-pinned base reports `libicui18n.so.74 => not found` for the staged pin,
+# so the install succeeded and the binary then died at its first command
+# (`gc: error while loading shared libraries`). rhuidean has ICU installed, which
+# is exactly why the host cannot show this gap and only an image build can.
+# Measured + pinned by cr-dk9i2; the assertion is at the foot of the gc RUN.
+ARG LIBICU_VERSION=74.2-1ubuntu3.1
 ARG CODEX_URL=https://github.com/openai/codex/releases/download/rust-v0.150.1/codex-package-x86_64-unknown-linux-musl.tar.gz
 ARG CODEX_SHA256=00aba704f029f6dc0d948be407a756e0c97cc840132fd691353b2c6b0a505b17
 ARG CODEX_ENTRYPOINT_SHA256=abf1bb1643a79f73aa78ee627e111e02d4f8c98f25813a0cf6ce277709664386
@@ -85,6 +92,7 @@ RUN apt-get update \
        bash \
        ca-certificates \
        curl \
+       libicu74=${LIBICU_VERSION} \
        git=${GIT_VERSION} \
        jq \
        lsof \
@@ -130,6 +138,8 @@ RUN set -eu; \
       expected=""; \
     fi; \
     rm -rf /tmp/toolchain-local; \
+    missing="$(ldd /usr/local/bin/gc | awk '/not found/ {printf "%s ", $1}')"; \
+    test -z "${missing}" || { echo "gc has unresolved shared libraries in this image: ${missing}" >&2; echo "add the providing package to the apt RUN above; measured with: docker run --rm -v <staged gc>:/gc:ro <base_image> ldd /gc" >&2; exit 1; }; \
     reported="$(gc version --json --long)"; \
     echo "gc in image: ${reported}"; \
     if [ -n "${expected}" ]; then \

@@ -92,7 +92,7 @@ local_artifact_pin() { lock_attr gc_local_artifact pin; }
 require_lock() {
   [ -f "$LOCK" ] || die "missing ${LOCK}"
   [ -f "$DOCKERFILE" ] || die "missing ${DOCKERFILE}"
-  for c in gc bd git tmux codex; do
+  for c in gc bd git tmux codex libicu74; do
     grep -qE "^${c}[[:space:]].*sha256:[0-9a-f]{64}" "$LOCK" || die "component ${c} is missing or unpinned in ${LOCK}"
     [ -n "$(lock_sha "$c")" ] || die "component ${c} has no parseable sha256 pin"
   done
@@ -144,6 +144,7 @@ args_from_lock() {
     "--build-arg=GC_SHA256=$(lock_sha gc)" \
     "--build-arg=GIT_VERSION=$(lock_version git)" \
     "--build-arg=TMUX_VERSION=$(lock_version tmux)" \
+    "--build-arg=LIBICU_VERSION=$(lock_version libicu74)" \
     "--build-arg=BD_SOURCE_URL=$(lock_attr bd url)" \
     "--build-arg=BD_SOURCE_SHA256=$(lock_sha bd)" \
     "--build-arg=BD_VERSION=$(lock_version bd)" \
@@ -185,7 +186,7 @@ case "$cmd" in
     echo "toolchain lock: base       $(lock_get base_image)"
     echo "toolchain lock: build      $(lock_get build_image)"
     echo "toolchain lock: agent      $(lock_get agent_image)   rollback $(lock_get rollback_image)"
-    for c in gc bd git tmux codex; do
+    for c in gc bd git tmux codex libicu74; do
       printf 'toolchain lock: %-9s %s sha256:%s\n' "$c" "$(lock_version "$c")" "$(lock_sha "$c")"
     done
     if [ -n "$(lock_get gc_local_artifact)" ]; then
@@ -199,7 +200,7 @@ case "$cmd" in
     else
       echo "toolchain lock: no gc_local_artifact — a build would ship published gc $(lock_version gc), which may be older than the live pin; refresh-pin to carry the pin"
     fi
-    echo "toolchain lock: five components sha256-pinned, base digest-pinned, Codex standalone layout asserted, rollback named"
+    echo "toolchain lock: six components sha256-pinned (the local gc shared-library dep included), base digest-pinned, Codex standalone layout asserted, rollback named"
     ;;
 
   verify) # re-check every pin against its publisher (read-only, needs network)
@@ -221,7 +222,7 @@ case "$cmd" in
     echo "verify codex ${cv}: release SHA256SUMS matches the lock"
 
     index="$(mktemp)"; curl -fsSL --max-time 300 "$APT_INDEX" | gzip -dc > "$index" || { rm -f "$index"; die "apt Release index fetch failed"; }
-    for c in git tmux; do
+    for c in git tmux libicu74; do
       idx_ver="$(apt_field "$index" "$c" "Version:")"
       idx_sha="$(apt_field "$index" "$c" "SHA256:")"
       [ "${idx_ver:-}" = "$(lock_version "$c")" ] || die "${c} Release index no longer offers $(lock_version "$c") (index says ${idx_ver:-absent})"

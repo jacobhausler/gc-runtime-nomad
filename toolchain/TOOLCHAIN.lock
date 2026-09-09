@@ -75,6 +75,13 @@ bd 1.1.0 sha256:a8b1d8dd85b2c008093615cb85937067a9597e760e8d39f93fe55f5c1cbb4d37
 # is the value that index published for the pinned version, recorded so the
 # build input is reproducible and auditable off-box.
 git 1:2.43.0-1ubuntu7.3 sha256:099bb129f543adc4c14203334b0fa0a909f8bf038c4d56bc9cc7c774ebf78f87 artifact=pool/main/g/git/git_2.43.0-1ubuntu7.3_amd64.deb url=https://archive.ubuntu.com/ubuntu/pool/main/g/git/git_2.43.0-1ubuntu7.3_amd64.deb layout=/usr/bin/git asserts=git --version -> git version 2.43.0 index=https://archive.ubuntu.com/ubuntu/dists/noble-updates/main/binary-amd64/Packages.gz
+# ICU is here because the ESTATE-BUILT gc needs it, not because this file
+# wants company: `ldd` on the digest-pinned base reports libicui18n.so.74 as
+# missing for the staged pin, so a build installs a gc that cannot load and
+# dies at its first command. The host hides this (rhuidean has ICU); only an
+# image sees it. Pinned like the other apt lines and asserted at build time
+# by `ldd /usr/local/bin/gc` in the Dockerfile rather than remembered.
+libicu74 74.2-1ubuntu3.1 sha256:c9a70989678660eed9a1e904c74fa043da8bec8e2036856fc16e31ced79b04f8 artifact=pool/main/i/icu/libicu74_74.2-1ubuntu3.1_amd64.deb url=https://archive.ubuntu.com/ubuntu/pool/main/i/icu/libicu74_74.2-1ubuntu3.1_amd64.deb layout=/usr/lib/x86_64-linux-gnu/libicui18n.so.74 asserts=gc loads at all -- ldd /usr/local/bin/gc reports no "not found" index=https://archive.ubuntu.com/ubuntu/dists/noble-updates/main/binary-amd64/Packages.gz provenance=measured with ldd on the digest-pinned base (cr-dk9i2)
 tmux 3.4-1ubuntu0.1 sha256:2913e17aa61879d1f905aab6f374f153f1ece63aefba1b996e387325d1d5338d artifact=pool/main/t/tmux/tmux_3.4-1ubuntu0.1_amd64.deb url=https://archive.ubuntu.com/ubuntu/pool/main/t/tmux/tmux_3.4-1ubuntu0.1_amd64.deb layout=/usr/bin/tmux asserts=tmux -V -> tmux 3.4 index=https://archive.ubuntu.com/ubuntu/dists/noble-updates/main/binary-amd64/Packages.gz
 # Codex: the COMPLETE standalone package. The bare codex-<target>.tar.gz is the
 # D4 failure — it has no bin/codex-code-mode-host, no codex-resources/, no

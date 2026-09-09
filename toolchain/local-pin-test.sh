@@ -58,7 +58,7 @@ set_lock_pin() { # set_lock_pin <pack-root> <path> <sha> <pin>
 }
 
 # --- 1. the shipped lock -------------------------------------------------------
-expect "check passes on the shipped lock"        "five components sha256-pinned" bash "${REAL_SCRIPT}" check
+expect "check passes on the shipped lock"        "six components sha256-pinned" bash "${REAL_SCRIPT}" check
 expect "check reports the live pin"              "gc LOCAL  /mnt/nomad/gc/bin/" bash "${REAL_SCRIPT}" check
 expect "check keeps upstream as the public default" "published gc 1.4.1 stays the public default" bash "${REAL_SCRIPT}" check
 
@@ -165,6 +165,11 @@ while i < len(lines):
     i += 1
 ' "${DOCKERFILE}")
 grep -q 'sha256sum --check --strict' "${DOCKERFILE}" && ok "Dockerfile checksum-verifies what it installs" || bad "Dockerfile lost its checksum gate"
+# An image that installs a binary it cannot load is the failure this lane keeps
+# hitting — the host always has the library, the digest-pinned base does not.
+grep -qE 'libicu74=\$\{LIBICU_VERSION\}' "${DOCKERFILE}" && ok "apt installs the local gc ICU dependency" || bad "Dockerfile lost libicu74: the staged pin cannot load without it"
+grep -q 'not found' "${DOCKERFILE}" && ok "the build asserts nothing unresolved before running gc" || bad "Dockerfile has no ldd gate: an unloadable gc would build green again"
+grep -qE '^libicu74 [^ ]+ sha256:[0-9a-f]{64}' "${REAL_LOCK}" && ok "ICU is checksum-pinned like every other apt line here" || bad "libicu74 is not checksum-pinned in the lock"
 grep -q 'PLACEHOLDER' "${REAL_SCRIPT}" && ok "script mints a placeholder so COPY never sees an empty dir" || bad "script does not mint the placeholder COPY needs"
 
 if [ "$fails" = 0 ]; then
