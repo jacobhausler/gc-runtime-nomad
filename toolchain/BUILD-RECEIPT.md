@@ -104,10 +104,111 @@ NOT proven here — and the receipt that reads this must not confuse the two:
   the disposable docker-driver canary is explicitly out of this atom's scope
   (1.0.x, per the facts receipt). First `build` on a host with a daemon is the
   real test of the rebuild and the Codex unpack steps.
+
+  → Superseded by cr-dk9i2 below: it has since been built on rhuidean, twice
+  failing and once succeeding, and both failures were real defects this receipt
+  could not have seen. Read the cr-dk9i2 section as the current word on the
+  Dockerfile; this bullet is kept as the record of what was and was not proven
+  at the time.
 - No pin, image, launchd unit, city service, supervisor, or live job was
   touched, and no live publish was invoked.
 
+## The live pin in the image — cr-dk9i2 (2026-09-09T14:2x–14:5xZ, mechanic-3)
+
+The section at the foot of this file stayed open because there was nothing
+published to lock: the estate's live gc pin is a locally built binary with no
+upstream checksum. cr-dk9i2 closes it with a **local artifact** entry instead of
+a published-release pretence — and the alternative it replaces (shipping
+published gc while the estate runs a newer pin) is the defect, not a detail.
+
+| | |
+|---|---|
+| live pin | `e52f96f62` — `gc version --json --long` → `{"commit":"e52f96f62","version":"dev"}`, identical on the Mac and on the staged binary |
+| staged artifact | `rhuidean:/mnt/nomad/gc/bin/e52f96f62/gc` — ELF 64-bit x86-64, `/mnt/nomad/gc/bin/current` → `e52f96f62` |
+| sha256 | `0f3b9e3a3e115ba95096ce9ea01e08d4f97b397243ddca0ec259de6e0c2b25a7`, measured on the host that stages it |
+| lock | `gc_local_artifact <path> sha256=<sha> pin=<commit>`; the published `gc 1.4.1` line is untouched and stays the PUBLIC default (`build --published` builds exactly it) |
+| pack commit | `8e798e674ce417355a2893c37deb4d017e4959a4` (`main`) |
+
+The native gc forms checked before any of this was added to the pack:
+`gc --help` lists no pin/artifact/install command and `gc version --long` only
+REPORTS the binary already running; `gc build-image --help`
+(`--base-image`/`--tag`/`--context-only`/`--push`/`--json`/`--rig-path`) composes
+CITY content onto `ARG BASE`, names no gc binary, and copies the city whole with
+only secrets excluded (`internal/buildimage/context.go`). gc as shipped can
+therefore neither carry a locally built pin nor refuse an estate-root context,
+so the pack holds both gates and gc is used exactly as shipped. A third solution
+— "delete the local layer" — is unavailable: with no local path the image is
+older than the pin by construction.
+
+### Measured
+
+```sh
+bash toolchain/local-pin-test.sh     # 31 assertions, offline → local-pin-test: PASS
+bash toolchain/build-image.sh check  # → gc LOCAL … pin=e52f96f62 (and honestly "absent on this host" on a Mac)
+bash toolchain/build-image.sh verify # → all five publisher checks still PASS (gc/bd/codex/git/tmux)
+
+# refresh-pin's happy path runs only where the pin is staged (a Mac's own live
+# pin is a darwin build; the lane refuses a non-x86-64 file rather than pin it):
+ssh rhuidean … 'cd ~/cr-dk9i2 && bash toolchain/build-image.sh refresh-pin --artifact=/mnt/nomad/gc/bin/e52f96f62/gc'
+   # → refresh-pin: … sha256=0f3b9e3a… pin=e52f96f62
+   # diff vs the COMMITTED lock → IDENTICAL: a repin is one command and idempotent
+
+# the build itself — and the THREE defects only a build could show. All three are
+# at HEAD, each with an assertion that keeps it fixed:
+#   1. gc RUN → `/bin/sh: 1: Syntax error: Unterminated quoted string`: cr-dk9i2's
+#      own identity assertion was not parseable → 78d5942, plus the offline
+#      RUN-parse gate with a bite-canary
+#   2. gc RUN → `gc: error while loading shared libraries: libicui18n.so.74`
+#      after the checksum passed: the estate-built gc links ICU, ubuntu:24.04
+#      does not ship it, and rhuidean does — a gap the host structurally cannot
+#      show → libicu74 pinned as a sixth component + an ldd gate, 2fd96d8
+#   3. Codex RUN → `ln: failed to create symbolic link '/opt/codex/bin/current':
+#      No such file or directory` at the last line: `ln -sfn` does not create a
+#      parent. Pre-existing at cr-u7b0s.45, whose own receipt recorded that this
+#      Dockerfile had never been built — first build, first finding → 4cf46af
+
+GC_TOOLCHAIN_HOST_STEP=1 bash toolchain/build-image.sh build --tag=gc-agent:1.0.6-e52f96f62
+   # the pin reached docker: --build-arg=GC_LOCAL_ARTIFACT=gc
+   # --build-arg=GC_LOCAL_SHA256=0f3b9e3a… --build-arg=GC_PIN_COMMIT=e52f96f62
+   # context = a minted /tmp/gc-toolchain-ctx.XXXXXX, never the pack working tree
+   # → 35/35 steps green, "Successfully tagged gc-agent:1.0.6-e52f96f62"
+   # image id  sha256:98c2e5f8d68ffc30bb4e7dd3b6d80c1d40ae67cd9c90d4fe23864d56876ce5d3
+   #          (docker image inspect -f '{{.Id}}', 2026-09-09T15:25:03Z, rhuidean)
+   # image size 498508363 bytes; RepoTags=[gc-agent:1.0.6-e52f96f62]
+   # build receipt line: built agent=gc-agent:1.0.6-e52f96f62
+   #   id=sha256:98c2e5f8…gc_source=local gc_pin=e52f96f62 rollback=gc-session-toolchain:rollback
+   # in-image, from the built image itself:
+   #   gc version --json --long → {"commit":"e52f96f62","version":"dev"}   ← the bead
+   #   ldd /usr/local/bin/gc | grep -c "not found" → 0
+   #   bd --version → bd version 1.1.0 (bf97b73749)
+   #   git version 2.43.0 · tmux 3.4
+   #   env -i PATH=/opt/codex/bin/current:/usr/bin:/bin sh -c 'command -v codex;
+#     command -v codex-code-mode-host' → both resolve (the D4 worked example)
+```
+
+The fixture tag asserts its own identity from the inside: the Dockerfile
+checksum-verifies the staged bytes and then fails the build unless
+`gc version --json --long` inside the image reports `"commit":"e52f96f62"`.
+
+**One line for the pin-roll lane (cr-u7b0s.51) and for any future image:** an
+estate-built gc links `libicui18n.so.74`. Any image that ships a locally built gc
+must carry `libicu74`, or it will build green and die at the first seat command.
+Nothing else in the estate bakes a gc into an image today (the exec + artifact-
+volume shape runs on hosts that have ICU), so this is a forward warning, not a
+list of live exposures.
+
+Refused, and proved refused by the fixture: a named-but-missing artifact, a
+checksum that moved, an unchecksummed `gc_local_artifact` line, no local line at
+all (that is the silent-fallback hole), and `--city=<estate root>` for
+`city-image`/`context-only` — the last is the failure cr-5wz9v stopped at, and a
+bounded city (city.toml, outside the checkout; `ops/tests/test-city-kit` mints
+one under `/tmp`) is accepted.
+
 ## Left open for the pin-roll lane (surfaced, not decided here)
+
+**Answered by cr-dk9i2, the next section down.** The choice it framed — move to a
+published release, or rebuild from source and stamp the measured digest — went to
+the second branch, and the stamp is `gc_local_artifact` with the live pin.
 
 `gc` in the image is the **published v1.4.1** release. The estate's current gc
 pin is EDGE `857ed398ad22de3d84b229a0f9b6557d694f4b5a`, which is **not published
