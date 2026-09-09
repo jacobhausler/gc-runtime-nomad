@@ -3,9 +3,12 @@
 # Written by cr-u7b0s.45 (Remediate G: package the box toolchain as a
 # checksum-pinned prebaked image). Consumed by toolchain/Dockerfile through
 # toolchain/build-image.sh, which reads every value below and passes it as a
-# build ARG. Values are upstream-PUBLISHED checksums, never estate-internal
-# ones; each one was re-verified against its publisher on 2026-09-09T03:4xZ
-# (measurements, dates, and the two rejected pins: toolchain/BUILD-RECEIPT.md).
+# build ARG. The component lines below are upstream-PUBLISHED checksums, each
+# one re-verified against its publisher on 2026-09-09T03:4xZ (measurements,
+# dates, and the two rejected pins: toolchain/BUILD-RECEIPT.md). The single
+# exception is `gc_local_artifact` — the estate's own built pin, which has
+# no publisher, verified instead against its staged bytes and the gc commit
+# it reports (cr-dk9i2, below).
 #
 # This file is the layout+checksum assertion that README §"Worked example —
 # Codex" demands of any toolchain staging receipt: the artifact, its sha256,
@@ -42,6 +45,24 @@ rollback_image gc-session-toolchain:rollback
 # layout=… provenance=…  (`sha256sum --check --strict` is the assertion form.)
 
 gc 1.4.1 sha256:8d8c8b511db3fc44931445aab5cb9f212509c0867105c880d6c3d0e6e5d33e42 artifact=gascity_1.4.1_linux_amd64.tar.gz url=https://github.com/gastownhall/gascity/releases/download/v1.4.1/gascity_1.4.1_linux_amd64.tar.gz layout=/usr/local/bin/gc asserts=gc version -> v1.4.1 commit 58ef17e3bd685fd5cf7f21286277b208d3324590, embedded grpc v1.82.1 provenance=https://github.com/gastownhall/gascity/releases/download/v1.4.1/gascity_1.4.1_checksums.txt
+# --- the LIVE pin (cr-dk9i2) -------------------------------------------------
+# The gc line above is the upstream-PUBLISHED release and stays the PUBLIC
+# DEFAULT — it is what a stranger to this estate gets, and `build --published`
+# still builds exactly it. It is NOT what the estate runs: the live pin is newer
+# (measured 2026-09-09T14:2xZ, `gc version --json --long` ->
+# {"commit":"e52f96f62","version":"dev"}), so an image assembled only from
+# published release bytes ships a gc OLDER than the pin it exists to carry.
+# build-image.sh prefers the line below when it is named, refuses (never falls
+# back) when it is named but missing or mismatched, and `--published` is the
+# deliberate way back to upstream.
+#
+# This is a BUILD-HOST path read at docker-build time and copied INTO the image,
+# not a runtime delivery layer: the image still mounts nothing, no
+# [session.k8s] key appears, and no allocation writes /mnt/nomad/gc/bin — the
+# ruling the header records (cr-on8x4) is untouched. Refresh it in one command
+# ON THE HOST THAT STAGES THE PIN (a Mac's live pin is a darwin build):
+#   toolchain/build-image.sh refresh-pin --artifact=/mnt/nomad/gc/bin/<pin>/gc
+gc_local_artifact /mnt/nomad/gc/bin/e52f96f62/gc sha256=0f3b9e3a3e115ba95096ce9ea01e08d4f97b397243ddca0ec259de6e0c2b25a7 pin=e52f96f62 asserts=gc version --json --long -> commit == pin
 # bd is deliberately NOT the published beads binary: beads_1.2.2_linux_amd64
 # carries google.golang.org/grpc v1.80.0 in its own build info (measured), which
 # is why upstream rebuilds release source with a patched grpc. The sha256 below

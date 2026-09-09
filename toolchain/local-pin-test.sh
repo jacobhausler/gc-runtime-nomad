@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+# toolchain/local-pin-test.sh — offline fixture for cr-dk9i2 (the live-pin image path)
+#
+# Proves, with NO network, NO docker daemon and NO estate side effects:
+#   1. the lock's live-pin entry is well-formed and what `check` reports;
+#   2. `build` PREFERS the staged local gc and passes its checksum + commit into
+#      the Dockerfile, into a MINTED build context (never the pack working tree);
+#   3. it REFUSES rather than silently shipping the older published gc — named
+#      but missing, checksum mismatch, unpinned line, no line at all;
+#   4. --published is the deliberate way back to upstream, and then the local
+#      args go empty (the Dockerfile's public default);
+#   5. --city that is the estate checkout (or any non-city) is refused, and a
+#      bounded city is accepted;
+#   6. refresh-pin will not pin a missing binary or a non-x86-64 one;
+#   7. the Dockerfile and the script agree on the staging contract.
+#
+# The happy path of refresh-pin CANNOT run here: it needs the staged linux pin,
+# which lives on the build host (a Mac's own live pin is a darwin build). It is
+# proven there — see BUILD-RECEIPT.md "Live pin in the image".
+set -uo pipefail
+
+TOOLCHAIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REAL_SCRIPT="${TOOLCHAIN_DIR}/build-image.sh"
+DOCKERFILE="${TOOLCHAIN_DIR}/Dockerfile"
+REAL_LOCK="${TOOLCHAIN_DIR}/TOOLCHAIN.lock"
+W="$(mktemp -d "${TMPDIR:-/tmp}/gc-local-pin-test.XXXXXX")"
+trap 'rm -rf "$W"' EXIT
+fails=0
+ok()   { printf 'ok   %s\n' "$1"; }
+bad()  { printf 'FAIL %s\n' "$1"; fails=$((fails+1)); }
+expect() { # expect <label> <needle> <cmd…>
+  local label="$1" needle="$2"; shift 2
+  local out; out="$("$@" 2>&1)" || true
+  case "$out" in *"$needle"*) ok "$label" ;; *) bad "$label — no '$needle' in: $(printf '%s' "$out" | head -3)";; esac
+}
+refuse() { # refuse <label> <needle> <cmd…>  — must exit non-zero AND say why
+  local label="$1" needle="$2"; shift 2
+  local out rc=0
+  out="$("$@" 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || { bad "$label — exit was 0, nothing was refused"; return; }
+  case "$out" in *"$needle"*) ok "$label" ;; *) bad "$label — refused without naming '$needle': $(printf '%s' "$out" | head -3)";; esac
+}
+
+# A pack copy in /tmp with its own lock, so the pins can be moved without
+# touching the estate checkout. PACK_ROOT follows BASH_SOURCE, so this works.
+mint_pack() { # mint_pack <name> -> echo pack root
+  pr="${W}/$1"; mkdir -p "${pr}/toolchain"
+  cp "${REAL_SCRIPT}" "${DOCKERFILE}" "${REAL_LOCK}" "${pr}/toolchain/"
+  printf '%s\n' "${pr}"
+}
+strip_lock_pin() { # strip_lock_pin <pack-root> — the lock WITHOUT any local-artifact line
+  awk '$1!="gc_local_artifact"' "${1}/toolchain/TOOLCHAIN.lock" > "${1}/toolchain/l2" && mv "${1}/toolchain/l2" "${1}/toolchain/TOOLCHAIN.lock"
+}
+set_lock_pin() { # set_lock_pin <pack-root> <path> <sha> <pin>
+  awk -v p="$2" -v s="$3" -v c="$4" '
+    $1=="gc_local_artifact" { printf "gc_local_artifact %s sha256=%s pin=%s asserts=gc version --json --long -> commit == pin\n", p, s, c; next }
+    { print }' "${1}/toolchain/TOOLCHAIN.lock" > "${1}/toolchain/l2" && mv "${1}/toolchain/l2" "${1}/toolchain/TOOLCHAIN.lock"
+}
+
+# --- 1. the shipped lock -------------------------------------------------------
+expect "check passes on the shipped lock"        "five components sha256-pinned" bash "${REAL_SCRIPT}" check
+expect "check reports the live pin"              "gc LOCAL  /mnt/nomad/gc/bin/" bash "${REAL_SCRIPT}" check
+expect "check keeps upstream as the public default" "published gc 1.4.1 stays the public default" bash "${REAL_SCRIPT}" check
+
+# --- 2. the preference, and a bounded context ---------------------------------
+P="$(mint_pack prefer)"
+FAKE="${P}/staged/gc"; mkdir -p "${P}/staged"
+printf 'fake staged gc\n' > "${FAKE}"
+FAKE_SHA="$(if command -v sha256sum >/dev/null 2>&1; then sha256sum -b "$FAKE" | awk '{print $1}'; else shasum -a 256 -b "$FAKE" | awk '{print $1}'; fi)"
+set_lock_pin "${P}" "${FAKE}" "${FAKE_SHA}" "deadbee00"
+out="$(GC_TOOLCHAIN_HOST_STEP=1 bash "${P}/toolchain/build-image.sh" build --dry-run 2>&1)" || true
+case "$out" in *"--build-arg=GC_LOCAL_ARTIFACT=gc"*) ok "build passes the staged artifact to the Dockerfile";; *) bad "build did not pass GC_LOCAL_ARTIFACT=gc: $(printf '%s' "$out" | head -3)";; esac
+case "$out" in *"--build-arg=GC_LOCAL_SHA256=${FAKE_SHA}"*) ok "build passes the pinned checksum";; *) bad "build did not pass GC_LOCAL_SHA256: $(printf '%s' "$out" | head -3)";; esac
+case "$out" in *"--build-arg=GC_PIN_COMMIT=deadbee00"*) ok "build passes the pin commit";; *) bad "build did not pass GC_PIN_COMMIT";; esac
+case "$out" in *"context="*"gc-toolchain-ctx."*"staged="*".local/gc"*) ok "build stages into a minted context, not the pack working tree";; *) bad "build did not report a minted staged context: $(printf '%s' "$out" | tail -3)";; esac
+case "$out" in *"${P}/toolchain "*|*"${P}/toolchain"$'\n'*) bad "build used the pack working tree as the docker context";; *) ok "docker context is not the pack directory";; esac
+
+# --- 3. the refusals: never a silent fallback to an older gc ------------------
+P="$(mint_pack missing)"; FAKE="${P}/staged/gc"; mkdir -p "${P}/staged"; printf 'x\n' > "${FAKE}"
+set_lock_pin "${P}" "${P}/staged/gone" "0000000000000000000000000000000000000000000000000000000000000000" "abc123456"
+refuse "named-but-missing artifact is refused" "is not on this host" env GC_TOOLCHAIN_HOST_STEP=1 bash "${P}/toolchain/build-image.sh" build --dry-run
+
+P="$(mint_pack mismatch)"; FAKE="${P}/staged/gc"; mkdir -p "${P}/staged"; printf 'the real bytes\n' > "${FAKE}"
+set_lock_pin "${P}" "${FAKE}" "1111111111111111111111111111111111111111111111111111111111111111" "abc123456"
+refuse "checksum mismatch is refused" "checksum mismatch" env GC_TOOLCHAIN_HOST_STEP=1 bash "${P}/toolchain/build-image.sh" build --dry-run
+
+P="$(mint_pack unpinned)"; FAKE="${P}/staged/gc"; mkdir -p "${P}/staged"; printf 'x\n' > "${FAKE}"
+set_lock_pin "${P}" "${FAKE}" "" ""
+refuse "an unchecksummed local line is refused" "no sha256=<hex> pin" bash "${P}/toolchain/build-image.sh" check
+
+P="$(mint_pack nolocal)"; strip_lock_pin "${P}"
+refuse "no local line + no --published is refused" "which is likely older than the live pin" env GC_TOOLCHAIN_HOST_STEP=1 bash "${P}/toolchain/build-image.sh" build --dry-run
+# the cr-dk9i2 COMMENT block names gc_local_artifact too; only a line whose first
+# field is the key is a pin (that is what lock_get reads), so assert on the anchor.
+grep -qE '^gc_local_artifact ' "${P}/toolchain/TOOLCHAIN.lock" && bad "strip_lock_pin left an active pin" || ok "a lock with only the comment block has no active pin"
+
+# --- 4. --published stays the public default ----------------------------------
+P="$(mint_pack published)"
+out="$(GC_TOOLCHAIN_HOST_STEP=1 bash "${P}/toolchain/build-image.sh" build --dry-run --published 2>&1)" || true
+case "$out" in *"gc source: PUBLISHED"*) ok "--published names itself out loud";; *) bad "--published did not announce itself: $(printf '%s' "$out" | head -3)";; esac
+case "$out" in *"--build-arg=GC_LOCAL_ARTIFACT= "--*) ok "--published empties the local artifact args";; *) bad "--published left the local args set: $(printf '%s' "$out" | head -3)";; esac
+out="$(GC_TOOLCHAIN_HOST_STEP=1 bash "${P}/toolchain/build-image.sh" build --dry-run --published 2>&1)" || true
+case "$out" in *"--build-arg=GC_SHA256=8d8c8b51"*) ok "--published keeps the upstream published checksum";; *) bad "--published lost the published pin";; esac
+
+# --- 5. the bounded-city refusal ----------------------------------------------
+ESTATE="$(cd "${TOOLCHAIN_DIR}/../.." && git rev-parse --show-toplevel 2>/dev/null || true)"
+case "${ESTATE}" in */gc-runtime-nomad|"") ESTATE="" ;; esac
+if [ -n "${ESTATE}" ]; then
+  refuse "the estate checkout is refused as a build context" "estate checkout" bash "${REAL_SCRIPT}" city-image --city="${ESTATE}" --dry-run
+  refuse "…and by context-only too" "estate checkout" bash "${REAL_SCRIPT}" context-only --city="${ESTATE}" --dry-run
+else
+  ok "estate checkout not derivable from this checkout (pack not under <estate>/work/) — estate refusal not applicable"
+fi
+refuse "a non-city directory is refused" "no city.toml" bash "${REAL_SCRIPT}" city-image --city="${W}" --dry-run
+BOUNDED="${W}/gctc-fake-city"; mkdir -p "${BOUNDED}"; printf '# bounded test city\n' > "${BOUNDED}/city.toml"
+out="$(bash "${REAL_SCRIPT}" city-image --city="${BOUNDED}" --dry-run 2>&1)" || true
+case "$out" in *"+ gc build-image "*gctc-fake-city*"--json"*) ok "a bounded city passes and gc build-image is the command run";; *) bad "a bounded city was not accepted: $(printf '%s' "$out" | head -3)";; esac
+refuse "--city is required" "bounded city" bash "${REAL_SCRIPT}" city-image --dry-run
+
+# --- 6. refresh-pin refusals --------------------------------------------------
+refuse "refresh-pin will not pin a missing binary" "no gc binary at" bash "${REAL_SCRIPT}" refresh-pin --artifact="${W}/definitely-not-here"
+refuse "refresh-pin will not pin a non-x86-64 binary" "not an x86-64 ELF" bash "${REAL_SCRIPT}" refresh-pin --artifact="${REAL_SCRIPT}"
+refuse "refresh-pin with no --artifact prints usage" "usage: toolchain/build-image.sh refresh-pin" bash "${REAL_SCRIPT}" refresh-pin
+
+# --- 7. the Dockerfile agrees with the script ---------------------------------
+grep -q 'ARG GC_LOCAL_ARTIFACT=' "${DOCKERFILE}" && ok "Dockerfile declares the local-artifact ARGs" || bad "Dockerfile lost ARG GC_LOCAL_ARTIFACT"
+grep -q 'ARG GC_LOCAL_SHA256=' "${DOCKERFILE}" && grep -q 'ARG GC_PIN_COMMIT=' "${DOCKERFILE}" && ok "Dockerfile declares the checksum + commit ARGs" || bad "Dockerfile lost GC_LOCAL_SHA256/GC_PIN_COMMIT"
+grep -q 'COPY .local/' "${DOCKERFILE}" && ok "Dockerfile copies the minted staging dir" || bad "Dockerfile lost COPY .local/"
+grep -Fq 'grep -Fq "\"commit\":' "${DOCKERFILE}" && ok "Dockerfile asserts the pin's own reported commit" || bad "Dockerfile does not assert the reported commit"
+grep -q 'sha256sum --check --strict' "${DOCKERFILE}" && ok "Dockerfile checksum-verifies what it installs" || bad "Dockerfile lost its checksum gate"
+grep -q 'PLACEHOLDER' "${REAL_SCRIPT}" && ok "script mints a placeholder so COPY never sees an empty dir" || bad "script does not mint the placeholder COPY needs"
+
+if [ "$fails" = 0 ]; then
+  echo "local-pin-test: PASS"
+else
+  printf 'local-pin-test: FAIL (%d failing)\n' "$fails"
+  exit 1
+fi

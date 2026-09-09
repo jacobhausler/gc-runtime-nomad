@@ -57,6 +57,15 @@ FROM ${BASE_IMAGE}
 
 ARG GC_URL=https://github.com/gastownhall/gascity/releases/download/v1.4.1/gascity_1.4.1_linux_amd64.tar.gz
 ARG GC_SHA256=8d8c8b511db3fc44931445aab5cb9f212509c0867105c880d6c3d0e6e5d33e42
+# cr-dk9i2 — which gc goes into the image. The published release above is the
+# PUBLIC DEFAULT; when GC_LOCAL_ARTIFACT names a file under .local/ (staged by
+# toolchain/build-image.sh from the lock's gc_local_artifact), that binary — the
+# estate's LIVE pin — is installed instead and its own reported commit is
+# asserted, because a gc older than the pin is the defect this closes.
+# build-image.sh passes empty values for all three to mean "published".
+ARG GC_LOCAL_ARTIFACT=
+ARG GC_LOCAL_SHA256=
+ARG GC_PIN_COMMIT=
 ARG GIT_VERSION=1:2.43.0-1ubuntu7.3
 ARG TMUX_VERSION=3.4-1ubuntu0.1
 ARG CODEX_URL=https://github.com/openai/codex/releases/download/rust-v0.150.1/codex-package-x86_64-unknown-linux-musl.tar.gz
@@ -91,13 +100,42 @@ RUN apt-get update \
     && tmux -V \
     && command -v sh tar flock lsof jq tini
 
-# gc — the published release archive, checksum-verified, identity-asserted.
-RUN curl -fsSL --retry 3 "${GC_URL}" -o /tmp/gc.tar.gz \
-    && echo "${GC_SHA256}  /tmp/gc.tar.gz" | sha256sum --check --strict \
-    && tar -xzf /tmp/gc.tar.gz -C /tmp gc \
-    && install -m 0755 /tmp/gc /usr/local/bin/gc \
-    && rm -f /tmp/gc /tmp/gc.tar.gz \
-    && gc version
+# The build context's staging dir. `.local/` is minted by build-image.sh (it
+# always contains a PLACEHOLDER, since COPY rejects an empty directory) and holds
+# the pinned local gc under `.local/gc` when one is selected. It is removed in
+# the same RUN that consumes it, so the artifact adds no layer.
+COPY .local/ /tmp/toolchain-local/
+
+# gc — either the estate's LIVE pin (checksum-verified, commit-asserted) or,
+# with no local artifact named, the published release archive. Both paths are
+# checksum-verified and identity-asserted; the local path asserts the commit the
+# pin REPORTS about itself, which is the assertion that would otherwise rot:
+# gc as shipped has no way to say which binary belongs in a base image
+# (`gc build-image --help` composes city content onto ARG BASE and names no gc).
+RUN set -eu; \
+    cd /; \
+    if [ -n "${GC_LOCAL_ARTIFACT}" ]; then \
+      src="/tmp/toolchain-local/${GC_LOCAL_ARTIFACT}"; \
+      test -f "$src"; \
+      echo "${GC_LOCAL_SHA256}  ${src}" | sha256sum --check --strict; \
+      install -m 0755 "$src" /usr/local/bin/gc; \
+      expected="${GC_PIN_COMMIT}"; \
+      test -n "$expected" || { echo "gc local artifact named with no GC_PIN_COMMIT" >&2; exit 1; }; \
+    else \
+      curl -fsSL --retry 3 "${GC_URL}" -o /tmp/gc.tar.gz; \
+      echo "${GC_SHA256}  /tmp/gc.tar.gz" | sha256sum --check --strict; \
+      tar -xzf /tmp/gc.tar.gz -C /tmp gc; \
+      install -m 0755 /tmp/gc /usr/local/bin/gc; \
+      rm -f /tmp/gc /tmp/gc.tar.gz; \
+      expected=""; \
+    fi; \
+    rm -rf /tmp/toolchain-local; \
+    reported="$(gc version --json --long)"; \
+    echo "gc in image: ${reported}"; \
+    if [ -n "${expected}" ]; then \
+      printf '%s' "${reported}" | grep -Fq "\"commit\":\"${expected}\"; \
+    fi; \
+    gc version
 
 # bd — rebuilt above from the checksum-pinned release source.
 COPY --from=bd-builder /out/bd /usr/local/bin/bd
@@ -138,3 +176,7 @@ RUN env -i PATH="/opt/codex/bin/current:/usr/bin:/bin" sh -c 'command -v codex &
 # gc build-image excludes them from the context it composes on top of this
 # base (internal/buildimage/context.go:39-63) and this estate stages secrets
 # value-blind at runtime (README part 1 step 9).
+# The gc binary itself may be a locally built artifact (cr-dk9i2): a build-time
+# copy of the staged pin, verified by checksum and by the commit it reports.
+# That path is a BUILD input only — the image still mounts nothing, and no
+# allocation writes /mnt/nomad/gc/bin (ruling cr-on8x4).
