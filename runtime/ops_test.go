@@ -449,8 +449,8 @@ func TestOpExecConfirmsASeparableTransportLaunch(t *testing.T) {
 	l, _ := newTestLifecycle(t)
 	ctx := context.Background()
 	const session = "sess-separable-launch"
-	const launchScript = "printf staged-bootstrap > \"$NOMAD_SECRETS_DIR/launch-marker\""
-	withAgentLaunchScript(t, launchScript)
+	const packLaunchScript = "printf pack-bootstrap > \"$NOMAD_SECRETS_DIR/launch-marker\""
+	withAgentLaunchScript(t, packLaunchScript)
 	fakeBin := t.TempDir()
 	fakeTmux := filepath.Join(fakeBin, "tmux")
 	launchRecord := filepath.Join(t.TempDir(), "tmux-launch-argv")
@@ -488,8 +488,11 @@ esac
 	if err != nil {
 		t.Fatalf("read tmux launch argv: %v", err)
 	}
-	if got := string(recorded); !strings.Contains(got, launchScript) {
-		t.Fatalf("transport launch argv = %q, want staged agent launch script %q", got, launchScript)
+	if got := string(recorded); !strings.Contains(got, "sleep 60") {
+		t.Fatalf("transport launch argv = %q, want GC-rendered pane command %q", got, "sleep 60")
+	}
+	if got := string(recorded); strings.Contains(got, packLaunchScript) {
+		t.Fatalf("transport launch argv = %q, unexpectedly replaced GC-rendered pane command with pack launch script %q", got, packLaunchScript)
 	}
 	if running, err := l.opIsRunning(ctx, session); err != nil || !running {
 		t.Fatalf("is-running after transport launch = (%v, %v), want (true, nil)", running, err)
@@ -609,8 +612,8 @@ func TestOpExecAppliesStagedBootstrapToTransportRespawn(t *testing.T) {
 	l, _ := newTestLifecycle(t)
 	ctx := context.Background()
 	const session = "sess-separable-respawn"
-	const launchScript = "printf staged-respawn > \"$NOMAD_SECRETS_DIR/respawn-marker\""
-	withAgentLaunchScript(t, launchScript)
+	const packLaunchScript = "printf pack-respawn > \"$NOMAD_SECRETS_DIR/respawn-marker\""
+	withAgentLaunchScript(t, packLaunchScript)
 	fakeBin := t.TempDir()
 	fakeTmux := filepath.Join(fakeBin, "tmux")
 	launchRecord := filepath.Join(t.TempDir(), "tmux-respawn-argv")
@@ -639,8 +642,11 @@ esac
 	if err != nil {
 		t.Fatalf("read tmux respawn argv: %v", err)
 	}
-	if got := string(recorded); !strings.Contains(got, "respawn-pane") || !strings.Contains(got, launchScript) {
-		t.Fatalf("transport respawn argv = %q, want respawn-pane with staged agent launch script %q", got, launchScript)
+	if got := string(recorded); !strings.Contains(got, "respawn-pane") || !strings.Contains(got, "sleep 60") {
+		t.Fatalf("transport respawn argv = %q, want respawn-pane with GC-rendered pane command %q", got, "sleep 60")
+	}
+	if got := string(recorded); strings.Contains(got, packLaunchScript) {
+		t.Fatalf("transport respawn argv = %q, unexpectedly replaced GC-rendered pane command with pack launch script %q", got, packLaunchScript)
 	}
 }
 

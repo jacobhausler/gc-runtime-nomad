@@ -362,6 +362,15 @@ func buildLaunchCommand(env map[string]string, workDir string) []string {
 // for a new session or a respawn, while sourcing the staged environment and
 // applying the deployment-owned agent launch script in either case.
 func buildLaunchCommandForTmux(env map[string]string, tmuxArgs []string, workDir string) []string {
+	return buildLaunchCommandForTmuxWithPaneCommand(env, tmuxArgs, workDir, agentLaunchScript)
+}
+
+// buildLaunchCommandForTmuxWithPaneCommand uses the canonical tmux operation
+// and runs paneCommand after the pack's in-pane staged-environment and cwd
+// preludes. The command is supplied by GC for separable transport launches;
+// opStart continues to supply the deployment-owned bootstrap through
+// buildLaunchCommandForTmux.
+func buildLaunchCommandForTmuxWithPaneCommand(env map[string]string, tmuxArgs []string, workDir, paneCommand string) []string {
 	env = stripLocalCityStoreEnv(env)
 	cmd := []string{"/bin/sh", "-c", launchEnvScript, "gc-runtime-nomad-launch", "tmux"}
 	cmd = append(cmd, tmuxArgs...)
@@ -375,15 +384,15 @@ func buildLaunchCommandForTmux(env map[string]string, tmuxArgs []string, workDir
 	for _, k := range keys {
 		cmd = append(cmd, "-e", k+"="+env[k])
 	}
-	if agentLaunchScript != "" {
+	if paneCommand != "" {
 		// The pane sources the staged environment itself (see
 		// paneStagedEnvPrelude): the client-side wrapper cannot reach it.
-		// The cwd prelude runs after it and before the bootstrap, so the
-		// deployment wiring is in force and the agent still starts in a
-		// directory the alloc actually has (paneCwdPrelude). With no bootstrap
-		// configured the pane stays the placeholder shell it always was, cwd
-		// included - that path is the seam's rollback.
-		cmd = append(cmd, "/bin/sh", "-c", paneStagedEnvPrelude+paneCwdPrelude(workDir)+agentLaunchScript)
+		// The cwd prelude runs after it and before paneCommand, so deployment
+		// wiring or GC's rendered command starts in a directory the alloc
+		// actually has (paneCwdPrelude). With no command configured the pane
+		// stays the placeholder shell it always was, cwd included - that path is
+		// the seam's rollback.
+		cmd = append(cmd, "/bin/sh", "-c", paneStagedEnvPrelude+paneCwdPrelude(workDir)+paneCommand)
 	}
 	return cmd
 }
@@ -810,10 +819,9 @@ func (l *lifecycle) opExec(ctx context.Context, sessionName string, command []st
 	}
 
 	if transportLaunch {
-		// GC's canonical launch argv is only the transport handshake. The pack
-		// owns the staged environment and deployment-configured bootstrap, so
-		// route this operation through the same launch path as opStart instead
-		// of executing cfg.Command directly and then merely recording a marker.
+		// Preserve GC's canonical launch argv, including its rendered pane
+		// command, while adding only the in-box staged-environment and cwd
+		// preludes the Nomad boundary requires.
 		if err := l.markTransportLaunched(ctx, sessionName, transportCommand); err != nil {
 			return 0, nil, fmt.Errorf("launching transport session %q: %w", sessionName, err)
 		}
@@ -840,9 +848,8 @@ func isSeparableTransportLaunch(command []string) bool {
 }
 
 // separableTransportLaunch returns GC's canonical tmux launch argv after
-// unwrapping the exec wire form. The final pane command is intentionally
-// discarded by the caller: it belongs to GC's transport handshake, while the
-// runtime pack owns the staged provider bootstrap.
+// unwrapping the exec wire form. The final pane command remains part of the
+// returned argv so the in-box launch path can execute GC's rendered command.
 func separableTransportLaunch(command []string) ([]string, bool) {
 	// RPP v0's exec op carries argv as one shellQuote-produced string on
 	// stdin. main preserves that contract by invoking /bin/sh -c, so unwrap
@@ -1210,8 +1217,8 @@ func (l *lifecycle) markLaunched(ctx context.Context, sessionName string, cfg st
 	return l.startupPrimeDetached(ctx, sessionName, cfg)
 }
 
-// markTransportLaunched preserves GC's canonical tmux transport verb while
-// replacing its raw pane command with the staged, deployment-owned bootstrap.
+// markTransportLaunched preserves GC's canonical tmux transport verb and
+// rendered pane command while adding the staged, in-box environment prelude.
 // The caller already holds sessionName's lock.
 //
 // Once the launch is confirmed, it hands the pane off to the detached prime
@@ -1234,7 +1241,7 @@ func (l *lifecycle) markTransportLaunched(ctx context.Context, sessionName strin
 	if err == nil && ok {
 		workDir = b.WorkDir
 	}
-	if err := l.launchWithCommand(ctx, sessionName, buildLaunchCommandForTmux(nil, transport[1:5], workDir)); err != nil {
+	if err := l.launchWithCommand(ctx, sessionName, buildLaunchCommandForTmuxWithPaneCommand(nil, transport[1:5], workDir, transport[5])); err != nil {
 		return err
 	}
 	if err := l.confirmLaunched(ctx, sessionName, workDir); err != nil {
