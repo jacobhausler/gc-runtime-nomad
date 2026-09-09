@@ -1,0 +1,65 @@
+# toolchain/TOOLCHAIN.lock — checksum-pinned session toolchain build input
+#
+# Written by cr-u7b0s.45 (Remediate G: package the box toolchain as a
+# checksum-pinned prebaked image). Consumed by toolchain/Dockerfile through
+# toolchain/build-image.sh, which reads every value below and passes it as a
+# build ARG. Values are upstream-PUBLISHED checksums, never estate-internal
+# ones; each one was re-verified against its publisher on 2026-09-09T03:4xZ
+# (measurements, dates, and the two rejected pins: toolchain/BUILD-RECEIPT.md).
+#
+# This file is the layout+checksum assertion that README §"Worked example —
+# Codex" demands of any toolchain staging receipt: the artifact, its sha256,
+# and the layout it asserts — for the whole session toolchain, not one binary.
+#
+# It ships NO delivery layer: no host volume, no /mnt/nomad path, no
+# [session.k8s] prebaked key, no second image knob. The image it describes is
+# the single value GC_NOMAD_AGENT_IMAGE takes (seam owned by cr-u7b0s.41, which
+# this atom does not rename), and publishing stays an executive host step —
+# allocations never write /mnt/nomad/gc/bin (ruling cr-on8x4 on cr-gdeav.2.13).
+
+# Base image, pinned by digest — never a floating tag. This is the digest
+# upstream's own contrib/k8s/Dockerfile.base:13,:103 builds its system-package
+# layer on; an atom that omits it gets gc build-image's default `gc-agent:latest`.
+base_image ubuntu:24.04@sha256:c4a8d5503dfb2a3eb8ab5f807da5bc69a85730fb49b5cfca2330194ebcc41c7b
+
+# The builder that rebuilds bd (upstream's own digest, contrib/k8s/Dockerfile.agent:22).
+build_image golang:1.26.6-bookworm@sha256:433f9dc4f8ea3a1ce4e28f9f15d0f7c056b10475307f886d6f1ac1ccc4abd976
+
+# The ONE image reference the pack consumes. build-image.sh prints the value to
+# export as GC_NOMAD_AGENT_IMAGE; it is never pushed (registry publication is a
+# later owner decision — AGENTS.md hard stop).
+agent_image gc-session-toolchain:1.0.5
+
+# Rollback: build-image.sh re-tags whatever was live to this tag BEFORE it
+# builds, and records that image id in the deployment receipt. Rolling back is
+# pointing GC_NOMAD_AGENT_IMAGE back at this tag (or unset it, which returns the
+# legacy exec + read-only artifact-volume shape — the mount is suppressed only
+# when the image variable is set).
+rollback_image gc-session-toolchain:rollback
+
+# --- components ------------------------------------------------------------
+# Each line: <name> <version> sha256:<published digest> artifact=… url=…
+# layout=… provenance=…  (`sha256sum --check --strict` is the assertion form.)
+
+gc 1.4.1 sha256:8d8c8b511db3fc44931445aab5cb9f212509c0867105c880d6c3d0e6e5d33e42 artifact=gascity_1.4.1_linux_amd64.tar.gz url=https://github.com/gastownhall/gascity/releases/download/v1.4.1/gascity_1.4.1_linux_amd64.tar.gz layout=/usr/local/bin/gc asserts=gc version -> v1.4.1 commit 58ef17e3bd685fd5cf7f21286277b208d3324590, embedded grpc v1.82.1 provenance=https://github.com/gastownhall/gascity/releases/download/v1.4.1/gascity_1.4.1_checksums.txt
+# bd is deliberately NOT the published beads binary: beads_1.2.2_linux_amd64
+# carries google.golang.org/grpc v1.80.0 in its own build info (measured), which
+# is why upstream rebuilds release source with a patched grpc. The sha256 below
+# is the PUBLISHED source-archive digest upstream itself verifies
+# (contrib/k8s/Dockerfile.agent:25-26,:33); the rebuild recipe and its two
+# post-build assertions are mirrored at toolchain/Dockerfile.
+bd 1.1.0 sha256:a8b1d8dd85b2c008093615cb85937067a9597e760e8d39f93fe55f5c1cbb4d37 artifact=beads-bf97b73749ac3ef2fca2365b54537ac041ad4293.tar.gz url=https://github.com/gastownhall/beads/archive/bf97b73749ac3ef2fca2365b54537ac041ad4293.tar.gz source_ref=bf97b73749ac3ef2fca2365b54537ac041ad4293 rebuilt_grpc=1.82.1 layout=/usr/local/bin/bd asserts=bd --version -> "bd version 1.1.0 (bf97b73749)" AND go version -m shows dep google.golang.org/grpc v1.82.1 provenance=contrib/k8s/Dockerfile.agent:24-26
+# git/tmux: apt content of the digest-pinned base. apt verifies the deb against
+# the signed Release index — that is the native integrity gate; the SHA256 here
+# is the value that index published for the pinned version, recorded so the
+# build input is reproducible and auditable off-box.
+git 1:2.43.0-1ubuntu7.3 sha256:099bb129f543adc4c14203334b0fa0a909f8bf038c4d56bc9cc7c774ebf78f87 artifact=pool/main/g/git/git_2.43.0-1ubuntu7.3_amd64.deb url=https://archive.ubuntu.com/ubuntu/pool/main/g/git/git_2.43.0-1ubuntu7.3_amd64.deb layout=/usr/bin/git asserts=git --version -> git version 2.43.0 index=https://archive.ubuntu.com/ubuntu/dists/noble-updates/main/binary-amd64/Packages.gz
+tmux 3.4-1ubuntu0.1 sha256:2913e17aa61879d1f905aab6f374f153f1ece63aefba1b996e387325d1d5338d artifact=pool/main/t/tmux/tmux_3.4-1ubuntu0.1_amd64.deb url=https://archive.ubuntu.com/ubuntu/pool/main/t/tmux/tmux_3.4-1ubuntu0.1_amd64.deb layout=/usr/bin/tmux asserts=tmux -V -> tmux 3.4 index=https://archive.ubuntu.com/ubuntu/dists/noble-updates/main/binary-amd64/Packages.gz
+# Codex: the COMPLETE standalone package. The bare codex-<target>.tar.gz is the
+# D4 failure — it has no bin/codex-code-mode-host, no codex-resources/, no
+# codex-path/, and the entrypoint then reports its execution host unavailable.
+codex 0.150.1 sha256:00aba704f029f6dc0d948be407a756e0c97cc840132fd691353b2c6b0a505b17 artifact=codex-package-x86_64-unknown-linux-musl.tar.gz url=https://github.com/openai/codex/releases/download/rust-v0.150.1/codex-package-x86_64-unknown-linux-musl.tar.gz layout=codex-package.json{layoutVersion=1,version=0.150.1,target=x86_64-unknown-linux-musl,variant=codex,entrypoint=bin/codex,resourcesDir=codex-resources,pathDir=codex-path} entrypoint_sha256=abf1bb1643a79f73aa78ee627e111e02d4f8c98f25813a0cf6ce277709664386 layout_root=/opt/codex/versions/0.150.1 path_dir=/opt/codex/bin/current asserts=env -i PATH=/opt/codex/bin/current:/usr/bin:/bin sh -c 'command -v codex; command -v codex-code-mode-host' provenance=https://github.com/openai/codex/releases/tag/rust-v0.150.1 codex-package_SHA256SUMS
+# sh/tar and gc's runtime hard deps are base apt content, asserted at build time
+# (not listed as components because the estate does not pin them individually):
+# sh (dash), tar, flock (util-linux), lsof, jq, procps, tini, sudo, curl,
+# ca-certificates — the same list contrib/k8s/Dockerfile.base:109-123 installs.
