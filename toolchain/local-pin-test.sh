@@ -126,7 +126,44 @@ refuse "refresh-pin with no --artifact prints usage" "usage: toolchain/build-ima
 grep -q 'ARG GC_LOCAL_ARTIFACT=' "${DOCKERFILE}" && ok "Dockerfile declares the local-artifact ARGs" || bad "Dockerfile lost ARG GC_LOCAL_ARTIFACT"
 grep -q 'ARG GC_LOCAL_SHA256=' "${DOCKERFILE}" && grep -q 'ARG GC_PIN_COMMIT=' "${DOCKERFILE}" && ok "Dockerfile declares the checksum + commit ARGs" || bad "Dockerfile lost GC_LOCAL_SHA256/GC_PIN_COMMIT"
 grep -q 'COPY .local/' "${DOCKERFILE}" && ok "Dockerfile copies the minted staging dir" || bad "Dockerfile lost COPY .local/"
-grep -Fq 'grep -Fq "\"commit\":' "${DOCKERFILE}" && ok "Dockerfile asserts the pin's own reported commit" || bad "Dockerfile does not assert the reported commit"
+grep -q "jq -r '.commit // empty'" "${DOCKERFILE}" && ok "Dockerfile asserts the pin's reported commit by equality" || bad "Dockerfile lost the commit equality assertion"
+# The docker build on rhuidean is what found the FIRST version of the gc RUN line
+# unparseable ("/bin/sh: 1: Syntax error: Unterminated quoted string") — an
+# ~8-minute round trip through bd's rebuild to learn it. So every RUN body is
+# joined back from its continuations and parsed here, offline, with `sh -n`: a RUN
+# that does not parse is a build step that fails, caught at no cost and no daemon.
+# The image's /bin/sh is dash (ubuntu:24.04). /bin/dash exists on the Mac too; use
+# it when present so this parses the way the build step will. The CANARY is not
+# optional decoration: a syntax gate that cannot reject an unbalanced quote is a
+# gate that passes every build, so it is reported as inert instead of as a pass.
+DK_SH="/bin/sh"
+command -v dash >/dev/null 2>&1 && DK_SH="$(command -v dash)"
+if printf '%s\n' 'echo "unbalanced' | "$DK_SH" -n 2>/dev/null; then
+  bad "the RUN-parse gate is INERT with ${DK_SH} — it accepted an unbalanced quote; it proves nothing here"
+else
+  ok "RUN-parse gate bites (${DK_SH} rejects an unbalanced quote)"
+fi
+while IFS= read -r run_body; do
+  [ "$run_body" = "$(printf '\001END\001')" ] && continue
+  label="$(printf '%s' "$run_body" | tr '\n' ' ' | cut -c1-46)"
+  if printf '%s\n' "$run_body" | "$DK_SH" -n 2>/tmp/gc-dk-shn.err; then
+    ok "Dockerfile RUN parses under sh -n: ${label}…"
+  else
+    bad "Dockerfile RUN will fail its build step: ${label}… — $(tr -d '\n' < /tmp/gc-dk-shn.err | cut -c1-110)"
+  fi
+done < <(python3 -c '
+import sys
+lines = open(sys.argv[1]).read().split("\n")
+i = 0
+while i < len(lines):
+    if lines[i].startswith("RUN"):
+        body = lines[i][3:].rstrip()
+        while body.endswith(chr(92)) and i + 1 < len(lines):
+            i += 1
+            body = body[:-1] + " " + lines[i].strip()
+        print(body)
+    i += 1
+' "${DOCKERFILE}")
 grep -q 'sha256sum --check --strict' "${DOCKERFILE}" && ok "Dockerfile checksum-verifies what it installs" || bad "Dockerfile lost its checksum gate"
 grep -q 'PLACEHOLDER' "${REAL_SCRIPT}" && ok "script mints a placeholder so COPY never sees an empty dir" || bad "script does not mint the placeholder COPY needs"
 

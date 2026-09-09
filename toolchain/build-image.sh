@@ -254,7 +254,7 @@ case "$cmd" in
     pin="$(printf '%s' "$long" | { command -v jq >/dev/null 2>&1 && jq -r '.commit // empty' || sed -n 's/.*"commit":"\([^\"]*\)".*/\1/p'; } 2>/dev/null || true)"
     [ -n "$pin" ] || die "could not read a gc commit from ${art}: '$art version --json --long' printed ${long:-nothing}"
     sha="$(file_sha256 "$art")"
-    was="$(lock_get gc_local_artifact)$(lock_attr gc_local_artifact sha256)"
+    was="$(lock_get gc_local_artifact) sha256=$(lock_attr gc_local_artifact sha256)"
     tmp="$(mktemp)"
     if ! awk -v p="$art" -v s="$sha" -v c="$pin" '
         $1 == "gc_local_artifact" {

@@ -133,7 +133,9 @@ RUN set -eu; \
     reported="$(gc version --json --long)"; \
     echo "gc in image: ${reported}"; \
     if [ -n "${expected}" ]; then \
-      printf '%s' "${reported}" | grep -Fq "\"commit\":\"${expected}\"; \
+      reported_commit="$(printf '%s' "${reported}" | jq -r '.commit // empty')"; \
+      test "${reported_commit}" = "${expected}" || { echo "gc identity assertion FAILED: the image reports commit ${reported_commit}, the pin is ${expected}" >&2; exit 1; }; \
+      echo "gc identity assertion PASS: the image gc is ${reported_commit}"; \
     fi; \
     gc version
 
