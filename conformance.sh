@@ -5,6 +5,8 @@
 # proves the pack-shipped runtime satisfies the Runtime Provider Protocol
 # independently of the gascity codebase.
 #
+# Requires `gc` AND `tmux` on PATH (tmux because the pack's own launch command
+# is a tmux command exec'd into the box -- see the prerequisite door below).
 # Requires `gc` on PATH (install with a pinned:
 #   go install github.com/gastownhall/gascity/cmd/gc@<pin>
 # — a tool install, not a source import, so the pack keeps zero gascity Go
@@ -21,6 +23,22 @@ trap 'rm -rf "$bindir" "$sidecar_dir"; [ -n "${server_pid:-}" ] && kill "$server
 gc_bin="${GC_BIN:-gc}"
 if ! command -v "$gc_bin" >/dev/null 2>&1 && [ ! -x "$gc_bin" ]; then
   echo "conformance: gc binary not found (set GC_BIN or install gc)" >&2
+  exit 1
+fi
+
+# Prerequisite door -- the same shape receipt.sh uses for jq (receipt.sh:63).
+# `start` launches the in-box agent with tmux: runtime/ops.go's
+# buildLaunchCommandForTmuxWithPaneCommand builds
+# `tmux new-session -d -s main` and execs it into the alloc, so tmux must be
+# installed on whatever host runs this ladder (a Linux container included).
+# Without it `start` fails inside the box with exit 127 and the only line that
+# reaches the caller is the pack's informational "Meta binding recovery not
+# used" decision log (runtime/ops.go liveChild -> logDecision) -- a line that
+# also prints in a GREEN run and reads like a binding-recovery bug when it is
+# not one. cr-fslju: that is exactly how a missing tmux was misdiagnosed as
+# Remediate H failing on Linux while the identical ladder passed on Darwin.
+if ! command -v tmux >/dev/null 2>&1; then
+  echo "conformance: tmux is required (the pack's start runs 'tmux new-session -d -s main' in the box); install it, e.g. apt-get install -y tmux" >&2
   exit 1
 fi
 
