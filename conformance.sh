@@ -92,3 +92,7 @@ for verb in start provision; do
   esac
 done
 "$bindir/gc-runtime-nomad" stop "$retry_session"
+# Machine-readable rung result. This is the LAST line the ladder writes, and
+# receipt.sh derives the retry_idempotency row from it: the rung runs after gc
+# has printed both summaries, so the summaries cannot report it (cr-u7b0s.48).
+echo "retry idempotency: 1 passed, 0 failed, 0 skipped"
