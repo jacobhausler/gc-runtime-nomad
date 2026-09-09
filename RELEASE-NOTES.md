@@ -1,3 +1,60 @@
+# v1.0.5
+
+Nine gate-0 remediation atoms from epic `cr-u7b0s` (D3/D4 Nomad dogfood
+review), cut on top of `v1.0.4`. One launch-path fix, two "use the native
+form" removals, the Docker agent-image seam, the session-toolchain pin, and
+a receipt path that fails closed.
+
+## What changed
+
+- **The launch payload survives the seam** (`d786990`, `31b2c4e`, `cr-u7b0s.39`/
+  `.40`). gc's start wire is consumed as gc writes it; the pack's private
+  start-payload encoding is gone, so a payload gc writes and the pack does not
+  know can no longer be silently dropped on the way into the box.
+- **`GC_NOMAD_AGENT_IMAGE` — the Docker agent image seam** (`a9eb2e3`,
+  `cr-u7b0s.41`). With it set, the allocation carries no toolchain host-volume
+  mount and the image owns the toolchain; unset, the legacy exec +
+  read-only artifact-volume shape is what runs. One variable, one shape.
+- **Native Nomad query and dispatch APIs** (`0b76009`, `cr-u7b0s.42`) in place
+  of the hand-rolled HTTP calls, and **the RPP capability surface stays
+  native** — `GC_NOMAD_FORBID_REGISTER` now fails closed instead of advertising
+  ops the runtime will not perform (`441a36d`, `cr-u7b0s.43`).
+- **`toolchain/` — the session toolchain as a checksum-pinned build input**
+  (`289f258`, `cr-u7b0s.45`): digest-pinned base, upstream-published sha256 per
+  component, `bd` rebuilt from checksum-pinned release source (the published
+  binary carries the grpc the release rebuild exists to escape), the **complete**
+  Codex standalone package with its layout asserted, `check`/`verify`/`build`
+  verbs and a rollback tag. It ships no delivery layer and publishes nothing.
+- **Runtime bindings are recovered from Nomad `Meta`** (`d2cc306`,
+  `cr-u7b0s.46`), so a session→alloc binding survives the sidecar it used to
+  depend on.
+- **The conformance receipt fails closed** (`fb15c4b`, `cr-u7b0s.48`).
+  `receipt.sh` no longer swallows the ladder's exit — the retry-idempotency
+  rung runs *after* gc prints both greppable summaries, so green rows used to be
+  publishable over a red ladder; that rung is now a first-class row, every row
+  is attributed to the pack commit and the gc that ran it (`gc version --json` +
+  the `GC_BIN` digest — gc's own machine-readable report carries no gc
+  identity), a run that cannot name its gc fails the provenance row rather than
+  emitting unattributed rows, and `--json-stdout` puts the result on stdout for
+  a lane that has no artifact-return flag. `receipt-selftest.sh` is the
+  distinguishing regression: green summaries, then exit 3.
+- **One canonical runtime-contract table** (`96b3ee4`, `cr-u7b0s.49`). The keys
+  are the contract; the filled-in values are the deployment's, and they moved
+  out of this pack to the estate's own admitted card. Nothing there is a default
+  to copy.
+
+## Coverage
+
+The pack's CI gate is the offline ladder — `GC_BIN=$(command -v gc)
+./conformance.sh` on every push and PR (`.github/workflows/ci.yml`), and
+`GC_BIN=$(command -v gc) ./receipt.sh` for the per-item receipt this file links.
+`CONFORMANCE-RECEIPT.md` is **not** regenerated at this commit: since
+`cr-u7b0s.48` an at-pin receipt must name the gc that produced it, and no
+builder lane carries a Linux `gc` at the estate pin. Regenerating it from a stub
+or from a different gc identity is what the fail-closed rule forbids, so this
+release states the gap instead of papering over it. `receipt-selftest.sh` passed
+both directions on the builders lane (`RECEIPT-SELFTEST-OK`, `cr-u7b0s.48`).
+
 # v1.0.4
 
 Four fixes from the D3/D4 Nomad dogfood windows: a remote-context session in
