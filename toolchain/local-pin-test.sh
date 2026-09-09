@@ -170,7 +170,14 @@ grep -q 'sha256sum --check --strict' "${DOCKERFILE}" && ok "Dockerfile checksum-
 grep -qE 'libicu74=\$\{LIBICU_VERSION\}' "${DOCKERFILE}" && ok "apt installs the local gc ICU dependency" || bad "Dockerfile lost libicu74: the staged pin cannot load without it"
 grep -q 'not found' "${DOCKERFILE}" && ok "the build asserts nothing unresolved before running gc" || bad "Dockerfile has no ldd gate: an unloadable gc would build green again"
 grep -qE '^libicu74 [^ ]+ sha256:[0-9a-f]{64}' "${REAL_LOCK}" && ok "ICU is checksum-pinned like every other apt line here" || bad "libicu74 is not checksum-pinned in the lock"
-grep -q 'PLACEHOLDER' "${REAL_SCRIPT}" && ok "script mints a placeholder so COPY never sees an empty dir" || bad "script does not mint the placeholder COPY needs"
+
+# The same shape of bug, one directory over: a symlink whose parent dir nobody
+# created. `ln -sfn` will not make it, so the RUN that ends in `current` must
+# create the dir first — ordered here, because the failure was at the last line.
+awk '/install -d \/opt\/codex\/bin/{made=NR} /ln -sfn .*\/opt\/codex\/bin\/current/{print made, NR; exit}' "${DOCKERFILE}" \
+  | awk '{exit ($1 != "" && $1+0 < $2+0) ? 0 : 1}' \
+  && ok "the codex PATH dir is created before the symlink that needs it" \
+  || bad "ln -sfn /opt/codex/bin/current has no install -d before it — that is the failure the first build hit"grep -q 'PLACEHOLDER' "${REAL_SCRIPT}" && ok "script mints a placeholder so COPY never sees an empty dir" || bad "script does not mint the placeholder COPY needs"
 
 if [ "$fails" = 0 ]; then
   echo "local-pin-test: PASS"

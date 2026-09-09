@@ -158,6 +158,13 @@ RUN BD_DISABLE_METRICS=1 BD_DISABLE_EVENT_FLUSH=1 bd --version
 # tool). Layout is asserted from the package's own codex-package.json, the
 # entrypoint is checksum-asserted, and the PATH dir mirrors the shape the
 # launcher already expects: a `current` symlink to a versioned directory.
+# `install -d /opt/codex/bin` is load-bearing, found the hard way: `ln -sfn`
+# does not create the parent, so the very last step of the unpack failed
+# (`ln: failed to create symbolic link '/opt/codex/bin/current': No such file or
+# directory`) — the file the versions dir was created from a path that existed
+# and the link target's parent never was. cr-u7b0s.45 recorded honestly that
+# this Dockerfile had never been built; that is why this is the first build to
+# find it, not a regression from anything in cr-dk9i2.
 RUN set -eu; \
     curl -fsSL --retry 3 "${CODEX_URL}" -o /tmp/codex-package.tar.gz; \
     echo "${CODEX_SHA256}  /tmp/codex-package.tar.gz" | sha256sum --check --strict; \
@@ -176,6 +183,7 @@ RUN set -eu; \
     test -d codex-resources; \
     test -d codex-path; \
     cat codex-package.json; \
+    install -d /opt/codex/bin; \
     ln -sfn "/opt/codex/versions/${CODEX_VERSION}" /opt/codex/bin/current
 
 # The PATH dir a seat needs to run a tool. The launcher seam (cr-u7b0s.41/.42)
