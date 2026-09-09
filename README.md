@@ -33,6 +33,7 @@ runtime-nomad/
 ├── pack.toml       # declares [runtimes.nomad] -> gc-runtime-nomad
 ├── install.sh      # installs the executable onto PATH
 ├── conformance.sh  # gc runtime check + gc runtime conformance against an in-memory fake Nomad API
+├── toolchain/      # checksum-pinned session-toolchain build input (TOOLCHAIN.lock + Dockerfile + build-image.sh + BUILD-RECEIPT.md) — see §Part 2
 ├── fakenomad/      # nested Go module: in-memory fake of the Nomad API this pack calls
 │   ├── go.mod      # module github.com/gastownhall/gc-runtime-nomad/fakenomad
 │   └── cmd/fakenomad/ # standalone process wrapping the fake server, for conformance.sh + CI
@@ -273,6 +274,20 @@ that the layout was never checked. Its credential rides the generic channel from
 part 1 step 9 under whatever name the deployment chose (here `CODEX_AUTH_JSON`),
 staged value-blind into `$NOMAD_SECRETS_DIR`, and the launcher from step 5
 installs it to `$CODEX_HOME/auth.json`.
+
+**The pinned build input is `toolchain/TOOLCHAIN.lock`, and it is the pointer
+this section's own rule demands.** The rule above is that a toolchain staging
+receipt names the artifact, its sha256, and the layout it asserts; that lock is
+exactly that, per component (gc, bd, git, tmux, the Codex standalone package)
+and per image (base, builder, agent, rollback) — digest-pinned references, never
+floating tags. `toolchain/build-image.sh` reads every value in it and passes
+each as a build ARG, `toolchain/Dockerfile` consumes the ARGs, and
+`toolchain/BUILD-RECEIPT.md` carries the measurements — including the pins that
+were rejected and why. It ships no delivery layer: publishing stays an executive
+host step, and the live pin it must be read alongside is the estate record, not
+this pack's. (cr-u7b0s.45 landed the lock; cr-5xrcu added this pointer on
+2026-09-09, having found `rg 'toolchain/' README.md` empty in a tree that
+already carried it.)
 
 Prebaking the toolchain into the box image is the intended 1.0.x shape —
 `gc build-image` is the prebake verb gc ships - its contract at the pin is
