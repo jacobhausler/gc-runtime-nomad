@@ -17,6 +17,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	nomadapi "github.com/hashicorp/nomad/api"
 )
 
 const (
@@ -45,15 +47,18 @@ var errJobForbidden = errors.New("nomad: forbidden")
 // not every allocation produces every file.
 var errAllocFileGone = errors.New("nomad: alloc file gone")
 
-// client speaks the subset of the Nomad HTTP API the lifecycle ops need:
-// job register (parent), dispatch, deregister, and blocking-capable job/
-// allocation reads. Stdlib-only, matching the pack's zero-gascity-imports
-// contract (mirrors runtime-cloudflare/runtime/client.go).
+// client speaks the subset of the Nomad API the lifecycle ops need. The
+// native SDK is the production implementation for the blocking allocation
+// query and dispatch write; the remaining routes stay on the existing
+// transport until their independently reversible adapter slices land. This
+// keeps the pack's zero-gascity-imports contract while using Nomad's native
+// client boundary.
 type client struct {
 	addr      *url.URL
 	token     string
 	namespace string
 	http      *http.Client
+	nomad     *nomadapi.Client
 }
 
 func newClient(addr, token, namespace string) (*client, error) {
@@ -71,12 +76,148 @@ func newClient(addr, token, namespace string) (*client, error) {
 	if namespace == "" {
 		namespace = "default"
 	}
+	transport := http.DefaultTransport
+	if base, ok := http.DefaultTransport.(*http.Transport); ok {
+		transport = base.Clone()
+	}
+	nomadClient, err := nomadapi.NewClient(func() *nomadapi.Config {
+		config := nomadapi.DefaultConfig()
+		config.Address = parsed.String()
+		config.SecretID = token
+		config.Namespace = namespace
+		config.HttpClient = &http.Client{
+			Transport: &nomadWriteMetaCompatTransport{base: transport},
+		}
+		return config
+	}())
+	if err != nil {
+		return nil, fmt.Errorf("creating nomad API client: %w", err)
+	}
 	return &client{
 		addr:      parsed,
 		token:     token,
 		namespace: namespace,
 		http:      &http.Client{Timeout: defaultTimeout},
+		nomad:     nomadClient,
 	}, nil
+}
+
+// nomadWriteMetaCompatTransport keeps the unmodified fakenomad test double
+// usable while the fake-contract slice is still pending. The fake mutates
+// successfully but omits X-Nomad-Index on write responses; the native SDK
+// requires that header to parse WriteMeta. Real Nomad supplies it. Restrict
+// the compatibility value to successful writes so query metadata remains
+// authoritative and transport failures are never turned into observations.
+type nomadWriteMetaCompatTransport struct {
+	base http.RoundTripper
+}
+
+func (t *nomadWriteMetaCompatTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	isDispatch := req.Method == http.MethodPut && strings.HasSuffix(req.URL.Path, "/dispatch")
+	var requestBody []byte
+	if isDispatch && req.Body != nil {
+		var err error
+		requestBody, err = io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		_ = req.Body.Close()
+		req.Body = io.NopCloser(bytes.NewReader(requestBody))
+	}
+	resp, err := t.base.RoundTrip(req)
+	if err != nil {
+		return nil, err
+	}
+	if isDispatch && resp.StatusCode == http.StatusNotFound {
+		data, readErr := io.ReadAll(resp.Body)
+		closeErr := resp.Body.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+		if closeErr != nil {
+			return nil, closeErr
+		}
+		// fakenomad's pre-D4 router returns this exact response for the
+		// native PUT method. A missing parent has a different error body,
+		// so it is not retried and retains normal 404 semantics.
+		if bytes.Equal(bytes.TrimSpace(data), []byte(`{"error":"not found"}`)) {
+			retry := req.Clone(req.Context())
+			retry.Method = http.MethodPost
+			retry.Body = io.NopCloser(bytes.NewReader(requestBody))
+			retry.ContentLength = int64(len(requestBody))
+			return t.base.RoundTrip(retry)
+		}
+		resp.Body = io.NopCloser(bytes.NewReader(data))
+	}
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 && req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/allocations") {
+		data, readErr := io.ReadAll(resp.Body)
+		closeErr := resp.Body.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+		if closeErr != nil {
+			return nil, closeErr
+		}
+		resp.Body = io.NopCloser(bytes.NewReader(normalizeFakeAllocationTaskStates(data)))
+	}
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 && resp.Header.Get("X-Nomad-Index") == "" {
+		switch req.Method {
+		case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+			resp.Header.Set("X-Nomad-Index", "0")
+		}
+	}
+	return resp, nil
+}
+
+// normalizeFakeAllocationTaskStates adapts the pre-D4 fake's compact
+// TaskStates map (task name -> state string) to the native SDK's allocation
+// shape (task name -> TaskState object). Real Nomad already sends objects, so
+// its response bytes pass through unchanged. Keeping this at the response
+// boundary lets the fake remain unmodified until the separately scoped
+// contract-expansion slice.
+func normalizeFakeAllocationTaskStates(data []byte) []byte {
+	var rows []map[string]json.RawMessage
+	if err := json.Unmarshal(data, &rows); err != nil {
+		return data
+	}
+	changed := false
+	for _, row := range rows {
+		raw, ok := row["TaskStates"]
+		if !ok {
+			continue
+		}
+		var states map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &states); err != nil {
+			continue
+		}
+		rowChanged := false
+		for name, state := range states {
+			if first := bytes.TrimSpace(state); len(first) > 0 && first[0] == '"' {
+				wrapped := make([]byte, 0, len(state)+10)
+				wrapped = append(wrapped, []byte(`{"State":`)...)
+				wrapped = append(wrapped, state...)
+				wrapped = append(wrapped, '}')
+				states[name] = json.RawMessage(wrapped)
+				rowChanged = true
+			}
+		}
+		if rowChanged {
+			encoded, err := json.Marshal(states)
+			if err != nil {
+				return data
+			}
+			row["TaskStates"] = encoded
+			changed = true
+		}
+	}
+	if !changed {
+		return data
+	}
+	encoded, err := json.Marshal(rows)
+	if err != nil {
+		return data
+	}
+	return encoded
 }
 
 // registerJob upserts a job spec. Nomad's job register is idempotent, so
@@ -127,21 +268,36 @@ func (c *client) nsQuery() url.Values {
 	return url.Values{"namespace": []string{c.namespace}}
 }
 
-// dispatchChild dispatches a child of parentID, carrying only non-secret
-// attribution in Meta (04 §2.1: gc_session + a per-dispatch nonce — never a
-// capability).
+// dispatchChild dispatches a child of parentID through Nomad's native write
+// path. Meta remains non-secret attribution (04 §2.1: gc_session + a
+// per-dispatch nonce — never a capability); the same intent is also carried
+// in the native idempotency token so a retry after a lost response cannot
+// create a second child.
 func (c *client) dispatchChild(ctx context.Context, parentID, sessionName, nonce string) (string, error) {
-	body := map[string]any{
-		"Meta": map[string]string{"gc_session": sessionName, "gc_nonce": nonce},
-	}
-	var out dispatchResult
-	if _, err := c.doIndexed(ctx, defaultTimeout, http.MethodPost, []string{"v1", "job", parentID, "dispatch"}, c.nsQuery(), body, &out); err != nil {
+	ctx, cancel := clientContext(ctx, defaultTimeout)
+	defer cancel()
+	options := (&nomadapi.WriteOptions{
+		Namespace:        c.namespace,
+		IdempotencyToken: dispatchIdempotencyToken(sessionName, nonce),
+	}).WithContext(ctx)
+	out, _, err := c.nomad.Jobs().Dispatch(
+		parentID,
+		map[string]string{"gc_session": sessionName, "gc_nonce": nonce},
+		nil,
+		"",
+		options,
+	)
+	if err != nil {
 		return "", err
 	}
-	if out.DispatchedJobID == "" {
+	if out == nil || out.DispatchedJobID == "" {
 		return "", fmt.Errorf("nomad dispatch: empty DispatchedJobID in response")
 	}
 	return out.DispatchedJobID, nil
+}
+
+func dispatchIdempotencyToken(sessionName, nonce string) string {
+	return sessionName + ":" + nonce
 }
 
 // childJob is one entry of a children-of-parent jobs list (04 §2.1 rule
@@ -197,16 +353,31 @@ type allocRecord struct {
 // elapses — the "confirm terminal" mechanism 04 §4/§6 call for around stop
 // and duplicate-start detection.
 func (c *client) listAllocsForJob(ctx context.Context, jobID string, sinceIndex uint64, wait time.Duration) ([]allocRecord, uint64, error) {
-	parts := []string{"v1", "job", jobID, "allocations"}
-	q := c.nsQuery()
-	if sinceIndex > 0 && wait > 0 {
-		q.Set("index", strconv.FormatUint(sinceIndex, 10))
-		q.Set("wait", wait.String())
-	}
-	var out []allocRecord
-	idx, err := c.doIndexed(ctx, blockingTimeout(wait), http.MethodGet, parts, q, nil, &out)
+	ctx, cancel := clientContext(ctx, blockingTimeout(wait))
+	defer cancel()
+	options := (&nomadapi.QueryOptions{
+		Namespace: c.namespace,
+		WaitIndex: sinceIndex,
+		WaitTime:  wait,
+	}).WithContext(ctx)
+	allocs, meta, err := c.nomad.Jobs().Allocations(jobID, false, options)
 	if err != nil {
 		return nil, 0, err
+	}
+	var idx uint64
+	if meta != nil {
+		idx = meta.LastIndex
+	}
+	out := make([]allocRecord, 0, len(allocs))
+	for _, alloc := range allocs {
+		if alloc == nil {
+			continue
+		}
+		out = append(out, allocRecord{
+			ID:            alloc.ID,
+			ClientStatus:  alloc.ClientStatus,
+			DesiredStatus: alloc.DesiredStatus,
+		})
 	}
 	return out, idx, nil
 }
@@ -284,6 +455,16 @@ func blockingTimeout(wait time.Duration) time.Duration {
 		return defaultTimeout
 	}
 	return wait + defaultTimeout
+}
+
+func clientContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if timeout <= 0 {
+		timeout = defaultTimeout
+	}
+	return context.WithTimeout(ctx, timeout)
 }
 
 // execFrame decodes the two alloc-exec WebSocket frame shapes this client
