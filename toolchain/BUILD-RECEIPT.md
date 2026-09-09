@@ -12,6 +12,7 @@ checkout), verdict `ops/receipts/nrt-gate0/2026-09-08-G-verdict.md`.
 | `toolchain/TOOLCHAIN.lock` | the build input: base image **by digest**, the four binary components + complete Codex package each with its **upstream-published sha256** and the layout it asserts, the ONE `agent_image` reference, and the `rollback_image` tag |
 | `toolchain/Dockerfile` | the provider-neutral Docker build input — digest-pinned base, version-pinned apt `git`/`tmux`, checksum-verified published `gc`, `bd` rebuilt from checksum-pinned release source with a patched grpc, the complete Codex standalone package with its layout asserted, no host volumes, no `/mnt/nomad`, no provider names |
 | `toolchain/build-image.sh` | `check` (offline gate) · `verify` (re-check every pin against its publisher) · `build` (executive host step: rollback-tag then `docker build`, never `--push`) · `city-image` / `context-only` (gc's native verb on top of the toolchain base) |
+| `toolchain/local-pin-test.sh` | the offline fixture for the live-pin path — preference, every refusal, the bounded-city gate, and every Dockerfile RUN parsed by the image's own shell family. 42 assertions as counted by that command's own `ok` lines; `bash toolchain/local-pin-test.sh` |
 
 Nothing here publishes, pushes, promotes, canaries, pins, or touches a live
 service. Publishing stays an executive host step and allocations never write
