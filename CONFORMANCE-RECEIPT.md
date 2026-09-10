@@ -1,8 +1,8 @@
 # Phase-1 conformance receipt (NRT-P1-90)
 
-Commit: `501fc915ef5977aec06d5128ac04e2abb9bab8f4`
-gc: `/tmp/gc-pin/gc` — commit `e52f96f62`, version `dev`, sha256 `0f3b9e3a3e115ba95096ce9ea01e08d4f97b397243ddca0ec259de6e0c2b25a7`
-Generated: 2026-09-09T08:21:43Z
+Commit: `6e280bf6a5ee08a8db5e137f4c90a3b845232a4c`
+gc: `/cache/gc-receipt-0d3256df86` — commit `0d3256df86c5ff8d8355ca5b905c78b0cb6816da`, version `dev`, sha256 `4be57a822f1e5c48497f68f11a786cc247ad4a2bee051117dab63fb75b957fad`
+Generated: 2026-09-10T04:49:53Z
 Conformance ladder exit: 0
 
 Full offline ladder — no live Nomad cluster or network required. A row
