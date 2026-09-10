@@ -454,13 +454,15 @@ func (c *client) listAllocsForJob(ctx context.Context, jobID string, sinceIndex 
 }
 
 // allocTaskStatesOf lifts an allocation's per-task lifecycle record into the
-// pack's own shape. Nomad's version also carries timestamps, restart counts
-// and the whole event history; the readiness wait needs the state string and,
-// so a timeout can explain itself, the latest event -- nothing larger, which
-// is what keeps this inside the client's response-size discipline. A read
-// with no usable task states yields nil so a caller can tell "the API did not
-// answer" apart from "the task is not up".
-func allocTaskStatesOf(alloc *nomadapi.Allocation) map[string]allocTaskState {
+// pack's own shape. Nomad's full AllocTaskState also carries timestamps,
+// restart counts and the whole event history; the readiness wait needs the
+// state string and, so a timeout can explain itself, the latest event --
+// nothing larger. The list read the pack already makes answers for both
+// Nomad shapes here (a list stub and a full allocation both carry
+// TaskStates), so the wait never needs a second endpoint. A read with no
+// usable task states yields nil so a caller can tell "the API did not answer"
+// apart from "the task is not up".
+func allocTaskStatesOf(alloc *nomadapi.AllocationListStub) map[string]allocTaskState {
 	if len(alloc.TaskStates) == 0 {
 		return nil
 	}
