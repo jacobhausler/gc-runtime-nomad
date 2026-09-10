@@ -67,7 +67,7 @@ gc-runtime-nomad check  # warn when session-log shipping or artifact delivery is
 ```
 
 Lifecycle ops need Nomad API configuration on the environment. There is **one
-key table in this pack and it lives in Install -> part 1 -> step 7** - the copy
+key table in this pack and it lives in Install -> part 1 -> step 6** - the copy
 kept in sync with `runtime/*.go`. This section deliberately does not repeat it:
 every hand-copied subset has drifted (the last was missing 7 of its 20 keys,
 `GC_NOMAD_AGENT_IMAGE` among them). Two keys are worth naming here because they
@@ -84,7 +84,7 @@ layers:
 |---|---|
 | Workspace/secrets | `stageConfig.Env` is staged through the pack's tar-over-exec-stdin channel into `$NOMAD_SECRETS_DIR`, including the sourceable `env.sh` file. This is the pack's own transport, not an RPP claim: the pack declares no `env.workspace` capability, because the start wire does not materialize `work_dir` inside the alloc and gc probes every declared `env.*` code. |
 | Toolchain | The Docker image named by the **required** `GC_NOMAD_AGENT_IMAGE` carries the session toolchain (`gc` agent, Codex, tmux, `sh`, `tar`); the agent task declares no host volume, so nothing is delivered from the client host. `GC_NOMAD_AGENT_IMAGE` unset fails every lifecycle op closed — cr-3vvnb5.2 removes the legacy `exec` task and the `GC_NOMAD_ARTIFACT_VOLUME` `/mnt/nomad` mount that used to feed it. |
-| Identity/config | The city target arrives through the secrets environment channel as **exactly one** of a complete remote context (`GC_HOME` + `GC_CITY_CONTEXT`) or `GC_CITY_URL`; both at once is the fail-closed case, not a redundancy - see Install part 1 step 8. Session identity values are added by the lifecycle. |
+| Identity/config | The city target arrives through the secrets environment channel as **exactly one** of a complete remote context (`GC_HOME` + `GC_CITY_CONTEXT`) or `GC_CITY_URL`; both at once is the fail-closed case, not a redundancy - see Install part 1 step 7. Session identity values are added by the lifecycle. |
 
 The Cloudflare pack's bundle is the environment boundary for pack-provided
 tools; the exec driver otherwise retains its host-binary assumptions. The
@@ -133,39 +133,25 @@ Provider-agnostic: what any deployment of this pack needs.
    of it** — verify with `git merge-base --is-ancestor <fix-sha> <pin>`, and
    treat the result as a pin-roll action, not a defect to re-investigate.
 2. **A Go toolchain where `go install` may run.** On an estate that forbids
-   Mac-side Go runs, build off-Mac and install the artifact from there;
-   `./install.sh agent-launch` remains runnable from the operator seat because
-   that half is pure ssh+scp.
+   Mac-side Go runs, build off-Mac and install the artifact from there.
+   `install.sh` is that Go run and nothing else: the launcher deploy it used to
+   carry existed to serve the host-toolchain pane and is gone (cr-3vvnb5.4).
 3. **A reachable Nomad API, plus two tokens:** a management token holding
-   `submit-job` for the one-time parent-job registration (step 6), and the
+   `submit-job` for the one-time parent-job registration (step 5), and the
    narrowed runtime token every session-path op runs on.
 4. **Install the executable.** `./install.sh` runs `go install .` in
    `runtime/` and confirms `gc-runtime-nomad` landed on `PATH` (adding
    `$(go env GOBIN)` if it did not). This file *is* the pack's install step —
    the `pack-runtimes` `gc doctor` check then verifies the binary is installed
    and answers the RPP handshake (RUNTIME-SEL-011).
-5. **Deploy the agent launcher.** `install.sh` also deploys the
-   deployment-owned bootstrap the launched tmux pane execs — but only when
-   `GC_NOMAD_AGENT_LAUNCH_SOURCE` is set (unset ⇒ the deploy prints a skip line
-   and does nothing else, which is also the rollback path). Host and path come
-   from `GC_NOMAD_AGENT_LAUNCH_HOST` / `GC_NOMAD_AGENT_LAUNCH_TARGET`; both are
-   deployment-supplied pointers whose defaults `install.sh` fills in for one
-   deployment - adopt them only after reading that deployment's record.
-   `./install.sh agent-launch` runs this half alone. The deploy verifies by
-   sha256 (a matching live copy is left alone), takes a dated rollback copy
-   before overwriting, preserves the live file's owner/group/mode, and fails
-   closed on any mismatch. Point
-   `GC_NOMAD_AGENT_LAUNCH_SCRIPT` at the deployed path in the provider config.
-   **A launcher edit does not take effect via `go install`** — the live copy on
-   the shared volume is what the launch path execs.
-6. **Register the parent job once, with the management token.** Run
+5. **Register the parent job once, with the management token.** Run
    `provision` or `start` once with `GC_NOMAD_TOKEN` set to that token; the
    registration is idempotent and stamps the jobspec fingerprint. After **any**
    jobspec change — task spec, node pool, DNS, constraints — re-register it the
    same way, or the pack reports the parent stale and refuses to dispatch.
    `GC_NOMAD_FORBID_REGISTER=true` makes an absent or drifted parent a
    fail-closed error instead of an attempted registration.
-7. **Configure the runtime's environment.** These keys are read by the
+6. **Configure the runtime's environment.** These keys are read by the
    `gc-runtime-nomad` process, i.e. the **supervisor's** environment — none of
    them belong in the allocation. Landing a change here means changing the
    environment the **supervisor process itself** starts with - however the
@@ -187,9 +173,8 @@ Provider-agnostic: what any deployment of this pack needs.
    | `GC_NOMAD_PARENT_JOB` | no | Parameterized parent job ID (default `gc-sessions`) |
    | `GC_NOMAD_NODE_POOL` | no | Parent job's node pool (empty = Nomad's own default pool) |
    | `GC_NOMAD_NODE_CONSTRAINT` | no | `;`-separated Nomad-syntax constraints appended *after* the pack's linux-kernel fatal rule, e.g. `${node.unique.name} != prod-nomad` |
-   | `GC_NOMAD_DNS_SERVERS` | no | Resolver addresses the session group's bridge network writes into the alloc's `/etc/resolv.conf` — see step 10 |
+   | `GC_NOMAD_DNS_SERVERS` | no | Resolver addresses the session group's bridge network writes into the alloc's `/etc/resolv.conf` — see step 9 |
    | `GC_NOMAD_AGENT_IMAGE` | **yes** | Docker image carrying the session agent and its toolchain (see the image-content note below). Unset fails every lifecycle op closed at startup: the Docker task is the only session shape (cr-3vvnb5.2) |
-   | `GC_NOMAD_AGENT_LAUNCH_SCRIPT` | no | The bootstrap from step 5; unset preserves the bare-tmux placeholder pane |
    | `GC_NOMAD_EXEC_TASK` | no | Task name alloc-exec targets, when it is not the pack's session task |
    | `GC_NOMAD_EXTRA_SECRET_KEYS` | no | Comma-separated names to bridge from the supervisor's own process env into `$NOMAD_SECRETS_DIR` — the value-blind channel for a secret `gc`'s provider env map cannot interpolate. Naming a key is what stages it; an unnamed key is never staged, and an extra key is always routed to the secrets dir, never to the launch argv. The names themselves belong to the deployment (part 2 works one Codex name through it) |
    | `GC_NOMAD_EGRESS_DIR` | no | Stop-path transcript/evidence directory; unset disables egress |
@@ -217,7 +202,7 @@ Provider-agnostic: what any deployment of this pack needs.
    endpoint needs arrive through the provider env / secrets channel, and session
    identity (`GC_SESSION_ID`/`GC_AGENT`/`GC_SESSION_NAME`) is added by the
    lifecycle.
-8. **Give the allocations a city endpoint they can actually reach — named
+7. **Give the allocations a city endpoint they can actually reach — named
    exactly once.** An allocation cannot reach the supervisor's loopback
    listeners, so a remote session needs either a complete **remote context**
    (`GC_HOME` + `GC_CITY_CONTEXT`, staged by the pack as `gc-home/contexts.toml`
@@ -229,14 +214,14 @@ Provider-agnostic: what any deployment of this pack needs.
    (`GC_CITY`, `GC_CITY_PATH`, `GC_CITY_ROOT`, `GC_CITY_RUNTIME_DIR`,
    `GC_BEADS*`) before the launch argv filter runs. Do not work around either
    by re-adding them to the provider env.
-9. **Stage what must be secret at runtime, value-blind.**
+8. **Stage what must be secret at runtime, value-blind.**
    `GC_NOMAD_EXTRA_SECRET_KEYS` is generic: name a key and the pack bridges that
    *name* from the supervisor's own process env into `$NOMAD_SECRETS_DIR`
    without the value ever entering a jobspec, an argv, or this repository. The
    credential NAME is the deployer's choice — the runtime has no credential
    vocabulary and none of its own keys to reserve; the box installs what it
    finds there.
-10. **Resolvers and placement are configuration, not cosmetics.**
+9. **Resolvers and placement are configuration, not cosmetics.**
     `GC_NOMAD_DNS_SERVERS` unset means Nomad declares no `dns` stanza, the alloc
     inherits the **client host's** `resolv.conf`, and on a systemd-resolved host
     that is the `127.0.0.53` stub — unreachable from the alloc netns, so nothing
@@ -246,8 +231,8 @@ Provider-agnostic: what any deployment of this pack needs.
     different shape: the node pool must actually span the boxes you expect work
     to land on, and the pack appends `GC_NOMAD_NODE_POOL` /
     `GC_NOMAD_NODE_CONSTRAINT` to the parent job — so either is a jobspec change
-    and needs step 6's re-registration to take effect.
-11. **Check it without a cluster.** `gc-runtime-nomad check` warns when log
+    and needs step 5's re-registration to take effect.
+10. **Check it without a cluster.** `gc-runtime-nomad check` warns when log
    shipping is unconfigured, and when `GC_NOMAD_AGENT_IMAGE` is unset — the
    session task is a Docker task, so every lifecycle op fails closed without it.
    `GC_BIN=$(command -v gc) ./conformance.sh` runs `gc runtime check` and the
@@ -261,10 +246,10 @@ The rule, in the abstract: **the box must provide the seat's provider command on
 produces for a session has to resolve and run inside the allocation, unchanged,
 with whatever siblings that command assumes present alongside it. Nothing
 provider-specific lives in the runtime: `gc-runtime-nomad` never names,
-downloads, installs, or inspects a provider — it launches a pane and execs the
-launcher from part 1 step 5, which execs what it is told. If a provider needs a
-file, a binary, or a credential, that is the deployment staging it (the toolchain
-volume, the launcher, the value-blind secret channel). A seat that comes up but
+downloads, installs, or inspects a provider — the pane it launches runs gc's
+rendered launch command and nothing else (cr-3vvnb5). If a provider needs a
+file, a binary, or a credential, that is the deployment staging it (the prebaked
+image, the value-blind secret channel). A seat that comes up but
 cannot run a tool is a toolchain-staging defect wearing a runtime costume.
 
 **Worked example — Codex.** Stage the agent toolchain as a **full standalone
@@ -281,9 +266,10 @@ copy, and verify by running the launcher's own `PATH` line:
 command -v codex-code-mode-host'`. A toolchain staging receipt must name the
 artifact, its sha256, and the layout it asserts — a missing sha is the symptom
 that the layout was never checked. Its credential rides the generic channel from
-part 1 step 9 under whatever name the deployment chose (here `CODEX_AUTH_JSON`),
-staged value-blind into `$NOMAD_SECRETS_DIR`, and the launcher from step 5
-installs it to `$CODEX_HOME/auth.json`.
+part 1 step 8 under whatever name the deployment chose (here `CODEX_AUTH_JSON`),
+staged value-blind into `$NOMAD_SECRETS_DIR`, and the pack installs it into the
+box's own `$CODEX_HOME` from that staged environment (`codex_home.go`,
+cr-usnvaw) — image mode owns the agent home, so no launcher step does.
 
 **The pinned build input is `toolchain/TOOLCHAIN.lock`, and it is the pointer
 this section's own rule demands.** The rule above is that a toolchain staging
@@ -301,7 +287,7 @@ already carried it.)
 
 Prebaking the toolchain into the box image is the intended 1.0.x shape —
 `gc build-image` is the prebake verb gc ships - its contract at the pin is
-K8s-shaped, see the `GC_NOMAD_AGENT_IMAGE` row in step 7 - and epic `cr-u7b0s` is
+K8s-shaped, see the `GC_NOMAD_AGENT_IMAGE` row in step 6 - and epic `cr-u7b0s` is
 that work; manual staging as above is what runs today.
 
 ### Estate deployment values live outside this pack
@@ -402,14 +388,14 @@ token cannot fix the drift in place.
   above. `NRT-P1-07`'s own stop-path file egress is still local-directory
   only; it is a distinct mechanism from the log-shipper's live streaming.)
 - Remote artifact blocks and the env.ledger tunnel (`NRT-P1-06`) — staging
-  only materializes what a caller sends inline on stdin; the launch command
-  starts a bare `tmux new-session` (plus `-e` flags) after sourcing the
-  staged environment. As of the `GC_NOMAD_AGENT_LAUNCH_SCRIPT` seam
-  (`ops.go`'s `buildLaunchCommand`), a deployment can configure that tmux
-  pane's initial command to be a real agent bootstrap script (PATH prepend,
-  an agent HOME pointed inside `$NOMAD_SECRETS_DIR`, staged-auth install,
-  then exec the agent) instead of the bare placeholder shell — the pack
-  itself stays agent-agnostic; unset, the placeholder session is unchanged.
+  only materializes what a caller sends inline on stdin. The tmux pane's
+  initial command is gc's own rendered launch command (plus `-e` flags) run
+  after sourcing the staged environment, and an empty rendered command fails
+  the launch closed (`ops.go`'s `buildLaunchCommand`). The deployment-owned
+  bootstrap seam that used to sit in front of it — a script the pane execs,
+  carrying a PATH prepend, an agent HOME pointed inside `$NOMAD_SECRETS_DIR`
+  and a staged-auth install — no longer exists: the prebaked image owns the
+  agent toolchain and the pack stays agent-agnostic (cr-3vvnb5).
   The session task's own command (`jobspec.go`'s
   `sessionSupervisorScript`, NRT-P2-06.1) is a real long-lived
   trap-and-loop that keeps the alloc alive until stop — no longer the

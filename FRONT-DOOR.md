@@ -20,7 +20,7 @@ owner-unit: runtime-nomad
 
 - Ops: `protocol` (RPP v0 handshake), `start`, `stop`, `is-running`, `list-running [prefix]`, `provision`, `relaunch`, `exec`, `nudge`, `peek`, `interrupt`, `send-keys`, `clear-scrollback`, `check`. Exit codes: 0 = success, 1 = error, 2 = unknown op — the RPP forward-compat signal callers treat as no-op success; `exec` is the exception (it exits with the remote command's own code).
 - Config keys (environment of the runtime process):
-  One canonical table, in one place: `README.md`, Install -> part 1 -> step 7
+  One canonical table, in one place: `README.md`, Install -> part 1 -> step 6
   (20 keys, kept in sync with `runtime/*.go`). This front door deliberately does
   not copy it - the last hand-copied subset here was missing 7 of those 20 keys,
   `GC_NOMAD_AGENT_IMAGE` among them, and a front door that drifts from the

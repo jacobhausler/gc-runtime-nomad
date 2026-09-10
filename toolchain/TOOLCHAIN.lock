@@ -35,9 +35,12 @@ agent_image gc-session-toolchain:1.0.5
 
 # Rollback: build-image.sh re-tags whatever was live to this tag BEFORE it
 # builds, and records that image id in the deployment receipt. Rolling back is
-# pointing GC_NOMAD_AGENT_IMAGE back at this tag (or unset it, which returns the
-# legacy exec + read-only artifact-volume shape — the mount is suppressed only
-# when the image variable is set).
+# pointing GC_NOMAD_AGENT_IMAGE back at this tag, or at any earlier tag the
+# receipt names — a previous IMAGE TAG is the only rollback there is. Unsetting
+# it is not a rollback: the Docker task is the only session shape and every
+# lifecycle op fails closed without an image (cr-3vvnb5.2), and the legacy exec
+# + read-only artifact-volume shape this used to fall back to is deleted
+# (cr-3vvnb5).
 rollback_image gc-session-toolchain:rollback
 
 # --- components ------------------------------------------------------------

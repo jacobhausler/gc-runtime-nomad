@@ -73,10 +73,14 @@ gc build-image <bounded-city> --base-image gc-session-toolchain:1.0.5 \
 export GC_NOMAD_AGENT_IMAGE=gc-session-toolchain:1.0.5-city   # then a bounded canary, separately gated
 ```
 
-Rollback, in order of preference: `export GC_NOMAD_AGENT_IMAGE=gc-session-toolchain:rollback`
-(the tag `build` re-points at whatever was live), or **unset** it, which returns
-the legacy `exec` + read-only `/mnt/nomad` artifact-volume shape; the pin rollback
-itself remains the executive host step it was ruled to be (repin #5–#7 receipts).
+Rollback is a previous IMAGE TAG: `export GC_NOMAD_AGENT_IMAGE=gc-session-toolchain:rollback`
+(the tag `build` re-points at whatever was live), or any earlier tag recorded in
+the deployment receipt. There is no other shape to fall back to — unsetting the
+variable fails every lifecycle op closed, because the Docker task is the only
+session shape (cr-3vvnb5.2) and the legacy `exec` + read-only `/mnt/nomad`
+artifact-volume shape it used to return to is deleted (cr-3vvnb5). The pin
+rollback itself remains the executive host step it was ruled to be (repin
+#5–#7 receipts).
 No registry push in any direction: `--push` is not offered here — publishing the
 runtime registry is a reserved owner decision (AGENTS.md hard stop), and the
 admitted estate precedent for a locally built image is `force_pull = false`

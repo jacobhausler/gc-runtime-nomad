@@ -1,3 +1,22 @@
+# v1.0.7
+
+One shape, one rollback: the prebaked image is the session, and the
+deployment-owned bootstrap that used to be able to stand in front of it is gone.
+
+- **`GC_NOMAD_AGENT_LAUNCH_SCRIPT` removed in 1.0.7** (`cr-3vvnb5`). The pack no
+  longer consults a deployment-owned launch script: the image's tmux pane runs
+  gc's rendered launch command and nothing else, and an empty rendered command
+  fails the launch closed. Gone with it — `buildLaunchCommand`'s legacy
+  bare-tmux placeholder branch and the `check` warning that fired when both
+  were set; `install.sh`'s opt-in launcher deploy and its `agent-launch`
+  argument; README's install step, env-var row, and the part 2 prose that
+  credited a launcher with the box's `PATH` and its agent home (the pack now
+  writes that home inside the box, `codex_home.go`).
+- **Rollback is a previous IMAGE TAG.** `GC_NOMAD_AGENT_IMAGE` is required —
+  unsetting it fails every lifecycle op closed (`cr-3vvnb5.2`) — so the fallback
+  sentences in `toolchain/BUILD-RECEIPT.md` and `toolchain/TOOLCHAIN.lock` name
+  a tag to point back at, not a shape to drop into.
+
 # v1.0.6
 
 - Nomad transport now honors the standard `NOMAD_CACERT`,
@@ -22,6 +41,9 @@ a receipt path that fails closed.
   `cr-u7b0s.41`). With it set, the allocation carries no toolchain host-volume
   mount and the image owns the toolchain; unset, the legacy exec +
   read-only artifact-volume shape is what runs. One variable, one shape.
+  **Superseded in 1.0.7**: the image is required and that legacy shape is
+  deleted, so unset is a fail-closed config error and not a rollback (see the
+  v1.0.7 entry above).
 - **Native Nomad query and dispatch APIs** (`0b76009`, `cr-u7b0s.42`) in place
   of the hand-rolled HTTP calls, and **the RPP capability surface stays
   native** — `GC_NOMAD_FORBID_REGISTER` now fails closed instead of advertising
