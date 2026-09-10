@@ -1674,12 +1674,28 @@ func (l *lifecycle) stage(ctx context.Context, sessionName string, cfg stageConf
 		secretFiles = append(secretFiles, stageFile{Path: k, Content: []byte(v), Mode: 0o600})
 	}
 	if len(secretEnv) > 0 {
-		envScript := buildEnvScript(remoteContextEnvScriptInput(secretEnv))
+		// The image shape has no deployment bootstrap to hand its agent home to
+		// (main.go ignores GC_NOMAD_AGENT_LAUNCH_SCRIPT once an image owns the
+		// toolchain), so the pack stages the Codex home itself. Legacy exec
+		// mode keeps its bytes unchanged - that shape is the rollback.
+		codexHome := codexHomeOwned(secretsDir, secretEnv)
+		envInput := remoteContextEnvScriptInput(secretEnv)
+		if codexHome {
+			envInput = codexHomeEnvScriptInput(envInput)
+		}
+		envScript := buildEnvScript(envInput)
 		// The remote-context bridge (cr-gdeav.6.15) rides the same env.sh:
 		// GC_HOME/GC_CITY_CONTEXT are a no-op append when GC_CITY_NAME or
 		// GC_CITY_URL is absent from the wire, so this costs nothing for a
 		// deployment that has not opted in.
 		envScript = append(envScript, buildRemoteContextEnvLines(secretEnv)...)
+		if codexHome {
+			// Appended last on purpose: an export written after every staged
+			// provider value is the one that wins when the pane sources env.sh,
+			// and this is the override of the provider env that cr-usnvaw asks
+			// for. The recipe lives in codex_home.go, not here.
+			envScript = append(envScript, buildCodexHomeEnvLines()...)
+		}
 		secretFiles = append(secretFiles, stageFile{
 			Path:    stagedEnvScriptName,
 			Content: envScript,
@@ -1690,6 +1706,13 @@ func (l *lifecycle) stage(ctx context.Context, sessionName string, cfg stageConf
 		// package. Also a no-op append on the same condition.
 		if ctxFile := buildRemoteContextFile(secretEnv, secretsDir); ctxFile != nil {
 			secretFiles = append(secretFiles, *ctxFile)
+		}
+		if codexHome {
+			homeFiles, err := buildCodexHomeFiles(secretEnv)
+			if err != nil {
+				return fmt.Errorf("staging secrets for %q: %w", sessionName, err)
+			}
+			secretFiles = append(secretFiles, homeFiles...)
 		}
 	}
 	if len(secretFiles) > 0 {
