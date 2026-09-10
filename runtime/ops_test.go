@@ -36,6 +36,23 @@ func newTestLifecycle(t *testing.T) (*lifecycle, *fakenomad.Server) {
 	return &lifecycle{client: c, sidecar: sc, parentJobID: "gc-sessions"}, srv
 }
 
+// withPane fills in the pane body a start needs: cr-3vvnb5.3 deletes the
+// placeholder pane, so a start that carries no rendered command fails closed.
+// Tests that assert that fail-closed door call opStartWithConfig directly.
+func withPane(cfg stageConfig) stageConfig {
+	if cfg.Command == "" {
+		cfg.Command = testPaneCommand
+	}
+	return cfg
+}
+
+// testPaneCommand is the pane body an image-mode launch is handed: gc always
+// renders a launch command, and cr-3vvnb5.3 deletes the bare-tmux placeholder
+// the pack used to fall back to when it was empty. It has to STAY up the way a
+// real agent does, because opIsRunning kill -0's the pane pid the launch
+// captured: a pane that exits at once reads as an agent that died.
+const testPaneCommand = "sleep 120"
+
 func TestConfigureExecTaskNameUsesEnvironment(t *testing.T) {
 	original := execTaskName
 	t.Cleanup(func() { execTaskName = original })
@@ -56,9 +73,9 @@ func TestOpStartRetriesProvisionReadinessRace(t *testing.T) {
 	l, srv := newTestLifecycle(t)
 	srv.ResetExecNext(2) // secret staging, then launch
 
-	if err := l.opStartWithConfig(context.Background(), "sess-readiness", stageConfig{
+	if err := l.opStartWithConfig(context.Background(), "sess-readiness", withPane(stageConfig{
 		Env: map[string]string{"OPENAI_API_KEY": "transient-readiness-secret"},
-	}); err != nil {
+	})); err != nil {
 		t.Fatalf("start after transient provision readiness failures: %v", err)
 	}
 	running, err := l.opIsRunning(context.Background(), "sess-readiness")
@@ -206,7 +223,7 @@ func TestLifecycleStartSucceedsWithLogShipperEnabled(t *testing.T) {
 	ctx := context.Background()
 	const session = "sess-log-shipper"
 
-	if err := l.opStart(ctx, session); err != nil {
+	if err := l.opStartWithConfig(ctx, session, stageConfig{Command: testPaneCommand}); err != nil {
 		t.Fatalf("start with log-shipper enabled: %v", err)
 	}
 	if running, err := l.opIsRunning(ctx, session); err != nil || !running {
@@ -223,7 +240,7 @@ func TestLifecycleRoundTrip(t *testing.T) {
 		t.Fatalf("is-running before start = (%v, %v), want (false, nil)", running, err)
 	}
 
-	if err := l.opStart(ctx, session); err != nil {
+	if err := l.opStartWithConfig(ctx, session, stageConfig{Command: testPaneCommand}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 
@@ -232,7 +249,7 @@ func TestLifecycleRoundTrip(t *testing.T) {
 		t.Fatalf("is-running after start = (%v, %v), want (true, nil)", running, err)
 	}
 
-	err = l.opStart(ctx, session)
+	err = l.opStartWithConfig(ctx, session, stageConfig{Command: testPaneCommand})
 	if err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("duplicate start error = %v, want an \"already exists\" error", err)
 	}
@@ -265,13 +282,13 @@ func TestOpStartAfterStopRedispatches(t *testing.T) {
 	ctx := context.Background()
 	const session = "sess-restart"
 
-	if err := l.opStart(ctx, session); err != nil {
+	if err := l.opStartWithConfig(ctx, session, stageConfig{Command: testPaneCommand}); err != nil {
 		t.Fatalf("first start: %v", err)
 	}
 	if err := l.opStop(ctx, session); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
-	if err := l.opStart(ctx, session); err != nil {
+	if err := l.opStartWithConfig(ctx, session, stageConfig{Command: testPaneCommand}); err != nil {
 		t.Fatalf("second start after stop: %v", err)
 	}
 	running, err := l.opIsRunning(ctx, session)
@@ -287,7 +304,7 @@ func TestOpListRunning(t *testing.T) {
 	ctx := context.Background()
 
 	for _, s := range []string{"charlie", "alpha", "bravo"} {
-		if err := l.opStart(ctx, s); err != nil {
+		if err := l.opStartWithConfig(ctx, s, stageConfig{Command: testPaneCommand}); err != nil {
 			t.Fatalf("start %q: %v", s, err)
 		}
 	}
@@ -331,7 +348,7 @@ func TestOpListRunningFiltersByPrefix(t *testing.T) {
 	ctx := context.Background()
 
 	for _, s := range []string{"city-a-sess1", "city-a-sess2", "city-b-sess1"} {
-		if err := l.opStart(ctx, s); err != nil {
+		if err := l.opStartWithConfig(ctx, s, stageConfig{Command: testPaneCommand}); err != nil {
 			t.Fatalf("start %q: %v", s, err)
 		}
 	}
@@ -366,7 +383,7 @@ func TestOpListRunningUsesChildrenOfParentNotStaleSidecar(t *testing.T) {
 	ctx := context.Background()
 	const session = "sess-stale-binding"
 
-	if err := l.opStart(ctx, session); err != nil {
+	if err := l.opStartWithConfig(ctx, session, stageConfig{Command: testPaneCommand}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	b, ok, err := l.sidecar.load(session)
@@ -445,12 +462,14 @@ func TestOpProvisionThenExecWithoutLaunch(t *testing.T) {
 // tmux command over exec. A successful launch must advance the pack's sidecar
 // marker, otherwise is-running reports runtime-missing and gc retires a live
 // allocation immediately.
+//
+// The pane body is gc's rendered command and nothing else: the pack's former
+// launch-script seam is deleted (cr-3vvnb5.3), so there is no pack-side pane
+// command left that could displace it.
 func TestOpExecConfirmsASeparableTransportLaunch(t *testing.T) {
 	l, _ := newTestLifecycle(t)
 	ctx := context.Background()
 	const session = "sess-separable-launch"
-	const packLaunchScript = "printf pack-bootstrap > \"$NOMAD_SECRETS_DIR/launch-marker\""
-	withAgentLaunchScript(t, packLaunchScript)
 	fakeBin := t.TempDir()
 	fakeTmux := filepath.Join(fakeBin, "tmux")
 	launchRecord := filepath.Join(t.TempDir(), "tmux-launch-argv")
@@ -491,9 +510,6 @@ esac
 	if got := string(recorded); !strings.Contains(got, "sleep 60") {
 		t.Fatalf("transport launch argv = %q, want GC-rendered pane command %q", got, "sleep 60")
 	}
-	if got := string(recorded); strings.Contains(got, packLaunchScript) {
-		t.Fatalf("transport launch argv = %q, unexpectedly replaced GC-rendered pane command with pack launch script %q", got, packLaunchScript)
-	}
 	if running, err := l.opIsRunning(ctx, session); err != nil || !running {
 		t.Fatalf("is-running after transport launch = (%v, %v), want (true, nil)", running, err)
 	}
@@ -520,7 +536,6 @@ func TestOpExecPrimesTransportLaunchAsynchronouslyViaDetachedWindow(t *testing.T
 	l, _ := newTestLifecycle(t)
 	ctx := context.Background()
 	const session = "sess-async-prime"
-	withAgentLaunchScript(t, "true")
 
 	windowRecord := filepath.Join(t.TempDir(), "tmux-new-window-argv")
 	fakeBin := t.TempDir()
@@ -608,12 +623,14 @@ esac
 	}
 }
 
-func TestOpExecAppliesStagedBootstrapToTransportRespawn(t *testing.T) {
+// TestOpExecPreservesTransportRespawnVerbAndRenderedCommand: the pack keeps
+// gc's transport verb and gc's rendered pane command on a respawn - the
+// launch-script seam that used to compete for that slot is deleted
+// (cr-3vvnb5.3).
+func TestOpExecPreservesTransportRespawnVerbAndRenderedCommand(t *testing.T) {
 	l, _ := newTestLifecycle(t)
 	ctx := context.Background()
 	const session = "sess-separable-respawn"
-	const packLaunchScript = "printf pack-respawn > \"$NOMAD_SECRETS_DIR/respawn-marker\""
-	withAgentLaunchScript(t, packLaunchScript)
 	fakeBin := t.TempDir()
 	fakeTmux := filepath.Join(fakeBin, "tmux")
 	launchRecord := filepath.Join(t.TempDir(), "tmux-respawn-argv")
@@ -645,9 +662,6 @@ esac
 	if got := string(recorded); !strings.Contains(got, "respawn-pane") || !strings.Contains(got, "sleep 60") {
 		t.Fatalf("transport respawn argv = %q, want respawn-pane with GC-rendered pane command %q", got, "sleep 60")
 	}
-	if got := string(recorded); strings.Contains(got, packLaunchScript) {
-		t.Fatalf("transport respawn argv = %q, unexpectedly replaced GC-rendered pane command with pack launch script %q", got, packLaunchScript)
-	}
 }
 
 // countDispatchCalls counts child-job dispatch requests for parentJobID in a
@@ -674,7 +688,7 @@ func TestOpProvisionOnLaunchedSessionIsRejected(t *testing.T) {
 	ctx := context.Background()
 	const session = "sess-launched-then-provisioned"
 
-	if err := l.opStart(ctx, session); err != nil {
+	if err := l.opStartWithConfig(ctx, session, stageConfig{Command: testPaneCommand}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	if err := l.opProvision(ctx, session); err == nil || !strings.Contains(err.Error(), "already exists") {
@@ -917,7 +931,7 @@ esac
 	if running, err := l.opIsRunning(ctx, session); err != nil || !running {
 		t.Fatalf("is-running after the self-heal = (%v, %v), want (true, nil)", running, err)
 	}
-	if err := l.opStart(ctx, session); err == nil || !strings.Contains(err.Error(), "already exists") {
+	if err := l.opStartWithConfig(ctx, session, stageConfig{Command: testPaneCommand}); err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("start over a box whose agent is running = %v, want already-exists (never a double launch)", err)
 	}
 	if n := countDispatchCalls(srv.Trace(), l.parentJobID); n != 1 {
@@ -975,7 +989,7 @@ func TestOpStartAfterProvisionAdoptsTheProvisionedBox(t *testing.T) {
 	if err := l.opProvision(ctx, session); err != nil {
 		t.Fatalf("provision: %v", err)
 	}
-	if err := l.opStart(ctx, session); err != nil {
+	if err := l.opStartWithConfig(ctx, session, stageConfig{Command: testPaneCommand}); err != nil {
 		t.Fatalf("start after provision = %v, want nil (resume into the provisioned box)", err)
 	}
 	if n := countDispatchCalls(srv.Trace(), l.parentJobID); n != 1 {
@@ -995,7 +1009,7 @@ func TestOpStartLaunchesOverExec(t *testing.T) {
 	ctx := context.Background()
 	const session = "sess-launched"
 
-	if err := l.opStart(ctx, session); err != nil {
+	if err := l.opStartWithConfig(ctx, session, stageConfig{Command: testPaneCommand}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	if running, err := l.opIsRunning(ctx, session); err != nil || !running {
@@ -1015,12 +1029,27 @@ func TestOpRelaunchReusesTheSameAlloc(t *testing.T) {
 	ctx := context.Background()
 	const session = "sess-relaunch"
 
-	if err := l.opProvision(ctx, session); err != nil {
-		t.Fatalf("provision: %v", err)
+	// A relaunch replays the rendered command the session was first launched
+	// with (cr-3vvnb5.3): the pack keeps no bootstrap of its own, so a relaunch
+	// of a never-launched box has nothing to exec and fails closed.
+	if err := l.opStartWithConfig(ctx, session, withPane(stageConfig{})); err != nil {
+		t.Fatalf("start: %v", err)
 	}
 	before, ok, err := l.sidecar.load(session)
 	if err != nil || !ok {
 		t.Fatalf("sidecar.load before relaunch = (%v, %v, %v)", before, ok, err)
+	}
+
+	// Take the launched agent out from under the box first (the 08 §3
+	// in-box-agent-kill shape faults_test.go models): relaunch replays the
+	// recorded command into the same pane name, so it is for a box whose agent
+	// is gone, not for one that is still running.
+	allocID, err := l.currentAlloc(ctx, session)
+	if err != nil {
+		t.Fatalf("currentAlloc: %v", err)
+	}
+	if code, out, err := l.client.execAlloc(ctx, allocID, execTaskName, []string{"tmux", "kill-session", "-t", tmuxSessionName}); err != nil || code != 0 {
+		t.Fatalf("tmux kill-session = (%d, %v): %s", code, err, out)
 	}
 
 	if err := l.opRelaunch(ctx, session); err != nil {
@@ -1076,7 +1105,7 @@ func TestOpStartFaultPropagates(t *testing.T) {
 	}
 	srv.FailNext("POST", "/v1/job/"+l.parentJobID+"/dispatch", 500, `{"error":"injected"}`)
 
-	if err := l.opStart(ctx, session); err == nil {
+	if err := l.opStartWithConfig(ctx, session, stageConfig{Command: testPaneCommand}); err == nil {
 		t.Fatalf("start with faulted dispatch: got nil error, want failure")
 	}
 
@@ -1116,7 +1145,7 @@ func TestOpStartSucceedsWhenParentExistsAndRegisterIsForbidden(t *testing.T) {
 	// From here on, the token this lifecycle uses 403s on register.
 	srv.FailSticky("POST", "/v1/jobs", 403, `{"error":"Permission denied: missing submit-job capability"}`)
 
-	if err := l.opStart(ctx, session); err != nil {
+	if err := l.opStartWithConfig(ctx, session, stageConfig{Command: testPaneCommand}); err != nil {
 		t.Fatalf("start with parent already registered and register forbidden: %v", err)
 	}
 	if running, err := l.opIsRunning(ctx, session); err != nil || !running {
@@ -1137,7 +1166,7 @@ func TestOpStartFailsClearlyWhenParentAbsentAndRegisterForbidden(t *testing.T) {
 
 	srv.FailSticky("POST", "/v1/jobs", 403, `{"error":"Permission denied: missing submit-job capability"}`)
 
-	err := l.opStart(ctx, "sess-no-parent")
+	err := l.opStartWithConfig(ctx, "sess-no-parent", stageConfig{Command: testPaneCommand})
 	if err == nil {
 		t.Fatalf("start with absent parent and register forbidden: got nil error, want failure")
 	}
@@ -1160,7 +1189,7 @@ func TestOpStartRegistersWhenNodePoolDrifted(t *testing.T) {
 		t.Fatalf("registerJob (stale node pool): %v", err)
 	}
 
-	if err := l.opStart(ctx, "sess-drifted"); err != nil {
+	if err := l.opStartWithConfig(ctx, "sess-drifted", stageConfig{Command: testPaneCommand}); err != nil {
 		t.Fatalf("start with drifted node pool: %v", err)
 	}
 	if n := countRegisterCalls(srv.Trace()); n != 2 {
@@ -1201,7 +1230,7 @@ func TestOpStartDetectsJobspecDriftAndFailsClearlyWhenRegisterIsForbidden(t *tes
 	// rather than via the one-time management-token setup.
 	srv.FailSticky("POST", "/v1/jobs", 403, `{"error":"Permission denied: missing submit-job capability"}`)
 
-	err := l.opStart(ctx, "sess-drifted-jobspec")
+	err := l.opStartWithConfig(ctx, "sess-drifted-jobspec", stageConfig{Command: testPaneCommand})
 	if err == nil {
 		t.Fatalf("start with drifted jobspec and register forbidden: got nil error, want failure")
 	}
@@ -1218,7 +1247,7 @@ func TestOpStartForbidRegistrationConfigFailsClosed(t *testing.T) {
 	l.forbidRegistration = true
 	ctx := context.Background()
 
-	err := l.opStart(ctx, "sess-forbid-register")
+	err := l.opStartWithConfig(ctx, "sess-forbid-register", stageConfig{Command: testPaneCommand})
 	if err == nil {
 		t.Fatalf("start with forbidRegistration and absent parent: got nil error, want failure")
 	}
@@ -1252,7 +1281,7 @@ func TestOpStopFlushesLogShipperBeforeEgress(t *testing.T) {
 	ctx := context.Background()
 	const session = "sess-log-stop-order"
 
-	if err := l.opStart(ctx, session); err != nil {
+	if err := l.opStartWithConfig(ctx, session, stageConfig{Command: testPaneCommand}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	b, ok, err := l.sidecar.load(session)
@@ -1352,7 +1381,7 @@ func TestOpStopEgressesBeforeDeregister(t *testing.T) {
 
 	const credentialSentinel = "sk-sentinel-must-never-egress"
 
-	if err := l.opStart(ctx, session); err != nil {
+	if err := l.opStartWithConfig(ctx, session, stageConfig{Command: testPaneCommand}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	b, ok, err := l.sidecar.load(session)
@@ -1501,7 +1530,7 @@ func TestOpStopEgressSurvivesAbsentCaptureFiles(t *testing.T) {
 	ctx := context.Background()
 	const session = "sess-egress-absent-capture"
 
-	if err := l.opStart(ctx, session); err != nil {
+	if err := l.opStartWithConfig(ctx, session, stageConfig{Command: testPaneCommand}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	b, ok, err := l.sidecar.load(session)
@@ -1543,7 +1572,7 @@ func TestOpStopSkipsEgressWhenDisabled(t *testing.T) {
 	ctx := context.Background()
 	const session = "sess-no-egress"
 
-	if err := l.opStart(ctx, session); err != nil {
+	if err := l.opStartWithConfig(ctx, session, stageConfig{Command: testPaneCommand}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	if err := l.opStop(ctx, session); err != nil {
@@ -1564,7 +1593,7 @@ func TestOpStopRetryAfterDeregisterFaultSkipsReEgress(t *testing.T) {
 	ctx := context.Background()
 	const session = "sess-egress-retry"
 
-	if err := l.opStart(ctx, session); err != nil {
+	if err := l.opStartWithConfig(ctx, session, stageConfig{Command: testPaneCommand}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	b, ok, err := l.sidecar.load(session)
@@ -1768,7 +1797,7 @@ func TestLaunchFailureCarriesBoxStderr(t *testing.T) {
 	ctx := context.Background()
 	l, _ := newTestLifecycle(t)
 	const session = "sess-launch-stderr"
-	if err := l.opStart(ctx, session); err != nil {
+	if err := l.opStartWithConfig(ctx, session, stageConfig{Command: testPaneCommand}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	err := l.launchWithCommand(ctx, session, []string{"/bin/sh", "-c",

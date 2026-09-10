@@ -93,7 +93,6 @@ func TestPrimeStatusHonorsUnconfirmedSubmit(t *testing.T) {
 	l, _ := newTestLifecycle(t)
 	ctx := context.Background()
 	const session = "sess-unconfirmed-submit"
-	withAgentLaunchScript(t, "true")
 
 	fakeBin := t.TempDir()
 	fakeTmux := filepath.Join(fakeBin, "tmux")

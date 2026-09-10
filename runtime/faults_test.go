@@ -29,7 +29,7 @@ func TestFaultAPIOutage(t *testing.T) {
 	ctx := context.Background()
 	const session = "sess-outage"
 
-	if err := l.opStart(ctx, session); err != nil {
+	if err := l.opStartWithConfig(ctx, session, stageConfig{Command: testPaneCommand}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	srv.Close()
@@ -55,7 +55,7 @@ func TestFault5xx(t *testing.T) {
 	ctx := context.Background()
 	const session = "sess-5xx"
 
-	if err := l.opStart(ctx, session); err != nil {
+	if err := l.opStartWithConfig(ctx, session, stageConfig{Command: testPaneCommand}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	b, ok, err := l.sidecar.load(session)
@@ -94,7 +94,7 @@ func TestFaultTLSHandshake(t *testing.T) {
 	ctx := context.Background()
 	const session = "sess-tls"
 
-	if err := l.opStart(ctx, session); err == nil {
+	if err := l.opStartWithConfig(ctx, session, stageConfig{Command: testPaneCommand}); err == nil {
 		t.Fatalf("start against an untrusted TLS endpoint = nil error, want a handshake failure")
 	}
 
@@ -120,7 +120,7 @@ func TestFaultTimeoutMidDispatch(t *testing.T) {
 
 	shortCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
 	defer cancel()
-	if err := l.opStart(shortCtx, session); err == nil {
+	if err := l.opStartWithConfig(shortCtx, session, stageConfig{Command: testPaneCommand}); err == nil {
 		t.Fatalf("start with dispatch stuck mid-flight = nil error, want a timeout")
 	}
 
@@ -148,7 +148,7 @@ func TestFaultSlowServer(t *testing.T) {
 	srv.DelayNext("POST", "/v1/job/"+l.parentJobID+"/dispatch", 300*time.Millisecond)
 
 	start := time.Now()
-	if err := l.opStart(ctx, session); err != nil {
+	if err := l.opStartWithConfig(ctx, session, stageConfig{Command: testPaneCommand}); err != nil {
 		t.Fatalf("start against a slow-but-answering server: %v", err)
 	}
 	if elapsed := time.Since(start); elapsed < 300*time.Millisecond {
@@ -169,7 +169,7 @@ func TestFaultStaleIndexNeverTrusted(t *testing.T) {
 	ctx := context.Background()
 	const session = "sess-stale"
 
-	if err := l.opStart(ctx, session); err != nil {
+	if err := l.opStartWithConfig(ctx, session, stageConfig{Command: testPaneCommand}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	if running, err := l.opIsRunning(ctx, session); err != nil || !running {
@@ -202,7 +202,7 @@ func TestFaultLostAlloc(t *testing.T) {
 	ctx := context.Background()
 	const session = "sess-lost"
 
-	if err := l.opStart(ctx, session); err != nil {
+	if err := l.opStartWithConfig(ctx, session, stageConfig{Command: testPaneCommand}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	b, ok, err := l.sidecar.load(session)
@@ -264,7 +264,7 @@ func TestFaultTaskExitedBeforeLaunch(t *testing.T) {
 	// A fresh start must not wedge behind the dead child: dispatch's
 	// "already exists" guard only fires for a still-live child, so start
 	// transparently redispatches and the session comes up normally.
-	if err := l.opStart(ctx, session); err != nil {
+	if err := l.opStartWithConfig(ctx, session, stageConfig{Command: testPaneCommand}); err != nil {
 		t.Fatalf("start after the dead child = %v, want nil (fresh dispatch)", err)
 	}
 	if running, err := l.opIsRunning(ctx, session); err != nil || !running {
@@ -285,7 +285,7 @@ func TestFaultUnknownAlloc(t *testing.T) {
 	ctx := context.Background()
 	const session = "sess-unknown"
 
-	if err := l.opStart(ctx, session); err != nil {
+	if err := l.opStartWithConfig(ctx, session, stageConfig{Command: testPaneCommand}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	b, ok, err := l.sidecar.load(session)
@@ -330,7 +330,7 @@ func TestFaultReplacementAlloc(t *testing.T) {
 	ctx := context.Background()
 	const session = "sess-replace"
 
-	if err := l.opStart(ctx, session); err != nil {
+	if err := l.opStartWithConfig(ctx, session, stageConfig{Command: testPaneCommand}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	b, ok, err := l.sidecar.load(session)
@@ -371,7 +371,7 @@ func TestFaultInBoxAgentKill(t *testing.T) {
 	ctx := context.Background()
 	const session = "sess-inbox-kill"
 
-	if err := l.opStart(ctx, session); err != nil {
+	if err := l.opStartWithConfig(ctx, session, stageConfig{Command: testPaneCommand}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	if running, err := l.opIsRunning(ctx, session); err != nil || !running {
@@ -425,7 +425,7 @@ func TestFaultTokenAfterPurge(t *testing.T) {
 	ctx := context.Background()
 	const session = "sess-purge"
 
-	if err := l.opStart(ctx, session); err != nil {
+	if err := l.opStartWithConfig(ctx, session, stageConfig{Command: testPaneCommand}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	b, ok, err := l.sidecar.load(session)
@@ -468,7 +468,7 @@ func TestFaultCrashPointSuite(t *testing.T) {
 			t.Fatalf("sidecar.save(intent): %v", err)
 		}
 
-		if err := l.opStart(ctx, session); err != nil {
+		if err := l.opStartWithConfig(ctx, session, stageConfig{Command: testPaneCommand}); err != nil {
 			t.Fatalf("start retry after a pre-dispatch crash = %v, want nil (nothing to adopt, dispatch fresh)", err)
 		}
 
@@ -512,7 +512,7 @@ func TestFaultCrashPointSuite(t *testing.T) {
 		if err != nil || running {
 			t.Fatalf("is-running with an orphaned intent binding = (%v, %v), want (false, nil)", running, err)
 		}
-		if err := l.opStart(ctx, session); err != nil {
+		if err := l.opStartWithConfig(ctx, session, stageConfig{Command: testPaneCommand}); err != nil {
 			t.Fatalf("start after a crashed prior dispatch = %v, want nil (must not wedge behind the orphan)", err)
 		}
 
@@ -557,7 +557,7 @@ func TestFaultCrashPointSuite(t *testing.T) {
 		}
 		childID := b.ChildJobID
 
-		if err := l.opStart(ctx, session); err != nil {
+		if err := l.opStartWithConfig(ctx, session, stageConfig{Command: testPaneCommand}); err != nil {
 			t.Fatalf("start retry after a crashed pre-launch attempt = %v, want nil (resume to launch)", err)
 		}
 
@@ -616,7 +616,7 @@ func TestFaultStopSuite(t *testing.T) {
 		ctx := context.Background()
 		const session = "sess-egress-fail"
 
-		if err := l.opStart(ctx, session); err != nil {
+		if err := l.opStartWithConfig(ctx, session, stageConfig{Command: testPaneCommand}); err != nil {
 			t.Fatalf("start: %v", err)
 		}
 		b, ok, err := l.sidecar.load(session)
@@ -662,7 +662,7 @@ func TestFaultStopSuite(t *testing.T) {
 		ctx := context.Background()
 		const session = "sess-shipper-flush-fail"
 
-		if err := l.opStart(ctx, session); err != nil {
+		if err := l.opStartWithConfig(ctx, session, stageConfig{Command: testPaneCommand}); err != nil {
 			t.Fatalf("start: %v", err)
 		}
 		b, ok, err := l.sidecar.load(session)
@@ -710,7 +710,7 @@ func TestFaultStopSuite(t *testing.T) {
 		ctx := context.Background()
 		const session = "sess-stop-outage"
 
-		if err := l.opStart(ctx, session); err != nil {
+		if err := l.opStartWithConfig(ctx, session, stageConfig{Command: testPaneCommand}); err != nil {
 			t.Fatalf("start: %v", err)
 		}
 		srv.Close()
@@ -729,7 +729,7 @@ func TestFaultStopSuite(t *testing.T) {
 		ctx := context.Background()
 		const session = "sess-crash-between"
 
-		if err := l.opStart(ctx, session); err != nil {
+		if err := l.opStartWithConfig(ctx, session, stageConfig{Command: testPaneCommand}); err != nil {
 			t.Fatalf("start: %v", err)
 		}
 		b, ok, err := l.sidecar.load(session)
@@ -785,7 +785,7 @@ func TestFaultConcurrentStartRace(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			errs[i] = l.opStart(ctx, session)
+			errs[i] = l.opStartWithConfig(ctx, session, stageConfig{Command: testPaneCommand})
 		}(i)
 	}
 	wg.Wait()
@@ -869,7 +869,7 @@ func TestFaultConcurrentStartRaceCrossProcess(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			errs[i] = lifecycles[i].opStart(ctx, session)
+			errs[i] = lifecycles[i].opStartWithConfig(ctx, session, stageConfig{Command: testPaneCommand})
 		}(i)
 	}
 	wg.Wait()
@@ -907,7 +907,7 @@ func TestFaultConsistencyAcrossSessions(t *testing.T) {
 	ctx := context.Background()
 
 	for _, s := range []string{"alpha", "bravo"} {
-		if err := l.opStart(ctx, s); err != nil {
+		if err := l.opStartWithConfig(ctx, s, stageConfig{Command: testPaneCommand}); err != nil {
 			t.Fatalf("start %q: %v", s, err)
 		}
 	}
@@ -943,7 +943,7 @@ func TestFaultSidecarLoss(t *testing.T) {
 	ctx := context.Background()
 	const session = "sess-sidecarloss"
 
-	if err := l.opStart(ctx, session); err != nil {
+	if err := l.opStartWithConfig(ctx, session, stageConfig{Command: testPaneCommand}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	if err := os.RemoveAll(l.sidecar.dir); err != nil {
@@ -967,7 +967,7 @@ func TestFaultPermanentAuth(t *testing.T) {
 	ctx := context.Background()
 	const session = "sess-auth"
 
-	if err := l.opStart(ctx, session); err != nil {
+	if err := l.opStartWithConfig(ctx, session, stageConfig{Command: testPaneCommand}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	b, ok, err := l.sidecar.load(session)
@@ -1074,7 +1074,7 @@ func TestFaultProvisionOfALaunchedSessionStillReportsAlreadyExists(t *testing.T)
 		t.Fatalf("re-provision of a staged, unlaunched session = %v, want nil (adopt)", err)
 	}
 
-	if err := l.opStartWithConfig(ctx, session, cfg); err != nil {
+	if err := l.opStartWithConfig(ctx, session, withPane(cfg)); err != nil {
 		t.Fatalf("start after provision: %v", err)
 	}
 	err := l.opProvisionWithConfig(ctx, session, cfg)

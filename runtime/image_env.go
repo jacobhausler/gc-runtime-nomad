@@ -4,9 +4,9 @@ import (
 	"strings"
 )
 
-// The prebaked-image shape has no deployment bootstrap: GC_NOMAD_AGENT_LAUNCH_SCRIPT
-// is ignored once GC_NOMAD_AGENT_IMAGE is set (main.go), because the image owns the
-// agent toolchain. That makes the IMAGE's PATH, HOME, TMPDIR and XDG dirs the only
+// The prebaked-image shape has no deployment bootstrap: the pack's former
+// GC_NOMAD_AGENT_LAUNCH_SCRIPT seam is deleted outright (cr-3vvnb5.3), because
+// the image owns the agent toolchain. That makes the IMAGE's PATH, HOME, TMPDIR and XDG dirs the only
 // ones an agent in the box can run with - yet stage() sourced the orchestrator's own
 // values for every one of them into env.sh, and the estate's provider env carries them
 // verbatim (harness scratch toolchain, /opt/homebrew/bin, /Users/home/.local/bin).
