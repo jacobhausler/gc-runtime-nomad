@@ -157,4 +157,114 @@ func TestSidecarBindingRecoveryFromNomadMeta(t *testing.T) {
 		}
 	})
 
+	t.Run("terminal residue does not mask the live child", func(t *testing.T) {
+		l, srv := newTestLifecycle(t)
+		ctx := context.Background()
+		if err := l.ensureParentRegistered(ctx); err != nil {
+			t.Fatalf("register parent: %v", err)
+		}
+		const session = "sess-terminal-residue"
+		staleID, err := l.client.dispatchChild(ctx, l.parentJobID, session, "nonce-stale")
+		if err != nil {
+			t.Fatalf("dispatch stale candidate: %v", err)
+		}
+		liveID, err := l.client.dispatchChild(ctx, l.parentJobID, session, "nonce-live")
+		if err != nil {
+			t.Fatalf("dispatch live candidate: %v", err)
+		}
+		allocs, _, err := l.client.listAllocsForJob(ctx, staleID, 0, 0)
+		if err != nil || len(allocs) != 1 {
+			t.Fatalf("stale candidate allocations = (%v, %v), want one allocation", allocs, err)
+		}
+		if !srv.SetAllocStatus(allocs[0].ID, "complete") {
+			t.Fatalf("set stale candidate terminal: allocation %q not found", allocs[0].ID)
+		}
+
+		// D3 canary signature (cr-x6nr04, 2026-09-10): the session's earlier
+		// box was stopped or reaped and its terminal child is still in the
+		// parent's jobs list while a live child exists. Terminal residue is
+		// not a candidate, so it must not be counted; counting it read one
+		// live box plus one dead child as a disputed binding and refused the
+		// start on every retry.
+		before := countDispatchCalls(srv.Trace(), l.parentJobID)
+		got, err := l.recoverBinding(ctx, session, nil)
+		if err != nil {
+			t.Fatalf("recoverBinding with terminal residue = %v, want the live child %q recovered", err, liveID)
+		}
+		if got.ChildJobID != liveID || got.Nonce != "nonce-live" || got.SessionName != session {
+			t.Fatalf("recovered binding = %+v, want child %q with nonce-live for session %q", got, liveID, session)
+		}
+		if after := countDispatchCalls(srv.Trace(), l.parentJobID); after != before {
+			t.Fatalf("recovery from terminal residue dispatched %d jobs, want none", after-before)
+		}
+	})
+
+	t.Run("terminal residue never outnumbers a live child into ambiguity", func(t *testing.T) {
+		l, srv := newTestLifecycle(t)
+		ctx := context.Background()
+		if err := l.ensureParentRegistered(ctx); err != nil {
+			t.Fatalf("register parent: %v", err)
+		}
+		const session = "sess-two-terminal-one-live"
+		for _, nonce := range []string{"nonce-dead-a", "nonce-dead-b"} {
+			childID, err := l.client.dispatchChild(ctx, l.parentJobID, session, nonce)
+			if err != nil {
+				t.Fatalf("dispatch terminal candidate %q: %v", nonce, err)
+			}
+			allocs, _, err := l.client.listAllocsForJob(ctx, childID, 0, 0)
+			if err != nil || len(allocs) != 1 {
+				t.Fatalf("terminal candidate %q allocations = (%v, %v), want one allocation", childID, allocs, err)
+			}
+			if !srv.SetAllocStatus(allocs[0].ID, "complete") {
+				t.Fatalf("set terminal candidate %q: allocation %q not found", childID, allocs[0].ID)
+			}
+		}
+		liveID, err := l.client.dispatchChild(ctx, l.parentJobID, session, "nonce-live")
+		if err != nil {
+			t.Fatalf("dispatch live candidate: %v", err)
+		}
+
+		got, err := l.recoverBinding(ctx, session, nil)
+		if err != nil {
+			t.Fatalf("recoverBinding with two terminal children and one live = %v, want the live child %q recovered", err, liveID)
+		}
+		if got.ChildJobID != liveID || got.Nonce != "nonce-live" {
+			t.Fatalf("recovered binding = %+v, want child %q with nonce-live", got, liveID)
+		}
+	})
+
+	t.Run("only terminal residue is still a loud terminal refusal", func(t *testing.T) {
+		l, srv := newTestLifecycle(t)
+		ctx := context.Background()
+		if err := l.ensureParentRegistered(ctx); err != nil {
+			t.Fatalf("register parent: %v", err)
+		}
+		const session = "sess-terminal-only-pair"
+		for _, nonce := range []string{"nonce-dead-c", "nonce-dead-d"} {
+			childID, err := l.client.dispatchChild(ctx, l.parentJobID, session, nonce)
+			if err != nil {
+				t.Fatalf("dispatch terminal candidate %q: %v", nonce, err)
+			}
+			allocs, _, err := l.client.listAllocsForJob(ctx, childID, 0, 0)
+			if err != nil || len(allocs) != 1 {
+				t.Fatalf("terminal candidate %q allocations = (%v, %v), want one allocation", childID, allocs, err)
+			}
+			if !srv.SetAllocStatus(allocs[0].ID, "complete") {
+				t.Fatalf("set terminal candidate %q: allocation %q not found", childID, allocs[0].ID)
+			}
+		}
+
+		// With nothing live left to recover there is nothing to adopt, and a
+		// terminal match is the shipped evidence of a stale or disputed
+		// binding. Ignoring residue for the count must not turn this into a
+		// silent no-match.
+		before := countDispatchCalls(srv.Trace(), l.parentJobID)
+		_, err := l.recoverBinding(ctx, session, nil)
+		if err == nil || !errors.Is(err, errBindingTerminal) {
+			t.Fatalf("recoverBinding with two terminal matches = %v, want errBindingTerminal", err)
+		}
+		if after := countDispatchCalls(srv.Trace(), l.parentJobID); after != before {
+			t.Fatalf("terminal-only recovery dispatched %d jobs, want none", after-before)
+		}
+	})
 }
