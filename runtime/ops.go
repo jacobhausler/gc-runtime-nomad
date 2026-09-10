@@ -1373,7 +1373,12 @@ func (l *lifecycle) launch(ctx context.Context, sessionName string, env map[stri
 			return fmt.Errorf("launching session %q: %s is set but gc sent no rendered launch command, and the prebaked image leaves the pack no bootstrap to substitute (cr-hcgaxt)",
 				sessionName, envAgentImage)
 		}
-		command = buildLaunchCommandForPane(env, workDir, providerCommand)
+		// The same class reaches the pane by a second door: tmux `new-session -e`
+		// seeds the SERVER environment, which every pane inherits, so an
+		// argv-safe PATH would hide the image toolchain even from a clean env.sh.
+		// The canonical transport path hands no env to the builder at all, so
+		// this is the only place it can cross (cr-jr2kw7).
+		command = buildLaunchCommandForPane(boxFilesystemEnvInput(env), workDir, providerCommand)
 	}
 	return l.launchWithCommand(ctx, sessionName, command)
 }
@@ -1680,6 +1685,15 @@ func (l *lifecycle) stage(ctx context.Context, sessionName string, cfg stageConf
 		// mode keeps its bytes unchanged - that shape is the rollback.
 		codexHome := codexHomeOwned(secretsDir, secretEnv)
 		envInput := remoteContextEnvScriptInput(secretEnv)
+		// An image-mode box owns its own filesystem. PATH, HOME, TMPDIR, the XDG
+		// dirs and anything else naming this host are sourced by the pane before
+		// its command, so they hid the image's toolchain and the pane died with
+		// its tmux server (cr-jr2kw7). secretsDir is only resolved in the image
+		// shape, so it is that shape's discriminator here too; the legacy shape
+		// still reaches buildEnvScript with its bytes unchanged.
+		if secretsDir != "" {
+			envInput = boxFilesystemEnvInput(envInput)
+		}
 		if codexHome {
 			envInput = codexHomeEnvScriptInput(envInput)
 		}
