@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -59,6 +60,7 @@ type client struct {
 	namespace string
 	http      *http.Client
 	nomad     *nomadapi.Client
+	tls       *tls.Config
 }
 
 func newClient(addr, token, namespace string) (*client, error) {
@@ -76,20 +78,42 @@ func newClient(addr, token, namespace string) (*client, error) {
 	if namespace == "" {
 		namespace = "default"
 	}
-	transport := http.DefaultTransport
-	if base, ok := http.DefaultTransport.(*http.Transport); ok {
-		transport = base.Clone()
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return nil, fmt.Errorf("default HTTP transport is %T, want *http.Transport", http.DefaultTransport)
 	}
-	nomadClient, err := nomadapi.NewClient(func() *nomadapi.Config {
-		config := nomadapi.DefaultConfig()
-		config.Address = parsed.String()
-		config.SecretID = token
-		config.Namespace = namespace
-		config.HttpClient = &http.Client{
-			Transport: &nomadWriteMetaCompatTransport{base: transport},
+	transport := base.Clone()
+	if transport.TLSClientConfig == nil {
+		transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	} else {
+		transport.TLSClientConfig = transport.TLSClientConfig.Clone()
+		if transport.TLSClientConfig.MinVersion == 0 {
+			transport.TLSClientConfig.MinVersion = tls.VersionTLS12
 		}
-		return config
-	}())
+	}
+	config := nomadapi.DefaultConfig()
+	if config.TLSConfig == nil {
+		config.TLSConfig = &nomadapi.TLSConfig{}
+	}
+	applyGCNomadTLSConfig(config.TLSConfig)
+	baseHTTPClient := &http.Client{Transport: transport}
+	if err := nomadapi.ConfigureTLS(baseHTTPClient, config.TLSConfig); err != nil {
+		return nil, fmt.Errorf("configuring nomad TLS: %w", err)
+	}
+	tlsConfig := transport.TLSClientConfig.Clone()
+	httpClient := &http.Client{
+		Timeout:   defaultTimeout,
+		Transport: &nomadWriteMetaCompatTransport{base: transport},
+	}
+	sdkHTTPClient := &http.Client{
+		Timeout:   defaultTimeout,
+		Transport: &nomadWriteMetaCompatTransport{base: transport},
+	}
+	config.Address = parsed.String()
+	config.SecretID = token
+	config.Namespace = namespace
+	config.HttpClient = sdkHTTPClient
+	nomadClient, err := nomadapi.NewClient(config)
 	if err != nil {
 		return nil, fmt.Errorf("creating nomad API client: %w", err)
 	}
@@ -97,9 +121,31 @@ func newClient(addr, token, namespace string) (*client, error) {
 		addr:      parsed,
 		token:     token,
 		namespace: namespace,
-		http:      &http.Client{Timeout: defaultTimeout},
+		http:      httpClient,
 		nomad:     nomadClient,
+		tls:       tlsConfig,
 	}, nil
+}
+
+// applyGCNomadTLSConfig adds the pack-prefixed aliases without changing the
+// Nomad SDK's own environment contract. GC_NOMAD_* wins when both forms are
+// present, which lets a supervisor pin the runtime's cluster credentials while
+// leaving unrelated NOMAD_* settings in the parent environment untouched.
+func applyGCNomadTLSConfig(config *nomadapi.TLSConfig) {
+	config.CACert = envAlias("GC_NOMAD_CACERT", "NOMAD_CACERT", config.CACert)
+	config.ClientCert = envAlias("GC_NOMAD_CLIENT_CERT", "NOMAD_CLIENT_CERT", config.ClientCert)
+	config.ClientKey = envAlias("GC_NOMAD_CLIENT_KEY", "NOMAD_CLIENT_KEY", config.ClientKey)
+	config.TLSServerName = envAlias("GC_NOMAD_TLS_SERVER_NAME", "NOMAD_TLS_SERVER_NAME", config.TLSServerName)
+}
+
+func envAlias(primary, fallback, current string) string {
+	if value := os.Getenv(primary); value != "" {
+		return value
+	}
+	if value := os.Getenv(fallback); value != "" {
+		return value
+	}
+	return current
 }
 
 // nomadWriteMetaCompatTransport keeps the unmodified fakenomad test double
@@ -611,7 +657,7 @@ func (c *client) dialExecWS(ctx context.Context, allocID, task string, command [
 	var d net.Dialer
 	var conn net.Conn
 	if c.addr.Scheme == "https" {
-		conn, err = (&tls.Dialer{NetDialer: &d}).DialContext(ctx, "tcp", host)
+		conn, err = (&tls.Dialer{NetDialer: &d, Config: c.tls}).DialContext(ctx, "tcp", host)
 	} else {
 		conn, err = d.DialContext(ctx, "tcp", host)
 	}

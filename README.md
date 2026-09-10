@@ -179,6 +179,10 @@ Provider-agnostic: what any deployment of this pack needs.
    | `GC_NOMAD_ADDR` | yes | Absolute Nomad API base URL |
    | `GC_NOMAD_SIDECAR_DIR` | yes | Session→child-job-ID bindings + launched markers |
    | `GC_NOMAD_TOKEN` | no | ACL token (`X-Nomad-Token`); the narrowed runtime token in normal use |
+   | `GC_NOMAD_CACERT` | no | CA certificate path for direct Nomad TLS; overrides `NOMAD_CACERT` when both are set |
+   | `GC_NOMAD_CLIENT_CERT` | no | Client certificate path for direct Nomad mTLS; overrides `NOMAD_CLIENT_CERT` when both are set |
+   | `GC_NOMAD_CLIENT_KEY` | no | Client private-key path for direct Nomad mTLS; overrides `NOMAD_CLIENT_KEY` when both are set |
+   | `GC_NOMAD_TLS_SERVER_NAME` | no | TLS server name/SNI for direct Nomad TLS; overrides `NOMAD_TLS_SERVER_NAME` when both are set |
    | `GC_NOMAD_NAMESPACE` | no | Nomad namespace (default `default`) |
    | `GC_NOMAD_PARENT_JOB` | no | Parameterized parent job ID (default `gc-sessions`) |
    | `GC_NOMAD_NODE_POOL` | no | Parent job's node pool (empty = Nomad's own default pool) |
@@ -196,6 +200,12 @@ Provider-agnostic: what any deployment of this pack needs.
    | `GC_NOMAD_LOG_SINK_TOKEN_FILE` | no | In-box path the shipper reads its bearer token from |
    | `GC_NOMAD_LOG_LABELS` | no | `k=v,k=v` labels merged onto the fixed `session_name`/`alloc_id`/`node`/`runtime=nomad` set |
    | `GC_NOMAD_LOG_SHIPPER_ARTIFACT` | no | URL or local path for the pinned Vector archive; unset uses the upstream release URL |
+
+   The runtime also honors Nomad's standard `NOMAD_CACERT`,
+   `NOMAD_CLIENT_CERT`, `NOMAD_CLIENT_KEY`, and `NOMAD_TLS_SERVER_NAME`
+   variables. The `GC_NOMAD_*` aliases take precedence per variable when both
+   forms are present. Values are paths only: certificate and key contents stay
+   in deployment custody and never enter a jobspec, argv, log, or receipt.
 
    Image *content* is not this pack's contract. `gc build-image` can produce such
    an image, but at the pinned gc its own contract is K8s-shaped

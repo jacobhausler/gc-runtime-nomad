@@ -1,3 +1,10 @@
+# v1.0.6
+
+- Nomad transport now honors the standard `NOMAD_CACERT`,
+  `NOMAD_CLIENT_CERT`, `NOMAD_CLIENT_KEY`, and `NOMAD_TLS_SERVER_NAME`
+  environment variables plus `GC_NOMAD_*` aliases, including alloc-exec
+  WebSockets. This allows direct mTLS to Nomad without the local API bridge.
+
 # v1.0.5
 
 Nine gate-0 remediation atoms from epic `cr-u7b0s` (D3/D4 Nomad dogfood

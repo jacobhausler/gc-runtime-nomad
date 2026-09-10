@@ -34,6 +34,10 @@
 //
 //	GC_NOMAD_ADDR         required for lifecycle ops: absolute base URL of the Nomad API (e.g. http://127.0.0.1:4646)
 //	GC_NOMAD_TOKEN        optional: ACL token sent as X-Nomad-Token
+//	GC_NOMAD_CACERT       optional: CA certificate path for the Nomad API; alias of NOMAD_CACERT
+//	GC_NOMAD_CLIENT_CERT  optional: client certificate path for Nomad mTLS; alias of NOMAD_CLIENT_CERT
+//	GC_NOMAD_CLIENT_KEY   optional: client private-key path for Nomad mTLS; alias of NOMAD_CLIENT_KEY
+//	GC_NOMAD_TLS_SERVER_NAME optional: TLS server name/SNI; alias of NOMAD_TLS_SERVER_NAME
 //	GC_NOMAD_NAMESPACE    optional: Nomad namespace (default "default")
 //	GC_NOMAD_NODE_POOL    optional: Nomad node pool for the parent job (default "" — Nomad's own "default" pool)
 //	GC_NOMAD_PARENT_JOB   optional: the city's parameterized parent job ID (default "gc-sessions")
