@@ -17,7 +17,7 @@ import (
 // Leader flag — so every existing deployment's jobspec (and its
 // jobspecHash-based drift detection, fnrt-t4l.9) is unaffected.
 func TestParentJobSpecLogShipperDisabledByDefault(t *testing.T) {
-	spec := parentJobSpec("default", "", "gc-sessions", logShipperConfig{})
+	spec := parentJobSpec("default", "", "gc-sessions", logShipperConfig{}, testAgentImage, placementConfig{})
 
 	group := spec.TaskGroups[0]
 	if len(group.Tasks) != 1 {
@@ -38,7 +38,7 @@ func TestParentJobSpecLogShipperDisabledByDefault(t *testing.T) {
 // by the deployment bootstrap. Nomad's unset default is only 1 MiB; Codex
 // creates its state database there before it can begin a session.
 func TestSessionTaskReservesSecretsSpace(t *testing.T) {
-	spec := parentJobSpec("default", "", "gc-sessions", logShipperConfig{})
+	spec := parentJobSpec("default", "", "gc-sessions", logShipperConfig{}, testAgentImage, placementConfig{})
 	got := spec.TaskGroups[0].Tasks[0].Resources.SecretsMB
 	if got != sessionSecretsMB {
 		t.Fatalf("agent SecretsMB = %d, want %d", got, sessionSecretsMB)
@@ -48,72 +48,9 @@ func TestSessionTaskReservesSecretsSpace(t *testing.T) {
 	}
 }
 
-// TestParentJobSpecMountsGCArtifactsReadOnly is the allocation contract for
-// the shared Linux gc artifact: when configured, the agent must see the
-// requested Nomad client host volume at /mnt/nomad, and neither the group
-// declaration nor the task mount may permit writes.
-func TestParentJobSpecMountsGCArtifactsReadOnly(t *testing.T) {
-	const volumeSource = "test-nomad-shared"
-	spec := parentJobSpecWithArtifactVolume("default", "", "gc-sessions", logShipperConfig{}, volumeSource, placementConfig{})
-	data, err := json.Marshal(spec.TaskGroups[0])
-	if err != nil {
-		t.Fatalf("marshal task group: %v", err)
-	}
-
-	var group map[string]any
-	if err := json.Unmarshal(data, &group); err != nil {
-		t.Fatalf("decode task group: %v", err)
-	}
-	volumes, ok := group["Volumes"].(map[string]any)
-	if !ok {
-		t.Fatalf("Volumes = %#v, want gc-artifacts host volume", group["Volumes"])
-	}
-	volume, ok := volumes["gc-artifacts"].(map[string]any)
-	if !ok {
-		t.Fatalf("Volumes[gc-artifacts] = %#v, want host volume", volumes["gc-artifacts"])
-	}
-	if volume["Type"] != "host" || volume["Source"] != volumeSource || volume["ReadOnly"] != true {
-		t.Fatalf("gc-artifacts volume = %#v, want Type=host Source=%s ReadOnly=true", volume, volumeSource)
-	}
-
-	tasks, ok := group["Tasks"].([]any)
-	if !ok || len(tasks) == 0 {
-		t.Fatalf("Tasks = %#v, want agent task", group["Tasks"])
-	}
-	agent, ok := tasks[0].(map[string]any)
-	if !ok {
-		t.Fatalf("Tasks[0] = %#v, want object", tasks[0])
-	}
-	mounts, ok := agent["VolumeMounts"].([]any)
-	if !ok || len(mounts) != 1 {
-		t.Fatalf("agent VolumeMounts = %#v, want one mount", agent["VolumeMounts"])
-	}
-	mount, ok := mounts[0].(map[string]any)
-	if !ok {
-		t.Fatalf("agent VolumeMounts[0] = %#v, want object", mounts[0])
-	}
-	if mount["Volume"] != "gc-artifacts" || mount["Destination"] != "/mnt/nomad" || mount["ReadOnly"] != true {
-		t.Fatalf("agent volume mount = %#v, want gc-artifacts at /mnt/nomad ReadOnly=true", mount)
-	}
-}
-
-// TestParentJobSpecOmitsGCArtifactsWhenVolumeUnset protects the backward-
-// compatible optional-volume contract: an unset source must produce neither a
-// group host-volume declaration nor an agent mount.
-func TestParentJobSpecOmitsGCArtifactsWhenVolumeUnset(t *testing.T) {
-	spec := parentJobSpec("default", "", "gc-sessions", logShipperConfig{})
-	group := spec.TaskGroups[0]
-	if len(group.Volumes) != 0 {
-		t.Fatalf("group Volumes = %#v, want no host-volume declaration when source is unset", group.Volumes)
-	}
-	if got := group.Tasks[0].VolumeMounts; len(got) != 0 {
-		t.Fatalf("agent VolumeMounts = %#v, want no mount when source is unset", got)
-	}
-}
-
 func TestParentJobSpecUsesConfiguredDockerAgentImage(t *testing.T) {
 	const image = "registry.example/gc-agent:2026-09-08"
-	spec := parentJobSpecWithAgentImage("gc", "lab-session", "gc-sessions", logShipperConfig{}, image, placementConfig{})
+	spec := parentJobSpec("gc", "lab-session", "gc-sessions", logShipperConfig{}, image, placementConfig{})
 
 	agent := spec.TaskGroups[0].Tasks[0]
 	if agent.Driver != "docker" {
@@ -122,14 +59,11 @@ func TestParentJobSpecUsesConfiguredDockerAgentImage(t *testing.T) {
 	if got := agent.Config["image"]; got != image {
 		t.Fatalf("agent Config[image] = %#v, want %q", got, image)
 	}
-	if len(spec.TaskGroups[0].Volumes) != 0 || len(agent.VolumeMounts) != 0 {
-		t.Fatalf("Docker agent retains host-volume delivery: volumes=%#v mounts=%#v", spec.TaskGroups[0].Volumes, agent.VolumeMounts)
-	}
 }
 
 func TestParentJobSpecDockerImagePreservesNomadControls(t *testing.T) {
 	constraint := nomadConstraint{LTarget: "${node.unique.name}", RTarget: "nomad-a", Operand: "="}
-	spec := parentJobSpecWithAgentImage("gc", "lab-session", "gc-sessions", logShipperConfig{}, "gc-agent:test", placementConfig{
+	spec := parentJobSpec("gc", "lab-session", "gc-sessions", logShipperConfig{}, "gc-agent:test", placementConfig{
 		dnsServers:      []string{"192.168.0.202"},
 		nodeConstraints: []nomadConstraint{constraint},
 	})
@@ -157,7 +91,7 @@ func TestParentJobSpecDockerImagePreservesNomadControls(t *testing.T) {
 }
 
 func TestParentJobSpecDockerImageKeepsOptionalLogShipper(t *testing.T) {
-	spec := parentJobSpecWithAgentImage("gc", "lab-session", "gc-sessions", logShipperConfig{Sink: "https://logs.example/ingest"}, "gc-agent:test", placementConfig{})
+	spec := parentJobSpec("gc", "lab-session", "gc-sessions", logShipperConfig{Sink: "https://logs.example/ingest"}, "gc-agent:test", placementConfig{})
 	group := spec.TaskGroups[0]
 	if len(group.Tasks) != 2 || group.Tasks[0].Name != "agent" || group.Tasks[1].Name != logShipperTaskName {
 		t.Fatalf("Docker tasks = %+v, want agent plus optional log shipper", group.Tasks)
@@ -170,19 +104,17 @@ func TestParentJobSpecDockerImageKeepsOptionalLogShipper(t *testing.T) {
 	}
 }
 
+// TestJobspecHashChangesWhenAgentImageToggled is the drift guard for the one
+// session shape there is: pointing the pack at a different agent image must
+// land a different jobspec hash, so ensureParentRegistered sees the
+// already-registered parent as stale instead of letting boxes keep launching
+// from the old task (cr-3vvnb5.2 retires the no-image variant this row once
+// compared against).
 func TestJobspecHashChangesWhenAgentImageToggled(t *testing.T) {
-	off := parentJobSpec("default", "", "gc-sessions", logShipperConfig{})
-	on := parentJobSpecWithAgentImage("default", "", "gc-sessions", logShipperConfig{}, "gc-agent:test", placementConfig{})
+	off := parentJobSpec("default", "", "gc-sessions", logShipperConfig{}, testAgentImage, placementConfig{})
+	on := parentJobSpec("default", "", "gc-sessions", logShipperConfig{}, "gc-agent:other", placementConfig{})
 	if off.Meta[jobspecHashMetaKey] == on.Meta[jobspecHashMetaKey] {
-		t.Fatalf("jobspec hash unchanged after enabling the Docker agent image")
-	}
-}
-
-func TestJobspecHashChangesWhenArtifactVolumeToggled(t *testing.T) {
-	off := parentJobSpec("default", "", "gc-sessions", logShipperConfig{})
-	on := parentJobSpecWithArtifactVolume("default", "", "gc-sessions", logShipperConfig{}, "test-nomad-shared", placementConfig{})
-	if off.Meta[jobspecHashMetaKey] == on.Meta[jobspecHashMetaKey] {
-		t.Fatalf("jobspec hash unchanged after enabling the artifact volume")
+		t.Fatalf("jobspec hash unchanged after changing the Docker agent image")
 	}
 }
 
@@ -199,7 +131,7 @@ func TestParentJobSpecAddsLogShipperTask(t *testing.T) {
 		TokenFile: "/etc/gc/log-sink-token",
 		Labels:    "env=lab,team=nrt",
 	}
-	spec := parentJobSpec("default", "", "gc-sessions", cfg)
+	spec := parentJobSpec("default", "", "gc-sessions", cfg, testAgentImage, placementConfig{})
 	group := spec.TaskGroups[0]
 
 	if len(group.Tasks) != 2 {
@@ -623,7 +555,7 @@ func TestParentJobSpecUsesConfiguredLogShipperArtifact(t *testing.T) {
 	spec := parentJobSpec("default", "", "gc-sessions", logShipperConfig{
 		Sink:     "http://127.0.0.1:18081/ingest",
 		Artifact: artifact,
-	})
+	}, testAgentImage, placementConfig{})
 
 	got := spec.TaskGroups[0].Tasks[1].Artifacts[0].GetterSource
 	if got != artifact {
@@ -634,7 +566,7 @@ func TestParentJobSpecUsesConfiguredLogShipperArtifact(t *testing.T) {
 func TestParentJobSpecMarksLogShipperAsNonFatalSidecar(t *testing.T) {
 	spec := parentJobSpec("default", "", "gc-sessions", logShipperConfig{
 		Sink: "http://127.0.0.1:18081/ingest",
-	})
+	}, testAgentImage, placementConfig{})
 
 	wire, err := json.Marshal(spec.TaskGroups[0].Tasks[1])
 	if err != nil {
@@ -671,8 +603,8 @@ func TestVectorConfigOmitsAuthBlockWithoutTokenFile(t *testing.T) {
 // otherwise a deployment that turns the feature on would never see its
 // parent job actually get the log-shipper task added.
 func TestJobspecHashChangesWhenLogShipperToggled(t *testing.T) {
-	off := parentJobSpec("default", "", "gc-sessions", logShipperConfig{})
-	on := parentJobSpec("default", "", "gc-sessions", logShipperConfig{Sink: "https://logs.example.internal/ingest"})
+	off := parentJobSpec("default", "", "gc-sessions", logShipperConfig{}, testAgentImage, placementConfig{})
+	on := parentJobSpec("default", "", "gc-sessions", logShipperConfig{Sink: "https://logs.example.internal/ingest"}, testAgentImage, placementConfig{})
 
 	if off.Meta[jobspecHashMetaKey] == on.Meta[jobspecHashMetaKey] {
 		t.Fatalf("jobspec hash unchanged after enabling the log-shipper task")
@@ -685,7 +617,7 @@ func TestJobspecHashChangesWhenLogShipperToggled(t *testing.T) {
 // field") now that the log-shipper task adds several new field types.
 func TestParentJobSpecIsJSONMarshalable(t *testing.T) {
 	cfg := logShipperConfig{Sink: "https://logs.example.internal/ingest", TokenFile: "/etc/tok", Labels: "a=b"}
-	spec := parentJobSpec("default", "", "gc-sessions", cfg)
+	spec := parentJobSpec("default", "", "gc-sessions", cfg, testAgentImage, placementConfig{})
 	if _, err := json.Marshal(spec); err != nil {
 		t.Fatalf("marshal parent job spec with log-shipper enabled: %v", err)
 	}
@@ -853,7 +785,7 @@ func TestVectorSessionCaptureSources(t *testing.T) {
 // ment's jobspecHash (and therefore ensureParentRegistered's drift decision) is
 // unchanged by this pack's upgrade.
 func TestParentJobSpecDeclaresNoDNSByDefault(t *testing.T) {
-	spec := parentJobSpecWithArtifactVolume("default", "", "gc-sessions", logShipperConfig{}, "", placementConfig{})
+	spec := parentJobSpec("default", "", "gc-sessions", logShipperConfig{}, testAgentImage, placementConfig{})
 	data, err := json.Marshal(spec.TaskGroups[0].Networks)
 	if err != nil {
 		t.Fatalf("marshal networks: %v", err)
@@ -861,7 +793,7 @@ func TestParentJobSpecDeclaresNoDNSByDefault(t *testing.T) {
 	if strings.Contains(string(data), `"DNS"`) {
 		t.Fatalf("networks = %s, want no DNS stanza with no DNS servers configured", data)
 	}
-	baseline := parentJobSpec("default", "", "gc-sessions", logShipperConfig{})
+	baseline := parentJobSpec("default", "", "gc-sessions", logShipperConfig{}, testAgentImage, placementConfig{})
 	if baseline.Meta[jobspecHashMetaKey] != spec.Meta[jobspecHashMetaKey] {
 		t.Fatalf("jobspec hash changed for a deployment that configured no placement")
 	}
@@ -874,7 +806,7 @@ func TestParentJobSpecDeclaresNoDNSByDefault(t *testing.T) {
 // fakenomad ignores that stanza, so the assertion is on the marshalled shape.
 func TestParentJobSpecCarriesDeploymentDNS(t *testing.T) {
 	dep := placementConfig{dnsServers: []string{"192.168.0.202", "1.1.1.1"}}
-	spec := parentJobSpecWithArtifactVolume("default", "", "gc-sessions", logShipperConfig{}, "", dep)
+	spec := parentJobSpec("default", "", "gc-sessions", logShipperConfig{}, testAgentImage, dep)
 
 	nets := spec.TaskGroups[0].Networks
 	if len(nets) != 1 || nets[0].Mode != "bridge" {
@@ -901,7 +833,7 @@ func TestParentJobSpecAppendsNodeConstraintsAfterKernelFatalRule(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseNodeConstraints: %v", err)
 	}
-	spec := parentJobSpecWithArtifactVolume("default", "", "gc-sessions", logShipperConfig{}, "", placementConfig{nodeConstraints: constraint})
+	spec := parentJobSpec("default", "", "gc-sessions", logShipperConfig{}, testAgentImage, placementConfig{nodeConstraints: constraint})
 
 	if len(spec.Constraints) != 2 {
 		t.Fatalf("constraints = %+v, want the kernel rule plus the deployment fence", spec.Constraints)
@@ -922,14 +854,14 @@ func TestParentJobSpecAppendsNodeConstraintsAfterKernelFatalRule(t *testing.T) {
 // which is the whole point of cr-tzsxk.18 (an out-of-band re-registration is
 // not needed once the runtime's own register carries the placement).
 func TestJobspecHashChangesWhenPlacementConfigured(t *testing.T) {
-	off := parentJobSpecWithArtifactVolume("default", "", "gc-sessions", logShipperConfig{}, "", placementConfig{})
+	off := parentJobSpec("default", "", "gc-sessions", logShipperConfig{}, testAgentImage, placementConfig{})
 
-	dns := parentJobSpecWithArtifactVolume("default", "", "gc-sessions", logShipperConfig{}, "", placementConfig{dnsServers: []string{"192.168.0.202"}})
+	dns := parentJobSpec("default", "", "gc-sessions", logShipperConfig{}, testAgentImage, placementConfig{dnsServers: []string{"192.168.0.202"}})
 	if off.Meta[jobspecHashMetaKey] == dns.Meta[jobspecHashMetaKey] {
 		t.Fatalf("jobspec hash unchanged after configuring DNS servers")
 	}
 
-	fence := parentJobSpecWithArtifactVolume("default", "", "gc-sessions", logShipperConfig{}, "", placementConfig{nodeConstraints: []nomadConstraint{
+	fence := parentJobSpec("default", "", "gc-sessions", logShipperConfig{}, testAgentImage, placementConfig{nodeConstraints: []nomadConstraint{
 		{LTarget: "${node.unique.name}", RTarget: "prod-nomad", Operand: "!="},
 	}})
 	if off.Meta[jobspecHashMetaKey] == fence.Meta[jobspecHashMetaKey] {

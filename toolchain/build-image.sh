@@ -327,7 +327,7 @@ case "$cmd" in
     fi
     rm -rf "$ctx"
     echo "next:  export GC_NOMAD_AGENT_IMAGE=${agent}    # the ONE image input the pack reads (cr-u7b0s.41)"
-    echo "back:  export GC_NOMAD_AGENT_IMAGE=${rollback} # or unset it -> legacy exec + read-only artifact volume"
+    echo "back:  export GC_NOMAD_AGENT_IMAGE=${rollback} # unsetting it fails every op closed - the image is the only session shape (cr-3vvnb5.2)"
     ;;
 
   city-image) # gc's native composition step, on top of the toolchain base

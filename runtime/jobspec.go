@@ -76,28 +76,15 @@ const (
 // registered parent/dispatch job lands in the default pool and never places
 // on a lab cluster's named pool (e.g. lab-session) — so a deployment that
 // needs non-default placement must set GC_NOMAD_NODE_POOL.
-func parentJobSpec(namespace, nodePool, parentID string, logShipper logShipperConfig) nomadJob {
-	return parentJobSpecWithArtifactVolume(namespace, nodePool, parentID, logShipper, "", placementConfig{})
-}
-
-// parentJobSpecWithAgentImage is the Docker-shaped parent job. The configured
-// image carries the agent toolchain, so the optional host-volume delivery path
-// is deliberately not part of this shape. Placement, lifecycle, attribution,
-// and the optional log shipper remain the same Nomad-native fields as the
-// legacy exec shape.
-func parentJobSpecWithAgentImage(namespace, nodePool, parentID string, logShipper logShipperConfig, agentImage string, dep placementConfig) nomadJob {
-	return parentJobSpecWithConfig(namespace, nodePool, parentID, logShipper, "", agentImage, dep)
-}
-
-// parentJobSpecWithArtifactVolume is the deployment-configured variant of
-// parentJobSpec. An empty artifactVolumeSource deliberately produces no
-// volume declaration or task mount, preserving compatibility for deployments
-// that provide their toolchain through another mechanism.
-func parentJobSpecWithArtifactVolume(namespace, nodePool, parentID string, logShipper logShipperConfig, artifactVolumeSource string, dep placementConfig) nomadJob {
-	return parentJobSpecWithConfig(namespace, nodePool, parentID, logShipper, artifactVolumeSource, "", dep)
-}
-
-func parentJobSpecWithConfig(namespace, nodePool, parentID string, logShipper logShipperConfig, artifactVolumeSource, agentImage string, dep placementConfig) nomadJob {
+//
+// agentImage names the prebaked Docker image that owns the agent toolchain,
+// and it is REQUIRED: the Docker task is the only session task shape
+// (cr-3vvnb5.2 deletes the legacy exec task, and with it the
+// GC_NOMAD_ARTIFACT_VOLUME host volume that used to deliver a Linux gc
+// binary to it). With no second shape left to fall back to, newLifecycle
+// refuses to build a lifecycle at all without an image rather than
+// register a parent whose boxes can never run an agent.
+func parentJobSpec(namespace, nodePool, parentID string, logShipper logShipperConfig, agentImage string, dep placementConfig) nomadJob {
 	job := nomadJob{
 		ID:        parentID,
 		Namespace: namespace,
@@ -123,7 +110,7 @@ func parentJobSpecWithConfig(namespace, nodePool, parentID string, logShipper lo
 			MetaOptional: []string{"gc_session", "gc_nonce"},
 			Payload:      "forbidden",
 		},
-		TaskGroups: []nomadTaskGroup{sessionTaskGroup(logShipper, artifactVolumeSource, agentImage, dep)},
+		TaskGroups: []nomadTaskGroup{sessionTaskGroup(logShipper, agentImage, dep)},
 	}
 	// Stamp the jobspec's own fingerprint into its Meta (fnrt-t4l.9): a
 	// registered parent that still exists and still matches on NodePool can
@@ -227,8 +214,8 @@ var nomadConstraintOperands = map[string]bool{
 	"in": true, "not": true, "is": true, "bitset": true,
 }
 
-func sessionTaskGroup(logShipper logShipperConfig, artifactVolumeSource, agentImage string, dep placementConfig) nomadTaskGroup {
-	agent := sessionTask(artifactVolumeSource, agentImage)
+func sessionTaskGroup(logShipper logShipperConfig, agentImage string, dep placementConfig) nomadTaskGroup {
+	agent := sessionTask(agentImage)
 	tasks := []nomadTask{agent}
 	// bridge networking so the host-network fatal-rule constraint above
 	// has a placement to fail closed against (04 §4, R2a-05).
@@ -279,59 +266,22 @@ func sessionTaskGroup(logShipper logShipperConfig, artifactVolumeSource, agentIm
 		Networks: networks,
 		Tasks:    tasks,
 	}
-	if artifactVolumeSource != "" {
-		// The pinned Linux gc artifact is an optional deployment input. Keep
-		// both the group declaration and task mount read-only; an unset
-		// source must not invent a client host-volume name.
-		group.Volumes = map[string]nomadVolume{
-			gcArtifactVolumeName: {
-				Type:     "host",
-				Source:   artifactVolumeSource,
-				ReadOnly: true,
-			},
-		}
-	}
 	return group
 }
 
-// sessionSupervisorScript is the session task's own long-lived command (04
-// §3 provision row + NRT-P2-06.1): a trap-and-loop that does nothing but
-// stay alive until it is signaled, so the task — and therefore the alloc —
-// stays running for the box's whole lifetime instead of exiting the instant
-// Config.command returns. The placeholder this replaces (`/bin/true`)
-// exited immediately on a real client, driving the alloc terminal before
-// launch's alloc-exec call could ever reach it
-// (ops/receipts/nrt-p2-06-1-density.md). It deliberately never touches tmux
-// itself: buildLaunchCommand (ops.go) is what creates the tmuxSessionName
-// session over alloc-exec, and a supervisor that pre-created that same
-// session would collide with it ("duplicate session"). `wait "$!"` on a
-// backgrounded sleep (rather than a foreground `sleep`) is what lets the
-// TERM trap fire immediately instead of only between sleep ticks, so stop
-// exits this loop with code 0 promptly — well inside kill_timeout — rather
-// than needing Nomad's SIGKILL fallback once kill_timeout elapses.
-const sessionSupervisorScript = `trap 'exit 0' TERM; while :; do sleep 5 & wait "$!"; done`
-
-func sessionTask(artifactVolumeSource, agentImage string) nomadTask {
-	driver := "exec"
-	config := map[string]any{
-		"command": "/bin/sh",
-		"args":    []string{"-c", sessionSupervisorScript},
-	}
-	if agentImage != "" {
-		// The image owns the agent toolchain. Keep the task alive with a
-		// signal-aware native sleep process; GC's rendered command and
-		// runtime environment still arrive later through alloc-exec/staging.
-		driver = "docker"
-		config = map[string]any{
+func sessionTask(agentImage string) nomadTask {
+	// The image owns the agent toolchain. Keep the task alive with a
+	// signal-aware native sleep process; GC's rendered command and runtime
+	// environment still arrive later through alloc-exec/staging. This Docker
+	// task is the only session shape there is (cr-3vvnb5.2).
+	task := nomadTask{
+		Name:   "agent",
+		Driver: "docker",
+		Config: map[string]any{
 			"image":   agentImage,
 			"command": "/bin/sleep",
 			"args":    []string{"infinity"},
-		}
-	}
-	task := nomadTask{
-		Name:   "agent",
-		Driver: driver,
-		Config: config,
+		},
 		Resources: nomadResources{
 			CPU:       sessionCPU,
 			MemoryMB:  sessionMemoryMB,
@@ -343,20 +293,8 @@ func sessionTask(artifactVolumeSource, agentImage string) nomadTask {
 		// keeps it that way as a named control (04 §4, R2a-05) — so nothing
 		// is declared here.
 	}
-	if agentImage == "" && artifactVolumeSource != "" {
-		task.VolumeMounts = []nomadVolumeMount{{
-			Volume:      gcArtifactVolumeName,
-			Destination: gcArtifactMountPath,
-			ReadOnly:    true,
-		}}
-	}
 	return task
 }
-
-const (
-	gcArtifactVolumeName = "gc-artifacts"
-	gcArtifactMountPath  = "/mnt/nomad"
-)
 
 // --- log-shipper task (fnrt-t4l.13) ---
 
@@ -664,24 +602,13 @@ type nomadParameterizedJob struct {
 }
 
 type nomadTaskGroup struct {
-	Name             string                 `json:"Name"`
-	Count            int                    `json:"Count"`
-	RestartPolicy    nomadRestartPolicy     `json:"RestartPolicy"`
-	ReschedulePolicy nomadReschedulePolicy  `json:"ReschedulePolicy"`
-	Disconnect       *nomadDisconnect       `json:"Disconnect,omitempty"`
-	Networks         []nomadNetwork         `json:"Networks,omitempty"`
-	Volumes          map[string]nomadVolume `json:"Volumes,omitempty"`
-	Tasks            []nomadTask            `json:"Tasks"`
-}
-
-// nomadVolume is the group-level host volume declaration used by the agent
-// to access the shared artifact store. ReadOnly is explicit in both the
-// declaration and the task mount so a future caller cannot accidentally
-// widen the allocation's access.
-type nomadVolume struct {
-	Type     string `json:"Type"`
-	Source   string `json:"Source"`
-	ReadOnly bool   `json:"ReadOnly"`
+	Name             string                `json:"Name"`
+	Count            int                   `json:"Count"`
+	RestartPolicy    nomadRestartPolicy    `json:"RestartPolicy"`
+	ReschedulePolicy nomadReschedulePolicy `json:"ReschedulePolicy"`
+	Disconnect       *nomadDisconnect      `json:"Disconnect,omitempty"`
+	Networks         []nomadNetwork        `json:"Networks,omitempty"`
+	Tasks            []nomadTask           `json:"Tasks"`
 }
 
 type nomadRestartPolicy struct {
@@ -731,9 +658,8 @@ type nomadDNS struct {
 }
 
 type nomadTask struct {
-	Name         string             `json:"Name"`
-	Driver       string             `json:"Driver"`
-	VolumeMounts []nomadVolumeMount `json:"VolumeMounts,omitempty"`
+	Name   string `json:"Name"`
+	Driver string `json:"Driver"`
 	// Leader, when true, makes Nomad stop every OTHER task in the group
 	// only after this task exits (fnrt-t4l.13's "kill_timeout ordering" —
 	// see sessionTaskGroup). Only ever set on the agent task, and only
@@ -746,14 +672,6 @@ type nomadTask struct {
 	Templates   []nomadTemplate     `json:"Templates,omitempty"`
 	Resources   nomadResources      `json:"Resources"`
 	KillTimeout int64               `json:"KillTimeout,omitempty"`
-}
-
-// nomadVolumeMount binds one group volume into a task's allocation
-// filesystem. The agent sees the shared artifact store at /mnt/nomad.
-type nomadVolumeMount struct {
-	Volume      string `json:"Volume"`
-	Destination string `json:"Destination"`
-	ReadOnly    bool   `json:"ReadOnly"`
 }
 
 // nomadTaskLifecycle is the task lifecycle subset needed to keep the

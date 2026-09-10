@@ -1071,7 +1071,7 @@ func TestOpStartFaultPropagates(t *testing.T) {
 
 	// The parent job must exist before the dispatch call this start makes,
 	// so fault-inject the dispatch endpoint specifically.
-	if err := l.client.registerJob(ctx, parentJobSpec("default", l.nodePool, l.parentJobID, logShipperConfig{})); err != nil {
+	if err := l.client.registerJob(ctx, parentJobSpec("default", l.nodePool, l.parentJobID, logShipperConfig{}, l.agentImage, placementConfig{})); err != nil {
 		t.Fatalf("registerJob: %v", err)
 	}
 	srv.FailNext("POST", "/v1/job/"+l.parentJobID+"/dispatch", 500, `{"error":"injected"}`)
@@ -1109,7 +1109,7 @@ func TestOpStartSucceedsWhenParentExistsAndRegisterIsForbidden(t *testing.T) {
 	const session = "sess-dispatch-only-token"
 
 	// Simulate the one-time management-token registration step.
-	if err := l.client.registerJob(ctx, parentJobSpec("default", l.nodePool, l.parentJobID, logShipperConfig{})); err != nil {
+	if err := l.client.registerJob(ctx, parentJobSpec("default", l.nodePool, l.parentJobID, logShipperConfig{}, l.agentImage, placementConfig{})); err != nil {
 		t.Fatalf("registerJob (management token): %v", err)
 	}
 
@@ -1156,7 +1156,7 @@ func TestOpStartRegistersWhenNodePoolDrifted(t *testing.T) {
 	ctx := context.Background()
 
 	// Parent registered under the OLD (empty) node pool.
-	if err := l.client.registerJob(ctx, parentJobSpec("default", "", l.parentJobID, logShipperConfig{})); err != nil {
+	if err := l.client.registerJob(ctx, parentJobSpec("default", "", l.parentJobID, logShipperConfig{}, testAgentImage, placementConfig{})); err != nil {
 		t.Fatalf("registerJob (stale node pool): %v", err)
 	}
 
@@ -1190,7 +1190,7 @@ func TestOpStartDetectsJobspecDriftAndFailsClearlyWhenRegisterIsForbidden(t *tes
 	// Register a parent matching this build's NodePool, but with a
 	// hand-set jobspec-hash Meta standing in for a task that predates a
 	// code change — NodePool alone can never see this kind of drift.
-	stale := parentJobSpec("default", l.nodePool, l.parentJobID, logShipperConfig{})
+	stale := parentJobSpec("default", l.nodePool, l.parentJobID, logShipperConfig{}, testAgentImage, placementConfig{})
 	stale.Meta = map[string]string{jobspecHashMetaKey: "stale-hash-from-prior-build"}
 	if err := l.client.registerJob(ctx, stale); err != nil {
 		t.Fatalf("registerJob (stale jobspec): %v", err)

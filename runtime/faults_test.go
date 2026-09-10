@@ -113,7 +113,7 @@ func TestFaultTimeoutMidDispatch(t *testing.T) {
 	ctx := context.Background()
 	const session = "sess-timeout"
 
-	if err := l.client.registerJob(ctx, parentJobSpec("default", l.nodePool, l.parentJobID, logShipperConfig{})); err != nil {
+	if err := l.client.registerJob(ctx, parentJobSpec("default", l.nodePool, l.parentJobID, logShipperConfig{}, testAgentImage, placementConfig{})); err != nil {
 		t.Fatalf("registerJob: %v", err)
 	}
 	srv.DelayNext("POST", "/v1/job/"+l.parentJobID+"/dispatch", 300*time.Millisecond)
@@ -142,7 +142,7 @@ func TestFaultSlowServer(t *testing.T) {
 	ctx := context.Background()
 	const session = "sess-slow"
 
-	if err := l.client.registerJob(ctx, parentJobSpec("default", l.nodePool, l.parentJobID, logShipperConfig{})); err != nil {
+	if err := l.client.registerJob(ctx, parentJobSpec("default", l.nodePool, l.parentJobID, logShipperConfig{}, testAgentImage, placementConfig{})); err != nil {
 		t.Fatalf("registerJob: %v", err)
 	}
 	srv.DelayNext("POST", "/v1/job/"+l.parentJobID+"/dispatch", 300*time.Millisecond)
@@ -389,7 +389,7 @@ func TestFaultInBoxAgentKill(t *testing.T) {
 
 	// Kill the in-box tmux session (and with it the pid capturePanePID
 	// recorded at launch) directly over exec, without touching the alloc
-	// itself: jobspec.go's sessionSupervisorScript (the task-main process)
+	// itself: the box's task-main (/bin/sleep infinity)
 	// is untouched, so ClientStatus stays "running" — exactly the fault
 	// this row models.
 	exitCode, out, err := l.client.execAlloc(ctx, allocID, execTaskName, []string{"tmux", "kill-session", "-t", tmuxSessionName})
@@ -492,7 +492,7 @@ func TestFaultCrashPointSuite(t *testing.T) {
 		ctx := context.Background()
 		const session = "sess-crash-orphan"
 
-		if err := l.client.registerJob(ctx, parentJobSpec("default", l.nodePool, l.parentJobID, logShipperConfig{})); err != nil {
+		if err := l.client.registerJob(ctx, parentJobSpec("default", l.nodePool, l.parentJobID, logShipperConfig{}, testAgentImage, placementConfig{})); err != nil {
 			t.Fatalf("registerJob: %v", err)
 		}
 		nonce, err := newNonce()

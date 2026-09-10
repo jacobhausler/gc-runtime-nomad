@@ -112,22 +112,17 @@ type lifecycle struct {
 	// builds, same as nodePool above.
 	logShipper logShipperConfig
 
-	// artifactVolumeSource is the optional Nomad client host-volume name used
-	// to deliver the pinned Linux gc artifact. It is deployment input, never a
-	// host name hard-coded into the runtime pack; empty means no mount.
-	artifactVolumeSource string
-
-	// agentImage selects the provider-neutral Docker task shape. When empty,
-	// the legacy exec task and optional artifact volume remain the rollback
-	// path; when set, the image supplies the task toolchain and the host-volume
-	// shape is omitted.
+	// agentImage names the prebaked Docker image that owns the agent toolchain.
+	// It is required — the Docker task is the only session shape — and
+	// newLifecycle fails closed when GC_NOMAD_AGENT_IMAGE is unset,
+	// because cr-3vvnb5.2 deletes the legacy exec task it used to select.
 	agentImage string
 
 	// placement is the deployment-configured DNS servers and node constraints
 	// that ride the parent job body parentJobSpec builds (cr-tzsxk.18), read
 	// from GC_NOMAD_DNS_SERVERS / GC_NOMAD_NODE_CONSTRAINT by newLifecycle.
-	// Zero value renders the pre-cr-tzsxk.18 jobspec unchanged — same rollback
-	// shape as logShipper and artifactVolumeSource above.
+	// Zero value renders the pre-cr-tzsxk.18 jobspec unchanged — the same
+	// optional-stanza shape as logShipper above.
 	placement placementConfig
 
 	// adoptMaxAge bounds how old a live-but-unlaunched box may be before
@@ -1245,10 +1240,9 @@ func (l *lifecycle) ensureParentRegistered(ctx context.Context) error {
 }
 
 func (l *lifecycle) parentJobSpec() nomadJob {
-	if l.agentImage != "" {
-		return parentJobSpecWithAgentImage(l.client.namespace, l.nodePool, l.parentJobID, l.logShipper, l.agentImage, l.placement)
-	}
-	return parentJobSpecWithArtifactVolume(l.client.namespace, l.nodePool, l.parentJobID, l.logShipper, l.artifactVolumeSource, l.placement)
+	// One shape: the Docker task the configured image describes. There is no
+	// legacy exec variant left to choose between (cr-3vvnb5.2).
+	return parentJobSpec(l.client.namespace, l.nodePool, l.parentJobID, l.logShipper, l.agentImage, l.placement)
 }
 
 // recoverBinding reconstructs the part of a sidecar binding that Nomad's
@@ -1354,14 +1348,14 @@ func (l *lifecycle) findOrphanByNonce(ctx context.Context, sessionName, nonce st
 // alloc — the detached tmux-client call that starts the agent (04 §3 provision
 // row launch invariant).
 //
-// providerCommand is gc's rendered launch command and is consulted ONLY by the
-// docker-driver (prebaked image) shape: the image owns the agent toolchain, so
-// its pane runs what gc rendered instead of a deployment bootstrap the image
-// neither needs nor can reach — image shape deliberately declares no artifact
-// volume (jobspec.go sessionTask), so a /mnt/nomad bootstrap would name a path
-// that is not mounted. With no image configured the legacy exec shape keeps
-// buildLaunchCommand byte-for-byte, and unsetting GC_NOMAD_AGENT_IMAGE stays
-// the rollback (cr-hcgaxt, the pack half of L3/F2).
+// providerCommand is gc's rendered launch command. The Docker task is the only
+// session shape (cr-3vvnb5.2) and it owns the agent toolchain, so the pane
+// runs what gc rendered instead of a deployment bootstrap the image neither
+// needs nor can reach — the session shape declares no artifact volume
+// (jobspec.go sessionTask), so a /mnt/nomad bootstrap would name a path that
+// is not mounted. GC_NOMAD_AGENT_IMAGE is required and a run without it fails
+// closed in newLifecycle; the empty-image pane body below survives only as
+// the GC_NOMAD_AGENT_LAUNCH_SCRIPT seam cr-3vvnb5.3 deletes.
 //
 // An image-mode launch with no rendered command fails closed here rather than
 // execing a pane that starts nothing yet still gets a launched record — the
@@ -1660,8 +1654,9 @@ func (l *lifecycle) stage(ctx context.Context, sessionName string, cfg stageConf
 	// mount's path from the box before writing anything that names it:
 	// contexts.toml is literal TOML with no $NOMAD_SECRETS_DIR expansion, and a
 	// guessed /secrets would point gc's mTLS files at a directory that may not
-	// exist in a container (cr-hcgaxt). Legacy exec shape keeps the constant it
-	// has verified live, unchanged.
+	// exist in a container (cr-hcgaxt). The empty-image branch below is the
+	// GC_NOMAD_AGENT_LAUNCH_SCRIPT seam cr-3vvnb5.3 deletes: a run without an
+	// image already failed closed in newLifecycle (cr-3vvnb5.2).
 	secretsDir := ""
 	if l.agentImage != "" && len(secretEnv) > 0 {
 		resolved, err := l.boxSecretsDir(ctx, sessionName)
@@ -2103,8 +2098,8 @@ func (l *lifecycle) opStop(ctx context.Context, sessionName string) error {
 
 	// Best-effort: end the agent's tmux session before the task itself is
 	// killed below (NRT-P2-06.1). The task's own exit is independent of
-	// this — jobspec.go's sessionSupervisorScript traps SIGTERM and exits 0
-	// on its own once deregister signals it — but tmux's server process is
+	// this — the Docker task-main exits on Nomad's own stop — but tmux's server
+	// process is
 	// a detached daemon outside the task's process tree once launch starts
 	// it (buildLaunchCommand), so nothing else ever reaps it. Any failure
 	// here (alloc already terminal, transport fault) is ignored — the

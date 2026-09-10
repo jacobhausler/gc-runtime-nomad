@@ -83,7 +83,7 @@ layers:
 | Layer | Delivery contract |
 |---|---|
 | Workspace/secrets | `stageConfig.Env` is staged through the pack's tar-over-exec-stdin channel into `$NOMAD_SECRETS_DIR`, including the sourceable `env.sh` file. This is the pack's own transport, not an RPP claim: the pack declares no `env.workspace` capability, because the start wire does not materialize `work_dir` inside the alloc and gc probes every declared `env.*` code. |
-| Toolchain | With `GC_NOMAD_AGENT_IMAGE`, the configured Docker image carries the session toolchain and the agent task has no host-volume mount; without it, `gc`, Codex, tmux, `sh`, and `tar` are expected in the allocation toolchain and `GC_NOMAD_ARTIFACT_VOLUME` may mount the pinned Linux `gc` artifact read-only at `/mnt/nomad`. |
+| Toolchain | The Docker image named by the **required** `GC_NOMAD_AGENT_IMAGE` carries the session toolchain (`gc` agent, Codex, tmux, `sh`, `tar`); the agent task declares no host volume, so nothing is delivered from the client host. `GC_NOMAD_AGENT_IMAGE` unset fails every lifecycle op closed — cr-3vvnb5.2 removes the legacy `exec` task and the `GC_NOMAD_ARTIFACT_VOLUME` `/mnt/nomad` mount that used to feed it. |
 | Identity/config | The city target arrives through the secrets environment channel as **exactly one** of a complete remote context (`GC_HOME` + `GC_CITY_CONTEXT`) or `GC_CITY_URL`; both at once is the fail-closed case, not a redundancy - see Install part 1 step 8. Session identity values are added by the lifecycle. |
 
 The Cloudflare pack's bundle is the environment boundary for pack-provided
@@ -188,8 +188,7 @@ Provider-agnostic: what any deployment of this pack needs.
    | `GC_NOMAD_NODE_POOL` | no | Parent job's node pool (empty = Nomad's own default pool) |
    | `GC_NOMAD_NODE_CONSTRAINT` | no | `;`-separated Nomad-syntax constraints appended *after* the pack's linux-kernel fatal rule, e.g. `${node.unique.name} != prod-nomad` |
    | `GC_NOMAD_DNS_SERVERS` | no | Resolver addresses the session group's bridge network writes into the alloc's `/etc/resolv.conf` — see step 10 |
-   | `GC_NOMAD_ARTIFACT_VOLUME` | no | Client host-volume name mounted read-only at `/mnt/nomad` for the pinned Linux `gc` artifact |
-   | `GC_NOMAD_AGENT_IMAGE` | no | Docker image carrying the session agent and its toolchain, used instead of the legacy `exec` task (see the image-content note below); unset preserves the legacy `exec` task and the artifact-volume rollback shape |
+   | `GC_NOMAD_AGENT_IMAGE` | **yes** | Docker image carrying the session agent and its toolchain (see the image-content note below). Unset fails every lifecycle op closed at startup: the Docker task is the only session shape (cr-3vvnb5.2) |
    | `GC_NOMAD_AGENT_LAUNCH_SCRIPT` | no | The bootstrap from step 5; unset preserves the bare-tmux placeholder pane |
    | `GC_NOMAD_EXEC_TASK` | no | Task name alloc-exec targets, when it is not the pack's session task |
    | `GC_NOMAD_EXTRA_SECRET_KEYS` | no | Comma-separated names to bridge from the supervisor's own process env into `$NOMAD_SECRETS_DIR` — the value-blind channel for a secret `gc`'s provider env map cannot interpolate. Naming a key is what stages it; an unnamed key is never staged, and an extra key is always routed to the secrets dir, never to the launch argv. The names themselves belong to the deployment (part 2 works one Codex name through it) |
@@ -249,7 +248,8 @@ Provider-agnostic: what any deployment of this pack needs.
     `GC_NOMAD_NODE_CONSTRAINT` to the parent job — so either is a jobspec change
     and needs step 6's re-registration to take effect.
 11. **Check it without a cluster.** `gc-runtime-nomad check` warns when log
-   shipping or the artifact volume is unconfigured.
+   shipping is unconfigured, and when `GC_NOMAD_AGENT_IMAGE` is unset — the
+   session task is a Docker task, so every lifecycle op fails closed without it.
    `GC_BIN=$(command -v gc) ./conformance.sh` runs `gc runtime check` and the
    full RPP lifecycle round-trip against the in-memory fake Nomad API — no
    cluster, no network.
@@ -355,7 +355,7 @@ bead.
 
 | Op | Notes |
 |----|-------|
-| `check` | Pack-local diagnostic. Emits warnings when the optional log sink or artifact volume is unset; does not require Nomad configuration. |
+| `check` | Pack-local diagnostic. Emits warnings when the optional log sink is unset, and when the required `GC_NOMAD_AGENT_IMAGE` is unset; does not require Nomad configuration. |
 | `protocol` | `{"version":0,"capabilities":["proc.provision","proc.exec"]}` |
 | `provision` | Registers the parent job (idempotent upsert) if needed, then dispatches a tmux-only child for the session — no agent launched, sidecar launched marker stays unset. Idempotent over the box it already made: a session whose bound child is still live but never launched is ADOPTED (no second child dispatched, staging re-run), so a controller re-driving `provision` after an attempt whose staging or launch never confirmed can finish the job instead of collecting "already exists" forever (fnrt-t4l.46). A session whose child is live AND launched is a genuine duplicate and is still rejected with an "already exists" error (04 §6 wire-contract constant). Reads an optional staging config (JSON) on stdin and materializes it (see `start`'s staging row) before returning. |
 | `start` | `provision` + launch: dispatches, stages an optional workspace/secrets config read as JSON from stdin (`staging.go`'s `stageConfig`, NRT-P1-06 — workspace files land under `WorkDir` and env entries land as individual files plus a sourceable `env.sh` under `$NOMAD_SECRETS_DIR`, both via tar-over-exec-stdin, 04 §5), then sources that script and execs the launch command (`tmux new-session -d -s main`, plus `-e KEY=VALUE` for any `envArgvSafe`-classified env entries) into the alloc, then sets the launched marker. Empty/absent stdin is a no-op config — pre-staging callers are unaffected. A session left live-but-unlaunched by an earlier attempt (a `provision`, or a `start` whose launch never confirmed) is resumed into rather than re-dispatched; only a live, already-launched session is rejected, with the same "already exists" error as `provision`. |

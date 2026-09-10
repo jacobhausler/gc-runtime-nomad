@@ -507,6 +507,9 @@ func TestM3StagingReceiptNoCanaryLeak(t *testing.T) {
 
 	cfg := stageConfig{
 		WorkDir: "workspace",
+		// The Docker task runs the command gc rendered, so the wire has to carry
+		// one now that the placeholder pane is deleted (cr-3vvnb5.2).
+		Command: "/bin/sh",
 		Env: map[string]string{
 			"GC_SESSION":     "safe-value-not-a-secret",
 			"OPENAI_API_KEY": canary, // not on the argvSafe allow-list -> must route to secrets dir
@@ -569,6 +572,7 @@ func TestM3StagingReceiptNoCanaryLeak(t *testing.T) {
 	t.Setenv(envNamespace, "")
 	t.Setenv(envParentJob, "gc-sessions")
 	t.Setenv(envSidecarDir, sidecarDir)
+	t.Setenv(envAgentImage, testAgentImage)
 	const cliSession = "sess-canary-cli"
 
 	cfgJSON, err := json.Marshal(cfg)

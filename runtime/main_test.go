@@ -78,9 +78,21 @@ func TestProtocolHandshakeDeclaresProvisionAndExec(t *testing.T) {
 	}
 }
 
+// testAgentImage is the session image every lifecycle test now supplies:
+// GC_NOMAD_AGENT_IMAGE became required when cr-3vvnb5.2 deleted the exec
+// task, and fakenomad only records the jobspec it was sent — it never pulls.
+const testAgentImage = "registry.example/gc-agent:test"
+
+// imageModeStartPayload is the minimal start wire a launch needs now that the
+// exec placeholder pane is gone: the Docker task runs the command gc rendered,
+// and an empty one fails the launch closed (cr-hcgaxt, cr-3vvnb5.2). /bin/sh
+// keeps the pane an interactive shell so the key-driving rows still have a
+// pane to type into.
+const imageModeStartPayload = `{"command":"/bin/sh"}`
+
 func TestRunCheckWarnsWhenLogSinkUnset(t *testing.T) {
+	t.Setenv(envAgentImage, testAgentImage)
 	t.Setenv(envLogSink, "")
-	t.Setenv(envArtifactVolume, "")
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
@@ -95,15 +107,13 @@ func TestRunCheckWarnsWhenLogSinkUnset(t *testing.T) {
 	if want := "warning: session logs will not be shipped (GC_NOMAD_LOG_SINK unset)"; !strings.Contains(string(out), want) {
 		t.Fatalf("run(check) output = %q, want warning %q", out, want)
 	}
-	if want := "warning: gc artifact volume is not configured (GC_NOMAD_ARTIFACT_VOLUME unset)"; !strings.Contains(string(out), want) {
-		t.Fatalf("run(check) output = %q, want warning %q", out, want)
-	}
+
 }
 
 func TestRunCheckOmitsWarningsWhenOptionalInputsConfigured(t *testing.T) {
+	t.Setenv(envAgentImage, testAgentImage)
 	t.Setenv(envLogSink, "https://logs.example.internal/ingest")
 	t.Setenv(envLogArtifact, "/var/lib/vector/vector.tar.gz")
-	t.Setenv(envArtifactVolume, "test-nomad-shared")
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
@@ -118,12 +128,11 @@ func TestRunCheckOmitsWarningsWhenOptionalInputsConfigured(t *testing.T) {
 	if strings.Contains(string(out), "session logs will not be shipped") {
 		t.Fatalf("run(check) output = %q, want no unset-sink warning", out)
 	}
-	if strings.Contains(string(out), "gc artifact volume is not configured") {
-		t.Fatalf("run(check) output = %q, want no unset-volume warning", out)
-	}
+
 }
 
 func TestRunCheckWarnsWhenLogShipperArtifactUnset(t *testing.T) {
+	t.Setenv(envAgentImage, testAgentImage)
 	t.Setenv(envLogSink, "http://127.0.0.1:18081/ingest")
 	t.Setenv(envLogArtifact, "")
 	r, w, err := os.Pipe()
@@ -143,28 +152,8 @@ func TestRunCheckWarnsWhenLogShipperArtifactUnset(t *testing.T) {
 	}
 }
 
-func TestRunCheckWarnsWhenArtifactVolumeUnset(t *testing.T) {
-	t.Setenv(envLogSink, "http://127.0.0.1:18081/ingest")
-	t.Setenv(envLogArtifact, "/var/lib/vector/vector.tar.gz")
-	t.Setenv(envArtifactVolume, "")
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := run([]string{"check"}, strings.NewReader(""), w, w)
-	w.Close()
-	out, _ := io.ReadAll(r)
-	r.Close()
-	if got != exitOK {
-		t.Fatalf("run(check) = %d, want %d", got, exitOK)
-	}
-	want := "warning: gc artifact volume is not configured (GC_NOMAD_ARTIFACT_VOLUME unset)"
-	if !strings.Contains(string(out), want) {
-		t.Fatalf("run(check) output = %q, want warning %q", out, want)
-	}
-}
-
 func TestNewLifecycleReadsLogShipperArtifact(t *testing.T) {
+	t.Setenv(envAgentImage, testAgentImage)
 	srv := fakenomad.NewServer()
 	t.Cleanup(srv.Close)
 
@@ -183,21 +172,20 @@ func TestNewLifecycleReadsLogShipperArtifact(t *testing.T) {
 	}
 }
 
-func TestNewLifecycleReadsArtifactVolume(t *testing.T) {
+// TestNewLifecycleRequiresAgentImage is the fail-closed half of ONE SHAPE
+// (cr-3vvnb5.2): with the legacy exec task and its artifact-volume delivery
+// deleted there is no session shape without an image, so a run naming none
+// must stop at the launcher rather than register a parent whose boxes have
+// no toolchain to run an agent.
+func TestNewLifecycleRequiresAgentImage(t *testing.T) {
 	srv := fakenomad.NewServer()
 	t.Cleanup(srv.Close)
-
 	t.Setenv(envAddr, srv.URL())
 	t.Setenv(envSidecarDir, t.TempDir())
-	const volumeSource = "test-nomad-shared"
-	t.Setenv(envArtifactVolume, volumeSource)
+	t.Setenv(envAgentImage, "")
 
-	l, err := newLifecycle()
-	if err != nil {
-		t.Fatalf("newLifecycle: %v", err)
-	}
-	if l.artifactVolumeSource != volumeSource {
-		t.Fatalf("artifactVolumeSource = %q, want %q", l.artifactVolumeSource, volumeSource)
+	if _, err := newLifecycle(); err == nil || !strings.Contains(err.Error(), envAgentImage) {
+		t.Fatalf("newLifecycle with %s unset: err = %v, want one naming %s", envAgentImage, err, envAgentImage)
 	}
 }
 
@@ -226,6 +214,7 @@ func TestNewLifecycleReadsAgentImage(t *testing.T) {
 // RPP-CONN-001's exit-code fidelity check because no real command ever
 // reached the alloc.
 func TestRunExecReadsCommandFromStdin(t *testing.T) {
+	t.Setenv(envAgentImage, testAgentImage)
 	srv := fakenomad.NewServer()
 	t.Cleanup(srv.Close)
 
@@ -241,7 +230,7 @@ func TestRunExecReadsCommandFromStdin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := run([]string{"start", session}, strings.NewReader(""), w, w); got != exitOK {
+	if got := run([]string{"start", session}, strings.NewReader(imageModeStartPayload), w, w); got != exitOK {
 		w.Close()
 		out, _ := io.ReadAll(r)
 		t.Fatalf("start = %d, want %d (output: %s)", got, exitOK, out)
@@ -269,6 +258,7 @@ func TestRunExecReadsCommandFromStdin(t *testing.T) {
 // both reach the registered parent job, or every session silently lands in
 // default/default instead of a lab cluster's named namespace/pool.
 func TestStartRegistersParentJobWithNamespaceAndNodePool(t *testing.T) {
+	t.Setenv(envAgentImage, testAgentImage)
 	srv := fakenomad.NewServer()
 	t.Cleanup(srv.Close)
 
@@ -285,7 +275,7 @@ func TestStartRegistersParentJobWithNamespaceAndNodePool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := run([]string{"start", session}, strings.NewReader(""), w, w); got != exitOK {
+	if got := run([]string{"start", session}, strings.NewReader(imageModeStartPayload), w, w); got != exitOK {
 		w.Close()
 		out, _ := io.ReadAll(r)
 		t.Fatalf("start = %d, want %d (output: %s)", got, exitOK, out)
@@ -320,6 +310,7 @@ func TestStartRegistersParentJobWithNamespaceAndNodePool(t *testing.T) {
 // replies. Skips if tmux isn't on PATH rather than failing, keeping the
 // hermetic offline suite green on a machine without it.
 func TestRunDrivingVerbsOverTmux(t *testing.T) {
+	t.Setenv(envAgentImage, testAgentImage)
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not on PATH")
 	}
@@ -347,7 +338,7 @@ func TestRunDrivingVerbsOverTmux(t *testing.T) {
 		return string(out), got
 	}
 
-	if out, got := runOp([]string{"start", session}, ""); got != exitOK {
+	if out, got := runOp([]string{"start", session}, imageModeStartPayload); got != exitOK {
 		t.Fatalf("start = %d, want %d (output: %s)", got, exitOK, out)
 	}
 
@@ -434,6 +425,7 @@ func TestParseAdoptMaxAge(t *testing.T) {
 // being silent again: with no resolver configured the pack still registers a
 // working-looking box that cannot resolve a single name.
 func TestRunCheckWarnsWhenDNSServersUnset(t *testing.T) {
+	t.Setenv(envAgentImage, testAgentImage)
 	t.Setenv(envDNSServers, "")
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -452,6 +444,7 @@ func TestRunCheckWarnsWhenDNSServersUnset(t *testing.T) {
 }
 
 func TestRunCheckOmitsDNSWarningWhenResolversConfigured(t *testing.T) {
+	t.Setenv(envAgentImage, testAgentImage)
 	t.Setenv(envDNSServers, "192.168.0.202")
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -472,6 +465,7 @@ func TestRunCheckOmitsDNSWarningWhenResolversConfigured(t *testing.T) {
 // TestNewLifecycleReadsPlacementConfig proves both knobs reach the lifecycle
 // that builds the parent job — the register path this bead exists to close.
 func TestNewLifecycleReadsPlacementConfig(t *testing.T) {
+	t.Setenv(envAgentImage, testAgentImage)
 	srv := fakenomad.NewServer()
 	t.Cleanup(srv.Close)
 
@@ -496,6 +490,7 @@ func TestNewLifecycleReadsPlacementConfig(t *testing.T) {
 // either knob must stop the op with the variable named, not register a parent
 // that silently drops the placement it was configured with.
 func TestNewLifecycleRejectsBadPlacementConfig(t *testing.T) {
+	t.Setenv(envAgentImage, testAgentImage)
 	srv := fakenomad.NewServer()
 	t.Cleanup(srv.Close)
 	t.Setenv(envAddr, srv.URL())
@@ -563,6 +558,7 @@ func TestProtocolHandshakeDeclaresOnlyNativeCapabilities(t *testing.T) {
 // boolean must stop the op naming the key instead of reading as "registration
 // allowed" — the inverse of what the operator who typed it meant.
 func TestNewLifecycleForbidRegistrationParsesFailClosed(t *testing.T) {
+	t.Setenv(envAgentImage, testAgentImage)
 	srv := fakenomad.NewServer()
 	t.Cleanup(srv.Close)
 	t.Setenv(envAddr, srv.URL())
