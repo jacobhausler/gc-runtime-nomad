@@ -1734,7 +1734,10 @@ func TestExecStageWaitsForTaskRunningBeforeExecing(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- l.execStage(ctx, session, []string{"/bin/tar", "-x"}, []byte("staged-payload"))
+		// /bin/cat, not /bin/tar: the fake runs the command for real, and
+		// what this test is about is the moment the exec is dialled, not what
+		// it unpacks.
+		done <- l.execStage(ctx, session, []string{"/bin/cat"}, []byte("staged-payload"))
 	}()
 	select {
 	case err := <-done:
