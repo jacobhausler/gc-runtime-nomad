@@ -300,7 +300,7 @@ func TestVectorConfigPromExporterAddressRendersThroughFakenomad(t *testing.T) {
 
 	ctx := context.Background()
 	const session = "sess-prom-exporter-render"
-	if err := l.opStartWithConfig(ctx, session, stageConfig{}); err != nil {
+	if err := l.opStartWithConfig(ctx, session, withPane(stageConfig{})); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 
@@ -370,7 +370,7 @@ func TestVectorConfigLogSinkURIRendersThroughFakenomad(t *testing.T) {
 
 	ctx := context.Background()
 	const session = "sess-log-sink-render"
-	if err := l.opStartWithConfig(ctx, session, stageConfig{}); err != nil {
+	if err := l.opStartWithConfig(ctx, session, withPane(stageConfig{})); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 
@@ -636,7 +636,7 @@ func renderedShipperConfig(t *testing.T, session string) (rendered, allocDir str
 	l.logShipper = logShipperConfig{Sink: "http://sink.example/ingest"}
 
 	ctx := context.Background()
-	if err := l.opStartWithConfig(ctx, session, stageConfig{}); err != nil {
+	if err := l.opStartWithConfig(ctx, session, withPane(stageConfig{})); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	allocID, err := l.currentAlloc(ctx, session)

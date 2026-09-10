@@ -3,12 +3,12 @@ package main
 // Image-mode Codex home (cr-usnvaw).
 //
 // Why this file exists. A box launched from GC_NOMAD_AGENT_IMAGE takes its
-// agent toolchain from the image, and the pack's deployment-bootstrap seam
-// (GC_NOMAD_AGENT_LAUNCH_SCRIPT) is deliberately not consulted in that shape:
-// the image owns the toolchain and image mode mounts no artifact volume for a
-// bootstrap to live on (main.go's envAgentImage / envAgentLaunchScript
-// contract, welded in cr-hcgaxt). The legacy exec shape got its agent HOME,
-// provider config and auth file from exactly that bootstrap
+// agent toolchain from the image, and there is no deployment-bootstrap seam
+// left to consult: the pack's former GC_NOMAD_AGENT_LAUNCH_SCRIPT is deleted
+// (cr-3vvnb5.3) because the image owns the toolchain and the session shape
+// mounts no artifact volume for a bootstrap to live on (main.go's
+// envAgentImage contract, welded in cr-hcgaxt). The exec shape that bootstrap
+// served got its agent HOME, provider config and auth file from exactly it
 // (ops/nomad/agent-launch.sh: export CODEX_HOME="$NOMAD_SECRETS_DIR/codex-home",
 // install auth.json, write config.toml). The native image shape had no
 // equivalent, so the box inherited the orchestrator's CODEX_HOME — the city
@@ -30,9 +30,10 @@ package main
 //
 // Native forms checked before adding this (and why they do not suffice):
 //
-//   - GC_NOMAD_AGENT_LAUNCH_SCRIPT: the pack's own seam, and the code that
-//     today carries this recipe. Ignored once GC_NOMAD_AGENT_IMAGE is set
-//     (main.go:56) — there is no bootstrap volume in the image shape.
+//   - GC_NOMAD_AGENT_LAUNCH_SCRIPT: the pack's former seam, and the code that
+//     used to carry this recipe. It was already ignored once GC_NOMAD_AGENT_IMAGE
+//     was set — there is no bootstrap volume in the image shape — and
+//     cr-3vvnb5.3 deletes it.
 //   - gc build-image baking a Codex home into the image: gc's toolchain, not
 //     this pack, and the owner ruled this item pack-only ("no launcher, no
 //     per-seat writer").

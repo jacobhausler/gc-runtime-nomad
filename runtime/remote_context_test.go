@@ -30,7 +30,7 @@ func TestExtraSecretPEMKeyGetsPointerNotContentInEnvScript(t *testing.T) {
 	const session = "sess-pem-pointer"
 
 	cfg := stageConfig{Env: map[string]string{"GC_SESSION": "safe-value"}}
-	if err := l.opStartWithConfig(ctx, session, cfg); err != nil {
+	if err := l.opStartWithConfig(ctx, session, withPane(cfg)); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 
@@ -73,7 +73,7 @@ func TestRemoteContextStagedWhenCityNameAndURLPresent(t *testing.T) {
 		"GC_CITY_NAME": "nomad-canary",
 		"GC_CITY_URL":  "https://192.168.0.107:8443",
 	}}
-	if err := l.opStartWithConfig(ctx, session, cfg); err != nil {
+	if err := l.opStartWithConfig(ctx, session, withPane(cfg)); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 
@@ -126,7 +126,7 @@ func TestRemoteContextIsNoopWithoutCityNameAndURL(t *testing.T) {
 	const session = "sess-remote-context-unowed"
 
 	cfg := stageConfig{Env: map[string]string{"GC_CITY_URL": "https://192.168.0.107:8443"}}
-	if err := l.opStartWithConfig(ctx, session, cfg); err != nil {
+	if err := l.opStartWithConfig(ctx, session, withPane(cfg)); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 

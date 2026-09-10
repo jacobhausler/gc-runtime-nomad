@@ -111,8 +111,8 @@ func TestImageModeEnvScriptDropsOrchestratorFilesystem(t *testing.T) {
 }
 
 // TestLegacyExecModeLeavesOrchestratorFilesystemInEnvScript protects the
-// rollback: with no image the deployment bootstrap does the PATH/HOME wiring
-// (GC_NOMAD_AGENT_LAUNCH_SCRIPT), so its env.sh bytes must be untouched.
+// stage() side of the split: the stripping is image-mode only, so a box with no
+// image keeps the provider's own env.sh bytes untouched.
 func TestLegacyExecModeLeavesOrchestratorFilesystemInEnvScript(t *testing.T) {
 	l, _ := newTestLifecycle(t)
 	ctx := context.Background()
@@ -148,11 +148,6 @@ func TestImageModeLaunchDoesNotSeedTmuxWithTheOrchestratorFilesystem(t *testing.
 	}
 	if !strings.Contains(joined, "-e TERM=xterm-256color") {
 		t.Fatalf("image-mode launch stopped carrying the argv-safe terminal key: %s", joined)
-	}
-
-	legacy := strings.Join(buildLaunchCommand(env, "/work"), " ")
-	if !strings.Contains(legacy, "-e "+pathEnvName+"=/private/tmp/gctc-42/toolchain:") {
-		t.Fatalf("legacy launch no longer passes the deployment PATH on argv (rollback shape changed): %s", legacy)
 	}
 }
 
@@ -196,7 +191,6 @@ func TestBoxFilesystemEnvInputStripsTheClassNotTheSeat(t *testing.T) {
 // not be found and the pane died with its tmux server (cr-jr2kw7).
 func TestImageModePaneKeepsTheImageToolchain(t *testing.T) {
 	requireTmuxForDriverTest(t)
-	setDriverLaunchScript(t, "") // the image owns the toolchain: no bootstrap exists
 
 	l, _ := newTestLifecycle(t)
 	l.agentImage = "localhost/gc-agent:test"

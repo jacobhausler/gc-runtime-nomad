@@ -3,12 +3,11 @@ package main
 // Contract tests for the docker-driver (prebaked gc build-image) session shape:
 // the launch weld and the runtime-secret mount contract (cr-hcgaxt).
 //
-// The two launch surfaces must not drift into one another:
-//   * legacy exec shape (GC_NOMAD_AGENT_IMAGE unset) — the pane body stays the
-//     deployment-owned bootstrap, byte for byte. That is the rollback.
-//   * image shape (set) — the pane body is gc's OWN rendered command (F1 shipped
-//     the gc half; this is the pack half). An image box with no rendered command
-//     fails closed instead of reporting a launch that starts no agent.
+// There is one session shape and one pane body: the docker task's pane runs
+// gc's OWN rendered command (F1 shipped the gc half; this is the pack half).
+// The pack's deployment-bootstrap seam is deleted (cr-3vvnb5.3), so there is no
+// second launch surface to drift into one another, and a box with no rendered
+// command fails closed instead of reporting a launch that starts no agent.
 // Runtime secrets are file-delivered into the box's own $NOMAD_SECRETS_DIR in
 // both shapes; the image shape resolves that path from the box rather than
 // assuming the exec driver's constant also names a container mount.
@@ -30,48 +29,12 @@ func requireTmuxForDriverTest(t *testing.T) {
 	}
 }
 
-// setDriverLaunchScript points the package's deployment-bootstrap seam at
-// script for the duration of t, restoring whatever it was on exit.
-func setDriverLaunchScript(t *testing.T, script string) {
-	t.Helper()
-	original := os.Getenv(envAgentLaunch)
-	t.Cleanup(func() {
-		_ = os.Setenv(envAgentLaunch, original)
-		configureAgentLaunchScript()
-	})
-	t.Setenv(envAgentLaunch, script)
-	configureAgentLaunchScript()
-}
-
-// TestLegacyShapeLaunchCommandIsUnchangedByTheWeld is the rollback leg: with no
-// image configured the composed argv must still carry the deployment bootstrap
-// as the pane body, and the new composition point must produce exactly what the
-// legacy builder produced before the image shape existed.
-func TestLegacyShapeLaunchCommandIsUnchangedByTheWeld(t *testing.T) {
-	setDriverLaunchScript(t, "/mnt/nomad/gc/agent-launch.sh")
-	env := map[string]string{"GC_SESSION": "sess-legacy"}
-
-	legacy := strings.Join(buildLaunchCommand(env, "/tmp/staged-rig"), " ")
-	if !strings.Contains(legacy, agentLaunchScript) {
-		t.Fatalf("legacy launch lost the deployment bootstrap: %q", legacy)
-	}
-	if !strings.Contains(legacy, "-e GC_SESSION=sess-legacy") {
-		t.Fatalf("legacy launch lost its argv-safe env pair: %q", legacy)
-	}
-	composed := strings.Join(buildLaunchCommandForPane(env, "/tmp/staged-rig", agentLaunchScript), " ")
-	if composed != legacy {
-		t.Fatalf("the shared composition point changed the legacy argv:\n got %q\nwant %q", composed, legacy)
-	}
-}
-
 // TestImageModeLaunchRunsRenderedProviderCommand is the weld: an image-mode
 // start runs what gc rendered, in the box, with the pack's staged-env and cwd
 // preludes ahead of it — and records it so a later relaunch (which carries no
 // command of its own) re-runs the same agent instead of failing closed.
 func TestImageModeLaunchRunsRenderedProviderCommand(t *testing.T) {
 	requireTmuxForDriverTest(t)
-	setDriverLaunchScript(t, "") // the image owns the toolchain: no bootstrap exists
-
 	l, _ := newTestLifecycle(t)
 	l.agentImage = "localhost/gc-agent:test"
 	ctx := context.Background()
@@ -116,7 +79,6 @@ func TestImageModeLaunchRunsRenderedProviderCommand(t *testing.T) {
 // TestImageModeLaunchWithoutRenderedCommandFailsClosed: an agent-less pane that
 // reports launched is the wedge this weld exists to prevent.
 func TestImageModeLaunchWithoutRenderedCommandFailsClosed(t *testing.T) {
-	setDriverLaunchScript(t, "")
 	l, _ := newTestLifecycle(t)
 	l.agentImage = "localhost/gc-agent:test"
 	const session = "sess-image-no-command"
@@ -140,7 +102,6 @@ func TestImageModeLaunchWithoutRenderedCommandFailsClosed(t *testing.T) {
 // the path the box itself reports, and gc's rendered command runs against it.
 func TestImageModeSecretsStageIntoResolvedMount(t *testing.T) {
 	requireTmuxForDriverTest(t)
-	setDriverLaunchScript(t, "")
 	l, _ := newTestLifecycle(t)
 	l.agentImage = "localhost/gc-agent:test"
 	ctx := context.Background()
@@ -151,7 +112,7 @@ func TestImageModeSecretsStageIntoResolvedMount(t *testing.T) {
 		Env:     map[string]string{"GC_CITY_TEST_SECRET": "value-that-must-not-reach-argv"},
 		Command: `test -r "$NOMAD_SECRETS_DIR/env.sh" && touch ` + marker,
 	}
-	if err := l.opStartWithConfig(ctx, session, cfg); err != nil {
+	if err := l.opStartWithConfig(ctx, session, withPane(cfg)); err != nil {
 		t.Fatalf("image-mode start with secrets: %v", err)
 	}
 	if !waitForPath(marker, 10*time.Second) {

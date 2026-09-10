@@ -49,10 +49,9 @@
 //	GC_NOMAD_LOG_LABELS   optional: "k=v,k=v" labels merged onto every shipped log line alongside the fixed session_name/alloc_id/node/runtime=nomad set
 //	GC_NOMAD_LOG_SHIPPER_ARTIFACT  optional: URL or local path for the pinned Vector archive; unset uses the upstream release URL
 //	GC_NOMAD_ADOPT_MAX_AGE  optional: Go duration (e.g. "30m", "2h") capping how old a live-but-unlaunched session box may be before provision/start reap it (stop + tombstone) and dispatch a fresh one instead of adopting it; unset means the 30m default, an unparseable value is a config error (cr-gdeav.6.1)
-//	GC_NOMAD_AGENT_IMAGE  required: Docker image for the session agent task, normally produced by gc build-image; unset fails every lifecycle op closed at startup (cr-3vvnb5.2 deletes the legacy exec task and the GC_NOMAD_ARTIFACT_VOLUME host-volume shape that used to carry its toolchain). The prebaked image owns the agent toolchain: the launched pane runs gc's rendered launch command (cr-hcgaxt), GC_NOMAD_AGENT_LAUNCH_SCRIPT is not consulted, an empty rendered command fails the launch closed, and staged runtime secrets go to the mount point the box reports for $NOMAD_SECRETS_DIR; because no bootstrap survives to do it, the pack then owns the agent home: CODEX_HOME is exported inside that mount, overriding the orchestrator value the provider env staged, the Codex provider config is rendered from the seat's staged environment (GC_CODEX_MODEL_PROVIDER / GC_CODEX_MODEL_PROVIDER_BASE_URL), and auth arrives from the staged CODEX_AUTH_JSON (codex_home.go, cr-usnvaw); the box owns its filesystem too, so PATH, HOME, TMP/TMPDIR/TEMP, the XDG_* family, GC_HOME and any staged value naming the orchestrator's own HOME or TMPDIR are stripped from env.sh and the launch `-e` pairs rather than shadowed (image_env.go, cr-jr2kw7)
+//	GC_NOMAD_AGENT_IMAGE  required: Docker image for the session agent task, normally produced by gc build-image; unset fails every lifecycle op closed at startup (cr-3vvnb5.2 deletes the legacy exec task and the GC_NOMAD_ARTIFACT_VOLUME host-volume shape that used to carry its toolchain). The prebaked image owns the agent toolchain: the launched pane runs gc's rendered launch command (cr-hcgaxt), there is no deployment-bootstrap seam left to consult (cr-3vvnb5.3), and an empty rendered command fails the launch closed, and staged runtime secrets go to the mount point the box reports for $NOMAD_SECRETS_DIR; because no bootstrap survives to do it, the pack then owns the agent home: CODEX_HOME is exported inside that mount, overriding the orchestrator value the provider env staged, the Codex provider config is rendered from the seat's staged environment (GC_CODEX_MODEL_PROVIDER / GC_CODEX_MODEL_PROVIDER_BASE_URL), and auth arrives from the staged CODEX_AUTH_JSON (codex_home.go, cr-usnvaw); the box owns its filesystem too, so PATH, HOME, TMP/TMPDIR/TEMP, the XDG_* family, GC_HOME and any staged value naming the orchestrator's own HOME or TMPDIR are stripped from env.sh and the launch `-e` pairs rather than shadowed (image_env.go, cr-jr2kw7)
 //	GC_NOMAD_DNS_SERVERS  optional: comma-separated resolver IP addresses the session group's bridge network writes into the alloc's /etc/resolv.conf (e.g. "192.168.0.202"); unset means Nomad declares no dns stanza and the alloc inherits the CLIENT HOST's resolv.conf — on a systemd-resolved host that is the unreachable 127.0.0.53 stub, so nothing in the box can resolve a name (cr-tzsxk.18)
 //	GC_NOMAD_NODE_CONSTRAINT  optional: Nomad-syntax node constraints appended to the parent job, e.g. "${node.unique.name} != prod-nomad"; several separated by ";" (Nomad list operands already use commas). Unset adds only the pack's own linux-kernel fatal rule
-//	GC_NOMAD_AGENT_LAUNCH_SCRIPT  optional: POSIX shell script the launch command execs inside the tmux pane after sourcing the staged environment (ops.go's buildLaunchCommand) — deployment-owned, so PATH prepends and HOME-style secrets-dir wiring for a specific agent (e.g. Codex) live in configuration, never in this pack; unset preserves the legacy bare-tmux placeholder session. IGNORED once GC_NOMAD_AGENT_IMAGE is set — the image owns the toolchain and image shape mounts no artifact volume for a bootstrap to live on (cr-hcgaxt); `check` warns when both are set
 package main
 
 import (
@@ -78,7 +77,6 @@ const (
 	envLogLabels      = "GC_NOMAD_LOG_LABELS"
 	envLogArtifact    = "GC_NOMAD_LOG_SHIPPER_ARTIFACT"
 	envAgentImage     = "GC_NOMAD_AGENT_IMAGE"
-	envAgentLaunch    = "GC_NOMAD_AGENT_LAUNCH_SCRIPT"
 	envAdoptMaxAge    = "GC_NOMAD_ADOPT_MAX_AGE"
 	envDNSServers     = "GC_NOMAD_DNS_SERVERS"
 	envNodeConstraint = "GC_NOMAD_NODE_CONSTRAINT"
@@ -156,8 +154,6 @@ func run(args []string, stdin io.Reader, stdout, stderr *os.File) int {
 		}
 		if os.Getenv(envAgentImage) == "" {
 			fmt.Fprintln(stderr, "warning: GC_NOMAD_AGENT_IMAGE unset — the session agent task is a Docker task and there is no other session shape, so every lifecycle op will fail closed (cr-3vvnb5.2)")
-		} else if os.Getenv(envAgentLaunch) != "" {
-			fmt.Fprintln(stderr, "warning: GC_NOMAD_AGENT_LAUNCH_SCRIPT is set but the docker-driver session task ignores it — the prebaked image owns the agent toolchain and its pane runs gc's rendered command (cr-hcgaxt)")
 		}
 		if os.Getenv(envDNSServers) == "" {
 			fmt.Fprintln(stderr, "warning: session boxes will declare no dns stanza and inherit the client host's resolv.conf (GC_NOMAD_DNS_SERVERS unset) — on a systemd-resolved host that stub resolver is unreachable from a bridge alloc (cr-tzsxk.18)")

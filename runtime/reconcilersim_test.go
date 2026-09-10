@@ -57,7 +57,9 @@ func TestReconcilerSimOutageThenRecoveryDrill(t *testing.T) {
 			inject: func(s *fakenomad.Server) {
 				s.FailNext("POST", "/v1/job/"+l.parentJobID+"/dispatch", 500, `{"error":"injected outage"}`)
 			},
-			do: func(ctx context.Context, l *lifecycle) error { return l.opStart(ctx, session) },
+			do: func(ctx context.Context, l *lifecycle) error {
+				return l.opStartWithConfig(ctx, session, stageConfig{Command: testPaneCommand})
+			},
 			assert: func(t *testing.T, err error) {
 				if err == nil {
 					t.Fatalf("start during outage = nil error, want failure")
@@ -66,7 +68,9 @@ func TestReconcilerSimOutageThenRecoveryDrill(t *testing.T) {
 		},
 		{
 			name: "recovered start succeeds",
-			do:   func(ctx context.Context, l *lifecycle) error { return l.opStart(ctx, session) },
+			do: func(ctx context.Context, l *lifecycle) error {
+				return l.opStartWithConfig(ctx, session, stageConfig{Command: testPaneCommand})
+			},
 			assert: func(t *testing.T, err error) {
 				if err != nil {
 					t.Fatalf("start after recovery: %v", err)

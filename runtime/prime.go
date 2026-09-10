@@ -25,8 +25,8 @@ import (
 // a second tmux window against the SAME session: `tmux new-window` is a
 // client verb that starts the window and returns immediately, parented to
 // the tmux server inside the task cgroup — exactly how the launch itself
-// already survives the exec call that started it (buildLaunchCommand's own
-// doc comment). No cross-network polling and no long-lived pack process are
+// already survives the exec call that started it (the launch builder's own doc
+// comment). No cross-network polling and no long-lived pack process are
 // needed: gc execs this binary fresh per op, so there is nothing here that
 // could outlive an op anyway; the window is the only thing that can.
 //

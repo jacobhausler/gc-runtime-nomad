@@ -423,8 +423,8 @@ func envArgvSafe(key string) bool {
 // secrets dir even if their name coincidentally matches envArgvSafeNames —
 // an extra secret key is always secret by declaration, never by lucky
 // allow-listing. This merge is local to stage() and never mutates base
-// itself, so an extra-sourced value can never reach buildLaunchCommand's
-// argv (buildLaunchCommand is only ever called with cfg.Env, untouched by
+// itself, so an extra-sourced value can never reach the launch argv
+// (buildLaunchCommandForPane is only ever called with cfg.Env, untouched by
 // this function).
 func mergeExtraSecretEnv(base map[string]string, keys []string) (map[string]string, map[string]bool) {
 	merged := make(map[string]string, len(base)+len(keys))

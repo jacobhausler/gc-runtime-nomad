@@ -325,22 +325,8 @@ func paneCwdPrelude(workDir string) string {
 	return scratch
 }
 
-// agentLaunchScript is the POSIX shell script the launch command execs
-// inside the tmux pane once the staged environment is sourced — the bounded
-// seam a deployment uses to turn the placeholder session into a real agent
-// bootstrap (PATH prepend to a pinned toolchain, an agent-specific HOME
-// pointed inside $NOMAD_SECRETS_DIR, installing a staged auth file, then
-// exec-ing the agent). Empty means no real agent command line is configured:
-// buildLaunchCommand keeps the legacy bare-tmux placeholder session, which
-// is both the generic-command-execution default and this seam's rollback —
-// unsetting GC_NOMAD_AGENT_LAUNCH_SCRIPT reverts every alloc to the prior
-// behavior with no code change. The pack never hardcodes an agent's PATH,
-// HOME variable, or auth filename; those are entirely deployment config, so
-// this file stays agent-agnostic (Codex today, anything else tomorrow).
-var agentLaunchScript string
-
 // extraSecretKeys is the parsed name list from GC_NOMAD_EXTRA_SECRET_KEYS
-// (comma-separated), read once at init like agentLaunchScript's seam above
+// (comma-separated), read once at init
 // — a deployment-configured bridge letting the supervisor's own process env
 // (e.g. via ~/.gc/secrets.env passthrough) deliver a named secret into a
 // session's staged environment when gc's own city.toml provider env map has
@@ -350,12 +336,7 @@ var agentLaunchScript string
 var extraSecretKeys []string
 
 func init() {
-	configureAgentLaunchScript()
 	configureExtraSecretKeys()
-}
-
-func configureAgentLaunchScript() {
-	agentLaunchScript = os.Getenv(envAgentLaunch)
 }
 
 func configureExtraSecretKeys() {
@@ -373,30 +354,6 @@ func parseExtraSecretKeys(raw string) []string {
 	return keys
 }
 
-// buildLaunchCommand is the detached tmux-client command that turns a
-// provisioned (tmux-only) box into a launched one (04 §3 provision row +
-// R1c-04 launch invariant): it returns immediately, and the agent it starts
-// is parented to the tmux server inside the task cgroup, never to the exec
-// session that issued it. When agentLaunchScript is configured, the tmux
-// pane's initial command execs that script (a real agent bootstrap command
-// line); otherwise the session stays the placeholder tmux shell it always
-// was (jobspec.go's sessionTask has the same rollback shape).
-//
-// env's argvSafe-classified entries (envArgvSafe, NRT-P1-06) ride as `-e
-// KEY=VALUE` on this argv — safe by construction, since envArgvSafe's whole
-// job is excluding anything credential-shaped from ever reaching argv
-// (E1a §4.5). The wrapper sources the value-safe env.sh produced by stage
-// before invoking tmux, and the pane body re-sources it INSIDE the pane
-// (paneStagedEnvPrelude), because tmux gives a pane the server's environment
-// and never the client's; keys are sorted so the command is deterministic.
-// agentLaunchScript itself never carries credential values — it is
-// deployment-owned shell logic (PATH/HOME wiring) that reads secret bytes
-// out of the already-staged $NOMAD_SECRETS_DIR files at pane-start time, so
-// nothing secret ever rides this argv either.
-func buildLaunchCommand(env map[string]string, workDir string) []string {
-	return buildLaunchCommandForPane(env, workDir, agentLaunchScript)
-}
-
 // defaultTmuxLaunchArgs is the canonical detached tmux operation the pack uses
 // to start a provisioned box. It is the same operation gc itself emits on the
 // separable transport path (separableTransportLaunch), which is why both launch
@@ -406,27 +363,28 @@ var defaultTmuxLaunchArgs = []string{"new-session", "-d", "-s", tmuxSessionName}
 // buildLaunchCommandForPane composes the detached tmux launch for an explicit
 // pane body. It is the single composition point of the two launch surfaces:
 // the pack contributes the value-safe env wrapper, the argvSafe `-e` pairs, and
-// the in-pane staged-env plus cwd preludes, and the CALLER owns the pane body —
-// the deployment bootstrap on the legacy exec shape, gc's rendered provider
-// command on the docker-driver (prebaked image) shape.
+// the in-pane staged-env plus cwd preludes, and the CALLER owns the pane body:
+// gc's rendered provider command, on the docker-driver (prebaked image) task
+// that is the only session shape (cr-3vvnb5.2/.3).
 func buildLaunchCommandForPane(env map[string]string, workDir, paneCommand string) []string {
 	return buildLaunchCommandForTmuxWithPaneCommand(env, defaultTmuxLaunchArgs, workDir, paneCommand)
 }
 
-// buildLaunchCommandForTmux uses the pack-owned staged bootstrap with the
-// canonical tmux operation selected by GC. The transport launch command is a
-// handshake, not the provider's bootstrap command: preserve whether GC asked
-// for a new session or a respawn, while sourcing the staged environment and
-// applying the deployment-owned agent launch script in either case.
-func buildLaunchCommandForTmux(env map[string]string, tmuxArgs []string, workDir string) []string {
-	return buildLaunchCommandForTmuxWithPaneCommand(env, tmuxArgs, workDir, agentLaunchScript)
-}
-
 // buildLaunchCommandForTmuxWithPaneCommand uses the canonical tmux operation
 // and runs paneCommand after the pack's in-pane staged-environment and cwd
-// preludes. The command is supplied by GC for separable transport launches;
-// opStart continues to supply the deployment-owned bootstrap through
-// buildLaunchCommandForTmux.
+// preludes. paneCommand is always gc's OWN rendered launch command: the
+// deployment bootstrap seam (GC_NOMAD_AGENT_LAUNCH_SCRIPT) is deleted
+// (cr-3vvnb5.3), so the docker task's pane has exactly one body, and an empty
+// rendered command fails the launch closed at launch() rather than falling
+// back to a placeholder shell (cr-hcgaxt).
+//
+// env's argvSafe-classified entries (envArgvSafe, NRT-P1-06) ride as `-e
+// KEY=VALUE` on this argv — safe by construction, since envArgvSafe's whole
+// job is excluding anything credential-shaped from ever reaching argv
+// (E1a §4.5). The wrapper sources the value-safe env.sh produced by stage
+// before invoking tmux, and the pane body re-sources it INSIDE the pane
+// (paneStagedEnvPrelude), because tmux gives a pane the server's environment
+// and never the client's; keys are sorted so the command is deterministic.
 func buildLaunchCommandForTmuxWithPaneCommand(env map[string]string, tmuxArgs []string, workDir, paneCommand string) []string {
 	env = stripLocalCityStoreEnv(env)
 	cmd := []string{"/bin/sh", "-c", launchEnvScript, "gc-runtime-nomad-launch", "tmux"}
@@ -441,16 +399,13 @@ func buildLaunchCommandForTmuxWithPaneCommand(env map[string]string, tmuxArgs []
 	for _, k := range keys {
 		cmd = append(cmd, "-e", k+"="+env[k])
 	}
-	if paneCommand != "" {
-		// The pane sources the staged environment itself (see
-		// paneStagedEnvPrelude): the client-side wrapper cannot reach it.
-		// The cwd prelude runs after it and before paneCommand, so deployment
-		// wiring or GC's rendered command starts in a directory the alloc
-		// actually has (paneCwdPrelude). With no command configured the pane
-		// stays the placeholder shell it always was, cwd included - that path is
-		// the seam's rollback.
-		cmd = append(cmd, "/bin/sh", "-c", paneStagedEnvPrelude+paneCwdPrelude(workDir)+paneCommand)
-	}
+	// The pane sources the staged environment itself (see
+	// paneStagedEnvPrelude): the client-side wrapper cannot reach it. The cwd
+	// prelude runs after it and before paneCommand, so gc's rendered command
+	// starts in a directory the alloc actually has (paneCwdPrelude). There is no
+	// placeholder-pane shape left to fall back to (cr-3vvnb5.3): launch() has
+	// already failed closed on an empty rendered command (cr-hcgaxt).
+	cmd = append(cmd, "/bin/sh", "-c", paneStagedEnvPrelude+paneCwdPrelude(workDir)+paneCommand)
 	return cmd
 }
 
@@ -567,7 +522,7 @@ func (l *lifecycle) opStart(ctx context.Context, sessionName string) error {
 // dispatched (or adopted through the same bounded adopt-or-reap gate
 // provision uses) and before launch, so the agent bootstrap command that
 // launch execs finds its workspace and secrets already in place. cfg.Env's argvSafe subset also rides launch's tmux
-// argv (buildLaunchCommand) — never the secrets dir.
+// argv (buildLaunchCommandForPane) — never the secrets dir.
 func (l *lifecycle) opStartWithConfig(ctx context.Context, sessionName string, cfg stageConfig) error {
 	unlock, err := l.lockSession(ctx, sessionName)
 	if err != nil {
@@ -1354,27 +1309,24 @@ func (l *lifecycle) findOrphanByNonce(ctx context.Context, sessionName, nonce st
 // needs nor can reach — the session shape declares no artifact volume
 // (jobspec.go sessionTask), so a /mnt/nomad bootstrap would name a path that
 // is not mounted. GC_NOMAD_AGENT_IMAGE is required and a run without it fails
-// closed in newLifecycle; the empty-image pane body below survives only as
-// the GC_NOMAD_AGENT_LAUNCH_SCRIPT seam cr-3vvnb5.3 deletes.
+// closed in newLifecycle; gc's rendered command is the only pane body: cr-3vvnb5.3
+// deletes the deployment bootstrap seam, so there is no alternative body left
+// for the pack to compose.
 //
 // An image-mode launch with no rendered command fails closed here rather than
 // execing a pane that starts nothing yet still gets a launched record — the
 // agent-less-box wedge this weld exists to close.
 func (l *lifecycle) launch(ctx context.Context, sessionName string, env map[string]string, workDir, providerCommand string) error {
-	command := buildLaunchCommand(env, workDir)
-	if l.agentImage != "" {
-		if strings.TrimSpace(providerCommand) == "" {
-			return fmt.Errorf("launching session %q: %s is set but gc sent no rendered launch command, and the prebaked image leaves the pack no bootstrap to substitute (cr-hcgaxt)",
-				sessionName, envAgentImage)
-		}
-		// The same class reaches the pane by a second door: tmux `new-session -e`
-		// seeds the SERVER environment, which every pane inherits, so an
-		// argv-safe PATH would hide the image toolchain even from a clean env.sh.
-		// The canonical transport path hands no env to the builder at all, so
-		// this is the only place it can cross (cr-jr2kw7).
-		command = buildLaunchCommandForPane(boxFilesystemEnvInput(env), workDir, providerCommand)
+	if strings.TrimSpace(providerCommand) == "" {
+		return fmt.Errorf("launching session %q: %s is set but gc sent no rendered launch command, and the prebaked image leaves the pack no bootstrap to substitute (cr-hcgaxt)",
+			sessionName, envAgentImage)
 	}
-	return l.launchWithCommand(ctx, sessionName, command)
+	// The same class reaches the pane by a second door: tmux `new-session -e`
+	// seeds the SERVER environment, which every pane inherits, so an
+	// argv-safe PATH would hide the image toolchain even from a clean env.sh.
+	// The canonical transport path hands no env to the builder at all, so
+	// this is the only place it can cross (cr-jr2kw7).
+	return l.launchWithCommand(ctx, sessionName, buildLaunchCommandForPane(boxFilesystemEnvInput(env), workDir, providerCommand))
 }
 
 // launchWithCommand executes a pack-owned detached tmux launch command into
@@ -1436,7 +1388,7 @@ func (l *lifecycle) capturePanePID(ctx context.Context, sessionName string) (int
 // records the launched marker (and the pane pid the probe will later
 // kill -0) in the sidecar binding — shared by opStart (provision then
 // launch) and opRelaunch (launch only, no re-dispatch). cfg's argvSafe env subset rides the launch command
-// (buildLaunchCommand) and cfg.WorkDir chooses the pane's cwd
+// (buildLaunchCommandForPane) and cfg.WorkDir chooses the pane's cwd
 // (paneCwdPrelude). opRelaunch passes the zero config, since no fresh env
 // or work dir accompanies a relaunch, and falls back to the WorkDir the
 // binding recorded. Once the launch is recorded, startupPrime owes the
@@ -1654,9 +1606,10 @@ func (l *lifecycle) stage(ctx context.Context, sessionName string, cfg stageConf
 	// mount's path from the box before writing anything that names it:
 	// contexts.toml is literal TOML with no $NOMAD_SECRETS_DIR expansion, and a
 	// guessed /secrets would point gc's mTLS files at a directory that may not
-	// exist in a container (cr-hcgaxt). The empty-image branch below is the
-	// GC_NOMAD_AGENT_LAUNCH_SCRIPT seam cr-3vvnb5.3 deletes: a run without an
-	// image already failed closed in newLifecycle (cr-3vvnb5.2).
+	// exist in a container (cr-hcgaxt). The empty-image branch below is only a
+	// discriminator now: GC_NOMAD_AGENT_IMAGE is required and a run without it
+	// already failed closed in newLifecycle (cr-3vvnb5.2), and cr-3vvnb5.3
+	// deleted the launch-script seam that shape used to reach.
 	secretsDir := ""
 	if l.agentImage != "" && len(secretEnv) > 0 {
 		resolved, err := l.boxSecretsDir(ctx, sessionName)
@@ -1675,9 +1628,9 @@ func (l *lifecycle) stage(ctx context.Context, sessionName string, cfg stageConf
 	}
 	if len(secretEnv) > 0 {
 		// The image shape has no deployment bootstrap to hand its agent home to
-		// (main.go ignores GC_NOMAD_AGENT_LAUNCH_SCRIPT once an image owns the
-		// toolchain), so the pack stages the Codex home itself. Legacy exec
-		// mode keeps its bytes unchanged - that shape is the rollback.
+		// (cr-3vvnb5.3 deletes the launch-script seam outright), so the pack
+		// stages the Codex home itself. A box staged without an image keeps its
+		// bytes unchanged.
 		codexHome := codexHomeOwned(secretsDir, secretEnv)
 		envInput := remoteContextEnvScriptInput(secretEnv)
 		// An image-mode box owns its own filesystem. PATH, HOME, TMPDIR, the XDG

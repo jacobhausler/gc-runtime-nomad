@@ -12,8 +12,8 @@ import (
 // the orchestrator's CODEX_HOME (the estate's provider env pins it to
 // /Users/home/.codex, city.toml:82), codex refused to start ("Error finding
 // codex home"), its pane died, the tmux server went with it, and gc reported
-// only "tmux exited 1". The image shape has no bootstrap to fix this -
-// GC_NOMAD_AGENT_LAUNCH_SCRIPT is ignored there - so the pack stages the agent
+// only "tmux exited 1". The image shape has no bootstrap to fix this (the
+// pack's former launch-script seam is deleted) - so the pack stages the agent
 // home itself: CODEX_HOME exported inside the mount the box reports, provider
 // config rendered from the seat's staged env, auth from the staged secret.
 func TestImageModeStagesCodexHomeOverridingProviderEnv(t *testing.T) {

@@ -45,7 +45,7 @@ func TestM3StagingReceiptWorkspaceProbe(t *testing.T) {
 		WorkDir:   "workspace",
 		CopyFiles: []copyEntry{{Src: srcRoot}},
 	}
-	if err := l.opStartWithConfig(ctx, session, cfg); err != nil {
+	if err := l.opStartWithConfig(ctx, session, withPane(cfg)); err != nil {
 		t.Fatalf("start with staging config: %v", err)
 	}
 
@@ -80,7 +80,7 @@ func TestStagingWritesSourceableEnvironmentScript(t *testing.T) {
 		"GC_SESSION_ID":   "worker-123",
 		"ENV_WITH_QUOTES": "value with spaces; $(echo must-not-run) 'quoted'",
 	}}
-	if err := l.opStartWithConfig(ctx, session, cfg); err != nil {
+	if err := l.opStartWithConfig(ctx, session, withPane(cfg)); err != nil {
 		t.Fatalf("start with staged environment: %v", err)
 	}
 
@@ -243,9 +243,8 @@ func TestStagesAnythingTreatsNativeCopyFilesAsStaging(t *testing.T) {
 }
 
 // withExtraSecretKeys sets the package-level extraSecretKeys seam for the
-// duration of one test and restores it afterward, mirroring
-// withAgentLaunchScript above — stage() has no lifecycle handle to this
-// config, so tests must not leak it across each other.
+// duration of one test and restores it afterward, — stage() has no lifecycle handle to
+// this config, so tests must not leak it across each other.
 func withExtraSecretKeys(t *testing.T, keys []string) {
 	t.Helper()
 	prev := extraSecretKeys
@@ -284,7 +283,7 @@ func TestExtraSecretKeysStagedFromProcessEnv(t *testing.T) {
 	const session = "sess-extra-secret"
 
 	cfg := stageConfig{Env: map[string]string{"GC_SESSION": "safe-value"}}
-	if err := l.opStartWithConfig(ctx, session, cfg); err != nil {
+	if err := l.opStartWithConfig(ctx, session, withPane(cfg)); err != nil {
 		t.Fatalf("start with extra secret key configured: %v", err)
 	}
 
@@ -299,7 +298,7 @@ func TestExtraSecretKeysStagedFromProcessEnv(t *testing.T) {
 	// It must also never ride the launch command's argv, regardless of the
 	// fact that it was sourced outside cfg.Env — an extra secret key is
 	// always secret by declaration.
-	cmd := buildLaunchCommand(cfg.Env, "")
+	cmd := buildLaunchCommandForPane(cfg.Env, "", testPaneCommand)
 	if strings.Contains(strings.Join(cmd, " "), secretValue) {
 		t.Fatalf("launch command %v carries the extra secret value", cmd)
 	}
@@ -317,7 +316,7 @@ func TestExtraSecretKeysCallerEnvWins(t *testing.T) {
 	const session = "sess-extra-secret-collision"
 
 	cfg := stageConfig{Env: map[string]string{"CODEX_AUTH_JSON": "caller-supplied-value"}}
-	if err := l.opStartWithConfig(ctx, session, cfg); err != nil {
+	if err := l.opStartWithConfig(ctx, session, withPane(cfg)); err != nil {
 		t.Fatalf("start with colliding extra secret key: %v", err)
 	}
 
@@ -333,9 +332,8 @@ func TestExtraSecretKeysCallerEnvWins(t *testing.T) {
 // TestExtraSecretKeysUnsetIsNoop is the RED-becomes-rollback half: with
 // GC_NOMAD_EXTRA_SECRET_KEYS unset (the default, extraSecretKeys nil),
 // staging behaves exactly as before this seam existed — a key present only
-// in the process env and never named in cfg.Env is not staged at all, same
-// pattern as GC_NOMAD_AGENT_LAUNCH_SCRIPT's own rollback
-// (TestBuildLaunchCommandDefaultIsBareTmuxPlaceholder).
+// in the process env and never named in cfg.Env is not staged at all: an unset
+// seam is the no-op, and reverting needs no code change.
 func TestExtraSecretKeysUnsetIsNoop(t *testing.T) {
 	t.Setenv("UNCONFIGURED_SECRET", "should-never-be-staged")
 	withExtraSecretKeys(t, nil)
@@ -345,7 +343,7 @@ func TestExtraSecretKeysUnsetIsNoop(t *testing.T) {
 	const session = "sess-extra-secret-unset"
 
 	cfg := stageConfig{Env: map[string]string{"GC_SESSION": "safe-value"}}
-	if err := l.opStartWithConfig(ctx, session, cfg); err != nil {
+	if err := l.opStartWithConfig(ctx, session, withPane(cfg)); err != nil {
 		t.Fatalf("start with no extra secret keys configured: %v", err)
 	}
 
@@ -442,7 +440,7 @@ func TestExtraSecretKeysNoCanaryLeak(t *testing.T) {
 	withExtraSecretKeys(t, []string{"CODEX_AUTH_JSON"})
 
 	cfg := stageConfig{Env: map[string]string{"GC_SESSION": "safe-value-not-a-secret"}}
-	if err := l.opStartWithConfig(ctx, session, cfg); err != nil {
+	if err := l.opStartWithConfig(ctx, session, withPane(cfg)); err != nil {
 		t.Fatalf("start with extra secret key configured: %v", err)
 	}
 
@@ -515,7 +513,7 @@ func TestM3StagingReceiptNoCanaryLeak(t *testing.T) {
 			"OPENAI_API_KEY": canary, // not on the argvSafe allow-list -> must route to secrets dir
 		},
 	}
-	if err := l.opStartWithConfig(ctx, session, cfg); err != nil {
+	if err := l.opStartWithConfig(ctx, session, withPane(cfg)); err != nil {
 		t.Fatalf("start with staged secret: %v", err)
 	}
 
@@ -615,10 +613,10 @@ func TestM3StagingReceiptNoCanaryLeak(t *testing.T) {
 // anything else (credential-shaped, per E1a §4.5) never does — deterministic
 // and independent of exec/tmux, unlike the end-to-end canary receipt above.
 func TestBuildLaunchCommandClassifiesEnv(t *testing.T) {
-	cmd := buildLaunchCommand(map[string]string{
+	cmd := buildLaunchCommandForPane(map[string]string{
 		"GC_SESSION":     "safe-value",
 		"OPENAI_API_KEY": "must-not-appear-on-argv",
-	}, "")
+	}, "", testPaneCommand)
 	joined := strings.Join(cmd, " ")
 	if !strings.Contains(joined, "GC_SESSION=safe-value") {
 		t.Fatalf("launch command %v missing argvSafe env GC_SESSION", cmd)
@@ -648,7 +646,7 @@ func TestRemoteStageStripsLocalCityStoreEnv(t *testing.T) {
 		"GC_SESSION_EPOCH":      "epoch-123",
 		"UNRELATED_RUNTIME_ENV": "preserve-me",
 	}}
-	if err := l.opStartWithConfig(context.Background(), "sess-remote-local-env", cfg); err != nil {
+	if err := l.opStartWithConfig(context.Background(), "sess-remote-local-env", withPane(cfg)); err != nil {
 		t.Fatalf("start with remote environment: %v", err)
 	}
 
@@ -676,7 +674,7 @@ func TestRemoteStageStripsLocalCityStoreEnv(t *testing.T) {
 		}
 	}
 
-	launch := strings.Join(buildLaunchCommand(cfg.Env, ""), " ")
+	launch := strings.Join(buildLaunchCommandForPane(cfg.Env, "", testPaneCommand), " ")
 	if strings.Contains(launch, "GC_CITY=local-city") {
 		t.Fatalf("remote launch forwards local GC_CITY: %s", launch)
 	}
@@ -693,7 +691,7 @@ func TestLocalStagePreservesLocalCityStoreEnv(t *testing.T) {
 		"GC_CITY_RUNTIME_DIR": "/local/runtime",
 		"GC_BEADS":            "file",
 	}}
-	if err := l.opStartWithConfig(context.Background(), "sess-local-env", cfg); err != nil {
+	if err := l.opStartWithConfig(context.Background(), "sess-local-env", withPane(cfg)); err != nil {
 		t.Fatalf("start with local environment: %v", err)
 	}
 
@@ -717,80 +715,10 @@ func TestLocalStagePreservesLocalCityStoreEnv(t *testing.T) {
 // TestBuildLaunchCommandSourcesStagedEnvironment ensures launch imports the
 // values staged under NOMAD_SECRETS_DIR before creating tmux.
 func TestBuildLaunchCommandSourcesStagedEnvironment(t *testing.T) {
-	cmd := buildLaunchCommand(nil, "")
+	cmd := buildLaunchCommandForPane(nil, "", testPaneCommand)
 	joined := strings.Join(cmd, " ")
 	if !strings.Contains(joined, `NOMAD_SECRETS_DIR/env.sh`) {
 		t.Fatalf("launch command %v does not source staged environment", cmd)
-	}
-}
-
-// withAgentLaunchScript sets the package-level agentLaunchScript seam for
-// the duration of one test and restores it afterward — cr-zwjsi's bounded
-// launch contract is a global (buildLaunchCommand has no lifecycle handle),
-// so tests must not leak configuration across each other.
-func withAgentLaunchScript(t *testing.T, script string) {
-	t.Helper()
-	prev := agentLaunchScript
-	agentLaunchScript = script
-	t.Cleanup(func() { agentLaunchScript = prev })
-}
-
-// TestBuildLaunchCommandDefaultIsBareTmuxPlaceholder is the RED half of the
-// bounded launch seam (cr-zwjsi): with GC_NOMAD_AGENT_LAUNCH_SCRIPT unset,
-// the tmux pane's initial command must stay unspecified (the legacy
-// placeholder shell) — this is both the generic-command-execution default
-// and the seam's rollback path.
-func TestBuildLaunchCommandDefaultIsBareTmuxPlaceholder(t *testing.T) {
-	withAgentLaunchScript(t, "")
-	cmd := buildLaunchCommand(nil, "")
-	if got, want := cmd[len(cmd)-1], tmuxSessionName; got != want {
-		t.Fatalf("launch command %v ends with %q, want tmux session name %q as the last argv (no configured pane command)", cmd, got, want)
-	}
-}
-
-// TestBuildLaunchCommandRunsConfiguredAgentScript is the GREEN half: with
-// GC_NOMAD_AGENT_LAUNCH_SCRIPT configured to a Codex-shaped bootstrap
-// (PATH prepend to the pinned artifact toolchain plus CODEX_HOME inside
-// $NOMAD_SECRETS_DIR, per cr-u4plc.1's wiring recipe), the tmux new-session
-// call must carry that exact script as its initial pane command — the
-// configured agent command line, not the bare placeholder.
-func TestBuildLaunchCommandRunsConfiguredAgentScript(t *testing.T) {
-	const script = `export PATH="/mnt/nomad/codex/bin/current:/mnt/nomad/gc/bin/current:$PATH"
-export CODEX_HOME="$NOMAD_SECRETS_DIR/codex-home"
-mkdir -p "$CODEX_HOME"
-if [ -f "$NOMAD_SECRETS_DIR/CODEX_AUTH_JSON" ]; then
-	install -m 600 "$NOMAD_SECRETS_DIR/CODEX_AUTH_JSON" "$CODEX_HOME/auth.json"
-fi
-exec codex`
-	withAgentLaunchScript(t, script)
-
-	cmd := buildLaunchCommand(map[string]string{"GC_SESSION": "safe-value"}, "")
-	joined := strings.Join(cmd, " ")
-
-	if !strings.Contains(joined, "/mnt/nomad/codex/bin/current") {
-		t.Fatalf("launch command %v does not resolve PATH to the pinned codex toolchain", cmd)
-	}
-	if !strings.Contains(joined, `CODEX_HOME="$NOMAD_SECRETS_DIR/codex-home"`) {
-		t.Fatalf("launch command %v does not point CODEX_HOME inside the per-session secrets directory", cmd)
-	}
-	if strings.Contains(joined, "must-not-appear") {
-		t.Fatalf("launch command %v unexpectedly carries credential-shaped content", cmd)
-	}
-	// The pane's initial command is the configured script with the staged
-	// environment sourced ahead of it (cr-gdeav.6.8) and the pane cwd chosen
-	// in between (cr-gdeav.6.10), still exactly one /bin/sh -c argument.
-	body := cmd[len(cmd)-1]
-	if cmd[len(cmd)-3] != "/bin/sh" || cmd[len(cmd)-2] != "-c" {
-		t.Fatalf("launch command %v does not end in one /bin/sh -c pane body", cmd)
-	}
-	if !strings.HasPrefix(body, paneStagedEnvPrelude) {
-		t.Fatalf("pane body %q does not start by sourcing the staged environment", body)
-	}
-	if !strings.HasSuffix(body, script) {
-		t.Fatalf("pane body %q does not end with the configured agent script", body)
-	}
-	if !strings.Contains(body, paneCwdPrelude("")) {
-		t.Fatalf("pane body %q does not choose a cwd between the env prelude and the agent", body)
 	}
 }
 
@@ -806,14 +734,13 @@ exec codex`
 // attempt-2 shape). Unit tier: it inspects the built argv and must not exec
 // tmux (the builder image has none).
 func TestLaunchCommandPaneSourcesStagedEnv(t *testing.T) {
-	const script = `. /mnt/nomad/gc/agent-launch.sh`
-	withAgentLaunchScript(t, script)
+	const rendered = "exec codex"
 
 	for _, tmuxArgs := range [][]string{
 		{"new-session", "-d", "-s", tmuxSessionName},
 		{"respawn-pane", "-k", "-t", tmuxSessionName},
 	} {
-		cmd := buildLaunchCommandForTmux(nil, tmuxArgs, "")
+		cmd := buildLaunchCommandForTmuxWithPaneCommand(nil, tmuxArgs, "", rendered)
 		if len(cmd) < 3 || cmd[len(cmd)-3] != "/bin/sh" || cmd[len(cmd)-2] != "-c" {
 			t.Fatalf("%s: launch command %v does not end in a /bin/sh -c pane body", tmuxArgs[0], cmd)
 		}
@@ -821,8 +748,8 @@ func TestLaunchCommandPaneSourcesStagedEnv(t *testing.T) {
 		if !strings.Contains(pane, `. "$NOMAD_SECRETS_DIR/env.sh"`) {
 			t.Errorf("%s: pane body does not source the staged environment: %q", tmuxArgs[0], pane)
 		}
-		if !strings.HasSuffix(pane, script) {
-			t.Errorf("%s: pane body %q no longer ends with the configured agent launch script", tmuxArgs[0], pane)
+		if !strings.HasSuffix(pane, rendered) {
+			t.Errorf("%s: pane body %q no longer ends with gc's rendered command", tmuxArgs[0], pane)
 		}
 	}
 }
@@ -866,10 +793,9 @@ func (r *requestRecorder) dump() string {
 // that is present nor one that is absent can fail the launch. Unit tier: it
 // inspects the built argv and must not exec tmux.
 func TestLaunchCommandPaneCdToStagedWorkDir(t *testing.T) {
-	const script = `. /mnt/nomad/gc/agent-launch.sh`
-	withAgentLaunchScript(t, script)
+	const rendered = "exec codex"
 
-	cmd := buildLaunchCommand(nil, "/tmp/staged-rig")
+	cmd := buildLaunchCommandForPane(nil, "/tmp/staged-rig", rendered)
 	body := cmd[len(cmd)-1]
 	wantCd := `cd '/tmp/staged-rig' 2>/dev/null || `
 	if !strings.Contains(body, wantCd) {
@@ -883,16 +809,15 @@ func TestLaunchCommandPaneCdToStagedWorkDir(t *testing.T) {
 	if strings.Index(body, scratch) < idxCd {
 		t.Fatalf("pane body %q tries the scratch directory before the staged work dir", body)
 	}
-	if !strings.HasSuffix(body, script) {
-		t.Fatalf("pane body %q no longer ends with the agent script the cd must precede", body)
+	if !strings.HasSuffix(body, rendered) {
+		t.Fatalf("pane body %q no longer ends with the rendered command the cd must precede", body)
 	}
 }
 
 // TestLaunchCommandPaneCdQuotesWorkDir pins that a work dir is data, not
 // pane-shell code.
 func TestLaunchCommandPaneCdQuotesWorkDir(t *testing.T) {
-	withAgentLaunchScript(t, `exec codex`)
-	cmd := buildLaunchCommand(nil, "/tmp/it's a trap;touch /tmp/pwned")
+	cmd := buildLaunchCommandForPane(nil, "/tmp/it's a trap;touch /tmp/pwned", `exec codex`)
 	body := cmd[len(cmd)-1]
 	if strings.Contains(body, "cd /tmp/it") {
 		t.Fatalf("pane body %q interpolates the work dir unquoted", body)
