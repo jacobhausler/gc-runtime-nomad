@@ -38,7 +38,10 @@ var (
 	// caller cannot mistake an empty read for a recovered binding.
 	errBindingNoMatch = errors.New("sidecar binding recovery: no matching child")
 	// errBindingAmbiguous prevents a recovery from guessing when more than one
-	// child carries the same session Meta. The safe answer is a loud refusal.
+	// live child carries the same session Meta. The safe answer is a loud
+	// refusal; terminal residue is excluded from that count by recoverBinding,
+	// because a child whose alloc already finished cannot compete for the
+	// binding and would otherwise make every retry of a live session ambiguous.
 	errBindingAmbiguous = errors.New("sidecar binding recovery: matching children are ambiguous")
 	// errBindingTerminal prevents a terminal Meta-matching child from being
 	// silently skipped. A terminal match is evidence of a stale or disputed
@@ -1192,9 +1195,17 @@ func (l *lifecycle) parentJobSpec() nomadJob {
 // filtered by the child namespace as well as gc_session: the request's
 // namespace query is not a substitute for checking each returned row.
 //
-// Exactly one attributable, non-terminal child is required. Zero matches,
-// multiple matches, a terminal match, or a missing nonce are all loud errors;
-// the caller must never guess a child or dispatch around a disputed binding.
+// Exactly one attributable, non-terminal child is required. Terminal children
+// are neither candidates nor, on their own, evidence of a dispute: they are
+// residue from an attempt that already ended. Counting them made one live box
+// plus one dead child read as a disputed binding on every retry, which is how
+// the D3 canary lost every runtime-backed seat on 2026-09-10 (cr-x6nr04:
+// "matching children are ambiguous ... found 2 children"). Zero non-terminal
+// matches, multiple non-terminal matches, or a missing nonce are all loud
+// errors; the caller must never guess a child or dispatch around a disputed
+// binding. With nothing live left to recover, a terminal match keeps its own
+// loud error: there is nothing to adopt, and refusing is what prevents a
+// dispatch around a stale or disputed binding.
 // CreatedAt remains zero because the jobs-list response does not provide a
 // creation timestamp. Adoption handles that unknown age explicitly instead
 // of silently bypassing the bounded adoption-age rule.
@@ -1205,25 +1216,30 @@ func (l *lifecycle) recoverBinding(ctx context.Context, sessionName string, prio
 	}
 
 	matches := make([]childJob, 0, 1)
+	terminalMatches := make([]childJob, 0, 1)
 	for _, child := range children {
 		if child.Namespace != l.client.namespace || child.Meta["gc_session"] != sessionName {
+			continue
+		}
+		if child.Terminal {
+			terminalMatches = append(terminalMatches, child)
 			continue
 		}
 		matches = append(matches, child)
 	}
 	switch len(matches) {
 	case 0:
+		if len(terminalMatches) > 0 {
+			return binding{}, fmt.Errorf("%w for session %q: child %q", errBindingTerminal, sessionName, terminalMatches[0].ID)
+		}
 		return binding{}, fmt.Errorf("%w for session %q in parent %q", errBindingNoMatch, sessionName, l.parentJobID)
 	case 1:
 		// Continue with the guard checks below.
 	default:
-		return binding{}, fmt.Errorf("%w for session %q in parent %q: found %d children", errBindingAmbiguous, sessionName, l.parentJobID, len(matches))
+		return binding{}, fmt.Errorf("%w for session %q in parent %q: found %d non-terminal children", errBindingAmbiguous, sessionName, l.parentJobID, len(matches))
 	}
 
 	child := matches[0]
-	if child.Terminal {
-		return binding{}, fmt.Errorf("%w for session %q: child %q", errBindingTerminal, sessionName, child.ID)
-	}
 	nonce := strings.TrimSpace(child.Meta["gc_nonce"])
 	if nonce == "" {
 		return binding{}, fmt.Errorf("sidecar binding recovery: child %q for session %q has no gc_nonce", child.ID, sessionName)
