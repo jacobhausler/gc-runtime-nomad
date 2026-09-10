@@ -922,11 +922,31 @@ func (l *lifecycle) opExec(ctx context.Context, sessionName string, command []st
 	if err != nil {
 		return 0, nil, err
 	}
-	exitCode, stdout, err := l.client.execAlloc(ctx, allocID, execTaskName, command)
+	// stdout keeps the plain execAlloc semantics (peek's pane capture must not
+	// start seeing box diagnostics spliced in); stderr is collected only to
+	// record why a nonzero command failed, because gc discards the pack's own
+	// output whenever the op exits nonzero (cr-86ytiq).
+	exitCode, stdout, boxErr, err := l.client.execAllocObserved(ctx, allocID, execTaskName, command, nil)
 	if err != nil {
 		return 0, nil, fmt.Errorf("exec on session %q: %w", sessionName, err)
 	}
+	if exitCode != 0 {
+		l.logDecision("exec on session %q exited %d: stdout=%s stderr=%s",
+			sessionName, exitCode, execExcerpt(stdout), execExcerpt(boxErr))
+	}
 	return exitCode, stdout, nil
+}
+
+// execExcerpt renders box output for an error line: trimmed, length-bounded so
+// a chatty failing command cannot blow up the log line or the caller's error
+// string, and quoted so the boundary is visible.
+func execExcerpt(b []byte) string {
+	const limit = 512
+	s := strings.TrimSpace(string(b))
+	if len(s) > limit {
+		return strconv.Quote(s[:limit] + "...")
+	}
+	return strconv.Quote(s)
 }
 
 // isSeparableTransportLaunch recognizes only the two canonical tmux argv
@@ -1327,12 +1347,19 @@ func (l *lifecycle) launchWithCommand(ctx context.Context, sessionName string, c
 		return err
 	}
 	return retryAllocExecReady(ctx, func() error {
-		exitCode, dbgOut, err := l.client.execAlloc(ctx, allocID, execTaskName, command)
+		// The launch is the one exec whose failure has to say WHY. gc's exec
+		// transport turns any nonzero op exit into "tmux exited N" and drops
+		// the pack's own stdout/stderr on the floor
+		// (internal/runtime/exec/exec.go Provider.Exec/launchAgent), so the
+		// box's diagnostics are the only reason that survives this boundary —
+		// and they arrive on the exec stream's stderr frames (cr-86ytiq).
+		exitCode, out, boxErr, err := l.client.execAllocObserved(ctx, allocID, execTaskName, command, nil)
 		if err != nil {
 			return fmt.Errorf("launching session %q: %w", sessionName, err)
 		}
 		if exitCode != 0 {
-			return fmt.Errorf("launching session %q: launch command exited %d DEBUGOUT=%q", sessionName, exitCode, string(dbgOut))
+			return fmt.Errorf("launching session %q: launch command exited %d: stdout=%s stderr=%s",
+				sessionName, exitCode, execExcerpt(out), execExcerpt(boxErr))
 		}
 		return nil
 	})

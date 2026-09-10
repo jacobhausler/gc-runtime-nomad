@@ -30,7 +30,7 @@ const (
 // (NRT-P1-06 staging: a tar-over-exec-stdin payload rides here) until it
 // sees a stdin-close, then actually runs the command carried in the
 // `command` query param (runCommand) with that collected stdin wired to the
-// real subprocess, and replies with its real stdout+stderr and exit code —
+// real subprocess, and replies with its real stdout and stderr as separate frames plus its exit code —
 // RPP-CONN-001's exit-code fidelity requires a genuine per-command result,
 // not a canned reply.
 func (s *Server) handleExecWS(w http.ResponseWriter, r *http.Request, allocID string) {
@@ -122,12 +122,25 @@ func (s *Server) handleExecWS(w http.ResponseWriter, r *http.Request, allocID st
 			if s.takeExecFailure() {
 				return
 			}
-			exitCode, output := s.runCommand(allocID, command, stdin.Bytes())
-			stdout, _ := json.Marshal(map[string]any{
-				"stdout": map[string]string{"data": base64.StdEncoding.EncodeToString(output)},
+			exitCode, stdout, stderr := s.runCommand(allocID, command, stdin.Bytes())
+			stdoutFrame, _ := json.Marshal(map[string]any{
+				"stdout": map[string]string{"data": base64.StdEncoding.EncodeToString(stdout)},
 			})
-			if err := wsWriteFrame(conn, wsOpText, stdout); err != nil {
+			if err := wsWriteFrame(conn, wsOpText, stdoutFrame); err != nil {
 				return
+			}
+			// Real Nomad carries the command's stderr in its own data frames
+			// (e2a-exec-protocol), so the fake does too — a client that only
+			// reads stdout now visibly loses the box's diagnostics, which is
+			// the fidelity gap that made an in-box launch failure unreadable
+			// (cr-86ytiq).
+			if len(stderr) > 0 {
+				stderrFrame, _ := json.Marshal(map[string]any{
+					"stderr": map[string]string{"data": base64.StdEncoding.EncodeToString(stderr)},
+				})
+				if err := wsWriteFrame(conn, wsOpText, stderrFrame); err != nil {
+					return
+				}
 			}
 			exited, _ := json.Marshal(map[string]any{
 				"exited": true,

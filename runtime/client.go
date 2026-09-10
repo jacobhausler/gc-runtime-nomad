@@ -593,13 +593,19 @@ func clientContext(ctx context.Context, timeout time.Duration) (context.Context,
 	return context.WithTimeout(ctx, timeout)
 }
 
-// execFrame decodes the two alloc-exec WebSocket frame shapes this client
-// reads: a stdout data chunk and the terminal exited/exit_code frame
-// (e2a-exec-protocol).
+// execFrame decodes the three alloc-exec WebSocket frame shapes this client
+// reads: a stdout data chunk, a stderr data chunk, and the terminal
+// exited/exit_code frame (e2a-exec-protocol). stderr is collected only for
+// callers that asked for it (execAllocObserved); the plain stream callers keep
+// stdout-only semantics so nothing that matches on command output — peek's
+// pane capture above all — starts seeing box diagnostics spliced into it.
 type execFrame struct {
 	Stdout *struct {
 		Data string `json:"data"`
 	} `json:"stdout,omitempty"`
+	Stderr *struct {
+		Data string `json:"data"`
+	} `json:"stderr,omitempty"`
 	Exited bool `json:"exited,omitempty"`
 	Result struct {
 		ExitCode int `json:"exit_code"`
@@ -627,12 +633,23 @@ const execStdinChunkSize = 32 * 1024
 // makes both fakenomad and real Nomad actually run the command — the
 // tar-over-exec-stdin channel NRT-P1-06's workspace/secrets staging rides.
 func (c *client) execAllocStdin(ctx context.Context, allocID, task string, command []string, stdin []byte) (int, []byte, error) {
+	exitCode, stdout, _, err := c.execAllocObserved(ctx, allocID, task, command, stdin)
+	return exitCode, stdout, err
+}
+
+// execAllocObserved is execAllocStdin's twin for the callers that have to know
+// WHY the box said no: it returns the command's stderr alongside its stdout.
+// The launch handshake is the reason this exists (cr-86ytiq) — gc's exec
+// transport reports only "tmux exited N", so a pane that dies before the
+// bootstrap runs is otherwise unobservable from the controller side, and the
+// box's own diagnostic was being dropped here at the frame codec.
+func (c *client) execAllocObserved(ctx context.Context, allocID, task string, command []string, stdin []byte) (int, []byte, []byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	conn, err := c.dialExecWS(ctx, allocID, task, command)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(execTimeout))
@@ -654,44 +671,51 @@ func (c *client) execAllocStdin(ctx context.Context, allocID, task string, comma
 		}
 		dataFrame, err := json.Marshal(map[string]any{"stdin": map[string]any{"data": base64.StdEncoding.EncodeToString(chunk)}})
 		if err != nil {
-			return 0, nil, fmt.Errorf("encoding exec stdin-data frame: %w", err)
+			return 0, nil, nil, fmt.Errorf("encoding exec stdin-data frame: %w", err)
 		}
 		if err := wsWriteMaskedFrame(conn, wsOpText, dataFrame); err != nil {
-			return 0, nil, fmt.Errorf("writing exec stdin-data frame: %w", err)
+			return 0, nil, nil, fmt.Errorf("writing exec stdin-data frame: %w", err)
 		}
 		stdin = stdin[len(chunk):]
 	}
 
 	closeFrame, err := json.Marshal(map[string]any{"stdin": map[string]any{"close": true}})
 	if err != nil {
-		return 0, nil, fmt.Errorf("encoding exec stdin-close frame: %w", err)
+		return 0, nil, nil, fmt.Errorf("encoding exec stdin-close frame: %w", err)
 	}
 	if err := wsWriteMaskedFrame(conn, wsOpText, closeFrame); err != nil {
-		return 0, nil, fmt.Errorf("writing exec stdin-close frame: %w", err)
+		return 0, nil, nil, fmt.Errorf("writing exec stdin-close frame: %w", err)
 	}
 
-	var stdout bytes.Buffer
+	var stdout, stderr bytes.Buffer
 	for {
 		opcode, payload, err := wsReadFrame(conn)
 		if err != nil {
-			return 0, nil, fmt.Errorf("reading exec frame: %w", err)
+			return 0, nil, nil, fmt.Errorf("reading exec frame: %w", err)
 		}
 		if opcode != wsOpText {
 			continue
 		}
 		var msg execFrame
 		if err := json.Unmarshal(payload, &msg); err != nil {
-			return 0, nil, fmt.Errorf("decoding exec frame: %w", err)
+			return 0, nil, nil, fmt.Errorf("decoding exec frame: %w", err)
 		}
 		if msg.Stdout != nil && msg.Stdout.Data != "" {
 			decoded, err := base64.StdEncoding.DecodeString(msg.Stdout.Data)
 			if err != nil {
-				return 0, nil, fmt.Errorf("decoding exec stdout: %w", err)
+				return 0, nil, nil, fmt.Errorf("decoding exec stdout: %w", err)
 			}
 			stdout.Write(decoded)
 		}
+		if msg.Stderr != nil && msg.Stderr.Data != "" {
+			decoded, err := base64.StdEncoding.DecodeString(msg.Stderr.Data)
+			if err != nil {
+				return 0, nil, nil, fmt.Errorf("decoding exec stderr: %w", err)
+			}
+			stderr.Write(decoded)
+		}
 		if msg.Exited {
-			return msg.Result.ExitCode, stdout.Bytes(), nil
+			return msg.Result.ExitCode, stdout.Bytes(), stderr.Bytes(), nil
 		}
 	}
 }

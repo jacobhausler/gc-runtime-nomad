@@ -1757,3 +1757,26 @@ func TestExecStageWaitsForTaskRunningBeforeExecing(t *testing.T) {
 		t.Fatal("staging exec never completed after the task reached running")
 	}
 }
+
+// TestLaunchFailureCarriesBoxStderr closes the cr-86ytiq observability gap:
+// gc's exec transport renders any nonzero exec exit as "tmux exited N" and
+// discards the pack's own stdout/stderr, so the ONLY reason a pane died that
+// can survive to the controller is the box's diagnostic collected here. The
+// fake now ships stderr in its own frames the way real Nomad does, so this
+// test fails if the client's frame codec drops them again.
+func TestLaunchFailureCarriesBoxStderr(t *testing.T) {
+	ctx := context.Background()
+	l, _ := newTestLifecycle(t)
+	const session = "sess-launch-stderr"
+	if err := l.opStart(ctx, session); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	err := l.launchWithCommand(ctx, session, []string{"/bin/sh", "-c",
+		"echo out-noise; echo 'pane-died: no codex on PATH' >&2; exit 1"})
+	if err == nil {
+		t.Fatal("launchWithCommand = nil, want the command's nonzero exit reported")
+	}
+	if !strings.Contains(err.Error(), "pane-died: no codex on PATH") {
+		t.Fatalf("launch error = %v, want the box's stderr quoted in it", err)
+	}
+}

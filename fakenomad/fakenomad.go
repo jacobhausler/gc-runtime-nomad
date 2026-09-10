@@ -1086,9 +1086,14 @@ func (s *Server) allocSecretsDir(allocID string) string {
 // subprocess (NRT-P1-06): staging's tar-over-exec-stdin workspace/secrets
 // payloads need a genuine pipe, not a canned reply, for the M3 receipt's
 // env.workspace probe to mean anything.
-func (s *Server) runCommand(allocID string, command []string, stdin []byte) (int, []byte) {
+// runCommand executes the exec command the client asked for and returns its
+// exit code with stdout and stderr kept SEPARATELY, the way a real Nomad
+// alloc-exec stream carries them in distinct frames (cr-86ytiq: folding them
+// into one buffer hid the fact that the pack's client never read stderr at
+// all, so a launch that died in the box reported no reason).
+func (s *Server) runCommand(allocID string, command []string, stdin []byte) (int, []byte, []byte) {
 	if len(command) == 0 {
-		return 0, []byte("ok\n")
+		return 0, []byte("ok\n"), nil
 	}
 	dir := s.allocScratchDir(allocID)
 	cmd := exec.Command(command[0], command[1:]...)
@@ -1097,21 +1102,21 @@ func (s *Server) runCommand(allocID string, command []string, stdin []byte) (int
 	if len(stdin) > 0 {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
 	err := cmd.Run()
 	if err == nil {
-		return 0, out.Bytes()
+		return 0, stdout.Bytes(), stderr.Bytes()
 	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
-		return exitErr.ExitCode(), out.Bytes()
+		return exitErr.ExitCode(), stdout.Bytes(), stderr.Bytes()
 	}
 	// Not even an exit-code failure (binary missing, etc.): surface as a
-	// generic failure with the error appended to whatever output exists.
-	out.WriteString(err.Error())
-	return 1, out.Bytes()
+	// generic failure on the stream a caller reads diagnostics from.
+	stderr.WriteString(err.Error())
+	return 1, stdout.Bytes(), stderr.Bytes()
 }
 
 // taskCommand extracts the exec-driver "command"/"args" pair from a Nomad
