@@ -606,7 +606,17 @@ var remoteContextPEMKeys = [3]struct{ field, key string }{
 // (missing GC_CITY_NAME or GC_CITY_URL) — a no-op for every deployment that
 // does not opt into this bridge, same invariant every other staging field on
 // this pack already holds.
-func buildRemoteContextFile(secretEnv map[string]string) *stageFile {
+//
+// secretsDir is the mount point the literal PEM paths are written against: an
+// empty string is the exec driver's platform constant (nomadSecretsDirPath),
+// and the docker-driver shape passes the point it resolved from the box
+// (lifecycle.boxSecretsDir) instead of assuming that constant also holds
+// inside a container (cr-hcgaxt). Runtime secret BYTES never ride here — only
+// the paths that name them do.
+func buildRemoteContextFile(secretEnv map[string]string, secretsDir string) *stageFile {
+	if secretsDir == "" {
+		secretsDir = nomadSecretsDirPath
+	}
 	name := strings.TrimSpace(secretEnv["GC_CITY_NAME"])
 	url := strings.TrimSpace(secretEnv["GC_CITY_URL"])
 	if name == "" || url == "" {
@@ -620,7 +630,7 @@ func buildRemoteContextFile(secretEnv map[string]string) *stageFile {
 		if _, present := secretEnv[role.key]; !present {
 			continue
 		}
-		fmt.Fprintf(&b, "%s = %s\n", role.field, tomlQuote(nomadSecretsDirPath+"/"+role.key))
+		fmt.Fprintf(&b, "%s = %s\n", role.field, tomlQuote(secretsDir+"/"+role.key))
 	}
 	return &stageFile{Path: remoteContextRelPath, Content: []byte(b.String()), Mode: 0o600}
 }

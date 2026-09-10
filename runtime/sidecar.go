@@ -78,6 +78,21 @@ type binding struct {
 	// rather than falling back to the exec driver's cwd ("/").
 	WorkDir string `json:"work_dir,omitempty"`
 
+	// ProviderCommand is the launch body gc rendered for this box's pane,
+	// recorded at launch confirmation because it is what the pane actually
+	// runs in the docker-driver (prebaked image) shape: the image owns the
+	// toolchain, so there is no deployment bootstrap for the pack to
+	// re-derive on a relaunch (opRelaunch sends no command).
+	//
+	// This is residue, not attribution. The child job's dispatch Meta
+	// (gc_session + gc_nonce, bounded by parent and namespace) stays the
+	// immutable session-to-child record and is what recovers a lost binding
+	// (liveChild's Meta recovery); the sidecar keeps only the host-local facts
+	// Nomad cannot answer, and this is one of them. Absent on bindings written
+	// before the image-mode weld (cr-hcgaxt): such a box relaunches through the
+	// legacy deployment bootstrap, exactly as it did before.
+	ProviderCommand string `json:"provider_command,omitempty"`
+
 	// PromptedAt receipts the moment the startup prompt was actually typed
 	// into the pane (cr-gdeav.6.10). It is what makes the delivery exactly-once
 	// across processes: gc execs this binary fresh per op, so a retried

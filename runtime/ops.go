@@ -360,7 +360,7 @@ func init() {
 }
 
 func configureAgentLaunchScript() {
-	agentLaunchScript = os.Getenv("GC_NOMAD_AGENT_LAUNCH_SCRIPT")
+	agentLaunchScript = os.Getenv(envAgentLaunch)
 }
 
 func configureExtraSecretKeys() {
@@ -399,7 +399,23 @@ func parseExtraSecretKeys(raw string) []string {
 // out of the already-staged $NOMAD_SECRETS_DIR files at pane-start time, so
 // nothing secret ever rides this argv either.
 func buildLaunchCommand(env map[string]string, workDir string) []string {
-	return buildLaunchCommandForTmux(env, []string{"new-session", "-d", "-s", tmuxSessionName}, workDir)
+	return buildLaunchCommandForPane(env, workDir, agentLaunchScript)
+}
+
+// defaultTmuxLaunchArgs is the canonical detached tmux operation the pack uses
+// to start a provisioned box. It is the same operation gc itself emits on the
+// separable transport path (separableTransportLaunch), which is why both launch
+// surfaces can compose through one builder.
+var defaultTmuxLaunchArgs = []string{"new-session", "-d", "-s", tmuxSessionName}
+
+// buildLaunchCommandForPane composes the detached tmux launch for an explicit
+// pane body. It is the single composition point of the two launch surfaces:
+// the pack contributes the value-safe env wrapper, the argvSafe `-e` pairs, and
+// the in-pane staged-env plus cwd preludes, and the CALLER owns the pane body —
+// the deployment bootstrap on the legacy exec shape, gc's rendered provider
+// command on the docker-driver (prebaked image) shape.
+func buildLaunchCommandForPane(env map[string]string, workDir, paneCommand string) []string {
+	return buildLaunchCommandForTmuxWithPaneCommand(env, defaultTmuxLaunchArgs, workDir, paneCommand)
 }
 
 // buildLaunchCommandForTmux uses the pack-owned staged bootstrap with the
@@ -790,7 +806,11 @@ func (l *lifecycle) adoptExisting(ctx context.Context, sessionName string, b bin
 		return true, nil
 	case adoptSelfHealLaunched:
 		l.logDecision("%s %q: path=self-heal-launched-marker — %s", op, sessionName, why)
-		if err := l.confirmLaunched(ctx, sessionName, b.WorkDir); err != nil {
+		// The self-heal re-records a launch that already happened, so it
+		// re-states what the binding already holds — the recorded provider
+		// command included, so healing the marker cannot drop the command a
+		// later relaunch needs (cr-hcgaxt).
+		if err := l.confirmLaunched(ctx, sessionName, b.WorkDir, b.ProviderCommand); err != nil {
 			return false, err
 		}
 		return false, fmt.Errorf("session %q already exists", sessionName)
@@ -1330,11 +1350,32 @@ func (l *lifecycle) findOrphanByNonce(ctx context.Context, sessionName, nonce st
 	return "", false, nil
 }
 
-// launch execs buildLaunchCommand(env) into sessionName's current alloc —
-// the detached tmux-client call that starts the agent (04 §3 provision row
-// launch invariant).
-func (l *lifecycle) launch(ctx context.Context, sessionName string, env map[string]string, workDir string) error {
-	return l.launchWithCommand(ctx, sessionName, buildLaunchCommand(env, workDir))
+// launch execs the composed tmux-client launch into sessionName's current
+// alloc — the detached tmux-client call that starts the agent (04 §3 provision
+// row launch invariant).
+//
+// providerCommand is gc's rendered launch command and is consulted ONLY by the
+// docker-driver (prebaked image) shape: the image owns the agent toolchain, so
+// its pane runs what gc rendered instead of a deployment bootstrap the image
+// neither needs nor can reach — image shape deliberately declares no artifact
+// volume (jobspec.go sessionTask), so a /mnt/nomad bootstrap would name a path
+// that is not mounted. With no image configured the legacy exec shape keeps
+// buildLaunchCommand byte-for-byte, and unsetting GC_NOMAD_AGENT_IMAGE stays
+// the rollback (cr-hcgaxt, the pack half of L3/F2).
+//
+// An image-mode launch with no rendered command fails closed here rather than
+// execing a pane that starts nothing yet still gets a launched record — the
+// agent-less-box wedge this weld exists to close.
+func (l *lifecycle) launch(ctx context.Context, sessionName string, env map[string]string, workDir, providerCommand string) error {
+	command := buildLaunchCommand(env, workDir)
+	if l.agentImage != "" {
+		if strings.TrimSpace(providerCommand) == "" {
+			return fmt.Errorf("launching session %q: %s is set but gc sent no rendered launch command, and the prebaked image leaves the pack no bootstrap to substitute (cr-hcgaxt)",
+				sessionName, envAgentImage)
+		}
+		command = buildLaunchCommandForPane(env, workDir, providerCommand)
+	}
+	return l.launchWithCommand(ctx, sessionName, command)
 }
 
 // launchWithCommand executes a pack-owned detached tmux launch command into
@@ -1405,17 +1446,24 @@ func (l *lifecycle) capturePanePID(ctx context.Context, sessionName string) (int
 // that runs after every successful launch.
 func (l *lifecycle) markLaunched(ctx context.Context, sessionName string, cfg stageConfig) error {
 	workDir := cfg.WorkDir
-	if workDir == "" {
-		// A relaunch - or a start whose caller sent no work_dir - still gets the
-		// directory the box was first launched in, instead of "/".
+	providerCommand := strings.TrimSpace(cfg.Command)
+	if workDir == "" || providerCommand == "" {
+		// A relaunch - or a start whose caller sent no work_dir or command -
+		// still gets the directory and the rendered command the box was first
+		// launched with, instead of "/" and an empty pane body.
 		if b, ok, err := l.sidecar.load(sessionName); err == nil && ok {
-			workDir = b.WorkDir
+			if workDir == "" {
+				workDir = b.WorkDir
+			}
+			if providerCommand == "" {
+				providerCommand = strings.TrimSpace(b.ProviderCommand)
+			}
 		}
 	}
-	if err := l.launch(ctx, sessionName, cfg.Env, workDir); err != nil {
+	if err := l.launch(ctx, sessionName, cfg.Env, workDir, providerCommand); err != nil {
 		return err
 	}
-	if err := l.confirmLaunched(ctx, sessionName, workDir); err != nil {
+	if err := l.confirmLaunched(ctx, sessionName, workDir, providerCommand); err != nil {
 		return err
 	}
 	return l.startupPrimeDetached(ctx, sessionName, cfg)
@@ -1448,7 +1496,7 @@ func (l *lifecycle) markTransportLaunched(ctx context.Context, sessionName strin
 	if err := l.launchWithCommand(ctx, sessionName, buildLaunchCommandForTmuxWithPaneCommand(nil, transport[1:5], workDir, transport[5])); err != nil {
 		return err
 	}
-	if err := l.confirmLaunched(ctx, sessionName, workDir); err != nil {
+	if err := l.confirmLaunched(ctx, sessionName, workDir, transport[5]); err != nil {
 		return err
 	}
 	cfg := stageConfig{}
@@ -1461,7 +1509,7 @@ func (l *lifecycle) markTransportLaunched(ctx context.Context, sessionName strin
 // confirmLaunched records a launch that has already succeeded. Its caller
 // holds sessionName's lock: opStart/markLaunched hold it end-to-end, while
 // opExec acquires it only for gc's canonical transport-launch command.
-func (l *lifecycle) confirmLaunched(ctx context.Context, sessionName string, workDir string) error {
+func (l *lifecycle) confirmLaunched(ctx context.Context, sessionName string, workDir, providerCommand string) error {
 	// Best-effort: a failure recording the pid does not fail the launch
 	// itself, since the tmux session already exists and answers exec — it
 	// just leaves the probe without a pid to kill -0 (falls back to a
@@ -1478,6 +1526,9 @@ func (l *lifecycle) confirmLaunched(ctx context.Context, sessionName string, wor
 	b.AgentPID = pid
 	if workDir != "" && b.WorkDir != workDir {
 		b.WorkDir = workDir
+	}
+	if providerCommand != "" && b.ProviderCommand != providerCommand {
+		b.ProviderCommand = providerCommand
 	}
 	return l.sidecar.save(*b)
 }
@@ -1596,6 +1647,25 @@ func (l *lifecycle) stage(ctx context.Context, sessionName string, cfg stageConf
 	secretEnv = stripLocalCityStoreEnv(secretEnv)
 	secretEnv = mergeLaunchOptionEnv(secretEnv, cfg.Command)
 
+	// Runtime secrets stay FILE-delivered into Nomad's own secrets mount. The
+	// pack declares no `template {}` / Vault / Consul / identity block anywhere
+	// (jobspec.go sessionTask, R2a-05), so secret bytes reach a box only over
+	// the alloc-exec stream below — never through the job spec, argv, or a
+	// Nomad-interpolated template. The docker-driver shape resolves that
+	// mount's path from the box before writing anything that names it:
+	// contexts.toml is literal TOML with no $NOMAD_SECRETS_DIR expansion, and a
+	// guessed /secrets would point gc's mTLS files at a directory that may not
+	// exist in a container (cr-hcgaxt). Legacy exec shape keeps the constant it
+	// has verified live, unchanged.
+	secretsDir := ""
+	if l.agentImage != "" && len(secretEnv) > 0 {
+		resolved, err := l.boxSecretsDir(ctx, sessionName)
+		if err != nil {
+			return fmt.Errorf("staging secrets for %q: %w", sessionName, err)
+		}
+		secretsDir = resolved
+	}
+
 	var secretFiles []stageFile
 	for k, v := range secretEnv {
 		if !extraKeys[k] && envArgvSafe(k) {
@@ -1618,7 +1688,7 @@ func (l *lifecycle) stage(ctx context.Context, sessionName string, cfg stageConf
 		// contexts.toml itself - gc's own $GC_HOME/contexts.toml schema,
 		// hand-written since this pack cannot import gc's clientcontext
 		// package. Also a no-op append on the same condition.
-		if ctxFile := buildRemoteContextFile(secretEnv); ctxFile != nil {
+		if ctxFile := buildRemoteContextFile(secretEnv, secretsDir); ctxFile != nil {
 			secretFiles = append(secretFiles, *ctxFile)
 		}
 	}
@@ -1637,6 +1707,52 @@ func (l *lifecycle) stage(ctx context.Context, sessionName string, cfg stageConf
 		}
 	}
 	return nil
+}
+
+// boxSecretsDir asks sessionName's box where Nomad actually mounted its secrets
+// tmpfs instead of assuming the exec driver's /secrets also holds inside a
+// container. The docker-driver shape calls it only when there are secrets to
+// deliver, and it fails closed on an empty answer: a box with no secrets mount
+// has nowhere for the staged runtime secret files to go, and staging them to a
+// path the box cannot see would hand the agent a credential-less session with
+// nothing in the record to say so (cr-hcgaxt).
+//
+// The probe prints only a mount POINT — the same path the pack already writes
+// into its own comments and job specs — never a secret value.
+func (l *lifecycle) boxSecretsDir(ctx context.Context, sessionName string) (string, error) {
+	allocID, err := l.awaitExecAllocReady(ctx, sessionName)
+	if err != nil {
+		return "", err
+	}
+	var resolved string
+	if err := retryAllocExecReady(ctx, func() error {
+		exitCode, out, err := l.client.execAlloc(ctx, allocID, execTaskName, []string{
+			"/bin/sh", "-c", `printf %s "$NOMAD_SECRETS_DIR"`, "gc-runtime-nomad-secrets-dir",
+		})
+		if err != nil {
+			return err
+		}
+		if exitCode != 0 {
+			return fmt.Errorf("secrets-dir probe exited %d: %s", exitCode, execExcerpt(out))
+		}
+		resolved = strings.TrimSpace(string(out))
+		return nil
+	}); err != nil {
+		return "", err
+	}
+	return validatedSecretsDir(sessionName, resolved)
+}
+
+// validatedSecretsDir judges what a box reported for its own secrets mount: a
+// single non-empty path, or nothing this pack may write secret bytes to. It is
+// split out of the probe so the fail-closed rule is checkable without a box
+// that lies about its mount.
+func validatedSecretsDir(sessionName, reported string) (string, error) {
+	reported = strings.TrimSpace(reported)
+	if reported == "" || strings.ContainsAny(reported, "\n\r") {
+		return "", fmt.Errorf("session %q reports no usable Nomad secrets mount (NOMAD_SECRETS_DIR=%q): refusing to stage runtime secrets to a path the box cannot see", sessionName, reported)
+	}
+	return reported, nil
 }
 
 // execStage runs command inside sessionName's current alloc with stdin
