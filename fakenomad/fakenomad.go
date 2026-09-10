@@ -1342,6 +1342,25 @@ func setTaskStateLocked(a *Allocation, taskName, state string) {
 	a.TaskStates[taskName] = state
 }
 
+// SetTaskState forces taskName's state on allocID and reports whether the
+// allocation existed. It is the test-side knob for the real-Nomad window cr-u9vul4
+// isolated: an allocation is already placed (its ClientStatus already says the
+// box is up) while a task inside it is still in setup. Only the fake's main
+// task drives ClientStatus, so without this knob no test can hold a task down
+// while the alloc reads as live -- which is exactly the state a pack that
+// execs on alloc presence walks straight into.
+func (s *Server) SetTaskState(allocID, taskName, state string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a, ok := s.allocs[allocID]
+	if !ok {
+		return false
+	}
+	setTaskStateLocked(a, taskName, state)
+	a.ModifyIndex = s.bumpIndexLocked()
+	return true
+}
+
 // setTaskState is setTaskStateLocked's lock-acquiring counterpart, for
 // callers (startSideTask) that don't already hold s.mu and have no other
 // alloc field to update alongside it.

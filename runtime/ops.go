@@ -24,11 +24,32 @@ const sessionLockPollInterval = 20 * time.Millisecond
 const (
 	// allocExecReadyAttempts and allocExecReadyDelay bound the small window
 	// between Nomad dispatch returning and the allocation's exec endpoint
-	// becoming usable. This is deliberately a short readiness retry, not a
-	// general retry for provider or command failures.
+	// becoming usable. Since cr-u9vul4 that window is only the websocket
+	// handshake: whether the task is up at all is settled BEFORE the first
+	// exec by awaitExecAllocReady, not by dialling a task that has not started.
+	// This stays deliberately short, not a general retry for provider or
+	// command failures.
 	allocExecReadyAttempts = 20
 	allocExecReadyDelay    = 250 * time.Millisecond
+
+	// allocTaskRunningTimeout and allocTaskRunningPoll bound the wait for
+	// execTaskName's task to reach Nomad state "running" before the pack execs
+	// into its allocation. currentAlloc answers as soon as an alloc is
+	// non-terminal, and non-terminal includes a task still in setup: the
+	// 2026-09-10 disposable-city proof watched one go Received 16:16:08 ->
+	// Task Setup 16:16:09 -> killed 16:16:15 without ever starting, so the
+	// first staging exec hit "reading exec frame: EOF", the provider errored
+	// after 5.2 s, and gc reaped and re-dispatched 26 boxes in five minutes.
+	// 180 s is the budget that bead names: generous for task setup on this
+	// estate's nodes, bounded, and cancelled with the caller's context.
+	allocTaskRunningTimeout = 180 * time.Second
+	allocTaskRunningPoll    = 500 * time.Millisecond
 )
+
+// allocStateRunning is the Nomad task state that means the task process is up
+// and can take an exec. Anything else -- "pending", "starting", "blocked",
+// "dead" -- means an exec stream the box will tear down under us.
+const allocStateRunning = "running"
 
 var (
 	// errBindingNoMatch is returned when Nomad's children-of-parent read has
@@ -1301,11 +1322,11 @@ func (l *lifecycle) launch(ctx context.Context, sessionName string, env map[stri
 // new-session versus respawn transport verb without handing GC's raw command
 // a way around staged bootstrap.
 func (l *lifecycle) launchWithCommand(ctx context.Context, sessionName string, command []string) error {
+	allocID, err := l.awaitExecAllocReady(ctx, sessionName)
+	if err != nil {
+		return err
+	}
 	return retryAllocExecReady(ctx, func() error {
-		allocID, err := l.currentAlloc(ctx, sessionName)
-		if err != nil {
-			return err
-		}
 		exitCode, dbgOut, err := l.client.execAlloc(ctx, allocID, execTaskName, command)
 		if err != nil {
 			return fmt.Errorf("launching session %q: %w", sessionName, err)
@@ -1598,11 +1619,11 @@ func (l *lifecycle) stage(ctx context.Context, sessionName string, cfg stageConf
 // stderr/stdout (out) is safe to surface, but stdin here may carry secret
 // content the error path must never leak.
 func (l *lifecycle) execStage(ctx context.Context, sessionName string, command []string, stdin []byte) error {
+	allocID, err := l.awaitExecAllocReady(ctx, sessionName)
+	if err != nil {
+		return err
+	}
 	return retryAllocExecReady(ctx, func() error {
-		allocID, err := l.currentAlloc(ctx, sessionName)
-		if err != nil {
-			return err
-		}
 		exitCode, out, err := l.client.execAllocStdin(ctx, allocID, execTaskName, command, stdin)
 		if err != nil {
 			return err
@@ -1619,6 +1640,11 @@ func (l *lifecycle) execStage(ctx context.Context, sessionName string, command [
 // yet, or the exec stream is torn down before the task is ready. Command exit
 // failures and other provider errors are returned immediately so a real fault
 // is not hidden behind a retry delay.
+//
+// It is the handshake retry, not the readiness gate: both of its callers
+// resolve the allocation through awaitExecAllocReady first (cr-u9vul4), because
+// a task that has not started is a state to wait for, not a transport failure
+// to punch at for five seconds.
 func retryAllocExecReady(ctx context.Context, operation func() error) error {
 	var lastErr error
 	for attempt := 0; attempt < allocExecReadyAttempts; attempt++ {
@@ -1678,9 +1704,21 @@ var errAllocNotReady = errors.New("allocation not ready")
 // sessionName's current child job, sidecar-binding-primary (04 §2.1 rule 1),
 // recovering a missing binding from Nomad Meta under the session lock.
 func (l *lifecycle) currentAlloc(ctx context.Context, sessionName string) (string, error) {
-	b, ok, err := l.sidecar.load(sessionName)
+	rec, err := l.currentAllocRecord(ctx, sessionName)
 	if err != nil {
 		return "", err
+	}
+	return rec.ID, nil
+}
+
+// currentAllocRecord is currentAlloc with the allocation's own lifecycle
+// record attached: the exec-readiness wait needs its TaskStates, and issuing
+// a second read for them would let the binding move between the two. Same
+// binding rules, same error classifications as currentAlloc.
+func (l *lifecycle) currentAllocRecord(ctx context.Context, sessionName string) (allocRecord, error) {
+	b, ok, err := l.sidecar.load(sessionName)
+	if err != nil {
+		return allocRecord{}, err
 	}
 	if !ok || b.ChildJobID == "" {
 		// Recovery is a read-modify-write against the same session binding
@@ -1691,12 +1729,12 @@ func (l *lifecycle) currentAlloc(ctx context.Context, sessionName string) (strin
 		// branch is for direct resolution verbs such as exec/peek/nudge.
 		unlock, err := l.lockSession(ctx, sessionName)
 		if err != nil {
-			return "", err
+			return allocRecord{}, err
 		}
 		defer unlock()
 		b, ok, err = l.sidecar.load(sessionName)
 		if err != nil {
-			return "", err
+			return allocRecord{}, err
 		}
 		if ok && b.ChildJobID != "" {
 			// Another process repaired or dispatched the binding while this
@@ -1710,9 +1748,9 @@ func (l *lifecycle) currentAlloc(ctx context.Context, sessionName string) (strin
 			}
 			if err != nil {
 				if errors.Is(err, errBindingNoMatch) || errors.Is(err, errBindingTerminal) {
-					return "", fmt.Errorf("session %q has no provisioned box: %w", sessionName, errSessionNotFound)
+					return allocRecord{}, fmt.Errorf("session %q has no provisioned box: %w", sessionName, errSessionNotFound)
 				}
-				return "", err
+				return allocRecord{}, err
 			}
 			b = &recovered
 		}
@@ -1720,17 +1758,85 @@ func (l *lifecycle) currentAlloc(ctx context.Context, sessionName string) (strin
 
 	allocs, _, err := l.client.listAllocsForJob(ctx, b.ChildJobID, 0, 0)
 	if err != nil {
-		return "", fmt.Errorf("resolving alloc for session %q: %w", sessionName, err)
+		return allocRecord{}, fmt.Errorf("resolving alloc for session %q: %w", sessionName, err)
 	}
 	if len(allocs) == 0 {
-		return "", fmt.Errorf("session %q has no allocation yet: %w; %w", sessionName, errSessionNotFound, errAllocNotReady)
+		return allocRecord{}, fmt.Errorf("session %q has no allocation yet: %w; %w", sessionName, errSessionNotFound, errAllocNotReady)
 	}
 	for _, a := range allocs {
 		if !isTerminalStatus(a.ClientStatus) {
-			return a.ID, nil
+			return a, nil
 		}
 	}
-	return "", fmt.Errorf("session %q has no non-terminal alloc: %w", sessionName, errSessionNotFound)
+	return allocRecord{}, fmt.Errorf("session %q has no non-terminal alloc: %w", sessionName, errSessionNotFound)
+}
+
+// awaitExecAllocReady resolves sessionName's allocation and returns its ID
+// only once execTaskName's task inside it is running -- the readiness contract
+// the exec seam was missing (cr-u9vul4). An alloc in "Task Setup" is
+// non-terminal, so currentAlloc returned it gladly and the first staging exec
+// died on "reading exec frame: EOF"; the pack then looked like a provider
+// failure and gc reaped and re-dispatched the session.
+//
+// currentAlloc's classifications are preserved on purpose: a binding that
+// names no box, or an alloc that has already gone terminal, fails now exactly
+// as it did before. Only "the alloc is not visible yet" and "it is visible but
+// its task has not started" are states worth waiting in; waiting on a real
+// fault just delays it by the whole budget.
+//
+// A read that carries NO task states at all is answered as ready. That is the
+// API declining to answer (a stub read; the pack's own fake for a job whose
+// tasks it does not model), not an answer that the task is down, and treating
+// it as one would turn every existing caller into a 180 s stall.
+func (l *lifecycle) awaitExecAllocReady(ctx context.Context, sessionName string) (string, error) {
+	return l.awaitExecAllocReadyWithin(ctx, sessionName, allocTaskRunningTimeout, allocTaskRunningPoll)
+}
+
+// awaitExecAllocReadyWithin is the poll itself with its budget as parameters,
+// so the wait can be tested at second scale instead of 180 s.
+func (l *lifecycle) awaitExecAllocReadyWithin(ctx context.Context, sessionName string, timeout, interval time.Duration) (string, error) {
+	deadline := time.Now().Add(timeout)
+	var observed string
+	for {
+		rec, err := l.currentAllocRecord(ctx, sessionName)
+		switch {
+		case err == nil:
+			state, hasState := rec.TaskStates[execTaskName]
+			if !hasState {
+				return rec.ID, nil
+			}
+			if state.State == allocStateRunning {
+				return rec.ID, nil
+			}
+			observed = describeTaskState(rec.ID, state)
+		case errors.Is(err, errAllocNotReady):
+			// The alloc is not visible yet -- the window the short exec retry
+			// used to stand in for on its own. Keep polling inside the budget.
+			observed = err.Error()
+		default:
+			return "", err
+		}
+		if !time.Now().Before(deadline) {
+			return "", fmt.Errorf("session %q: task %q was not running within %s (last seen: %s)",
+				sessionName, execTaskName, timeout, observed)
+		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return "", ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+// describeTaskState renders one observation of the task for a timeout reason,
+// carrying the allocation's own event trail when the API supplied one.
+func describeTaskState(allocID string, state allocTaskState) string {
+	if state.LastEvent != "" {
+		return fmt.Sprintf("alloc %s task state %q, last event %s", allocID, state.State, state.LastEvent)
+	}
+	return fmt.Sprintf("alloc %s task state %q", allocID, state.State)
 }
 
 // egressMaxAttempts bounds the stop-path transcript/evidence egress retries

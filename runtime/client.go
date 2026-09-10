@@ -398,6 +398,23 @@ type allocRecord struct {
 	ID            string
 	ClientStatus  string
 	DesiredStatus string
+	// TaskStates is Nomad's own per-task lifecycle record for this allocation,
+	// keyed by task name. Nomad fills it in the moment an alloc exists, so a
+	// task still in "Task Setup" reads "pending"/"starting" here while
+	// ClientStatus already says the alloc is live -- which is the only signal
+	// that separates "the box is placed" from "the task we are about to exec
+	// into is up" (ops.go awaitExecAllocReady, cr-u9vul4). nil means this read
+	// carried no task states at all (a stub read), which is NOT an answer.
+	TaskStates map[string]allocTaskState
+}
+
+// allocTaskState is the slice of Nomad's AllocTaskState the readiness wait
+// needs: the lifecycle state, plus a one-line rendering of the task's newest
+// own event, so a readiness timeout can report why the alloc never started
+// instead of a bare deadline.
+type allocTaskState struct {
+	State     string
+	LastEvent string
 }
 
 // listAllocsForJob reads the allocations placed for jobID. If wait > 0 and
@@ -430,9 +447,63 @@ func (c *client) listAllocsForJob(ctx context.Context, jobID string, sinceIndex 
 			ID:            alloc.ID,
 			ClientStatus:  alloc.ClientStatus,
 			DesiredStatus: alloc.DesiredStatus,
+			TaskStates:    allocTaskStatesOf(alloc),
 		})
 	}
 	return out, idx, nil
+}
+
+// allocTaskStatesOf lifts an allocation's per-task lifecycle record into the
+// pack's own shape. Nomad's version also carries timestamps, restart counts
+// and the whole event history; the readiness wait needs the state string and,
+// so a timeout can explain itself, the latest event -- nothing larger, which
+// is what keeps this inside the client's response-size discipline. A read
+// with no usable task states yields nil so a caller can tell "the API did not
+// answer" apart from "the task is not up".
+func allocTaskStatesOf(alloc *nomadapi.Allocation) map[string]allocTaskState {
+	if len(alloc.TaskStates) == 0 {
+		return nil
+	}
+	states := make(map[string]allocTaskState, len(alloc.TaskStates))
+	for name, state := range alloc.TaskStates {
+		if state == nil {
+			continue
+		}
+		states[name] = allocTaskState{State: state.State, LastEvent: latestTaskEvent(state.Events)}
+	}
+	if len(states) == 0 {
+		return nil
+	}
+	return states
+}
+
+// latestTaskEvent renders the newest of a task's own event trail (Nomad's
+// "Received" / "Task Setup" / "Started" / "Setup Failure" records) as the
+// reason a readiness timeout reports, newest-first because Nomad appends.
+// Empty when the task has no events yet.
+func latestTaskEvent(events []*nomadapi.TaskEvent) string {
+	for i := len(events) - 1; i >= 0; i-- {
+		e := events[i]
+		if e == nil {
+			continue
+		}
+		detail := firstNonEmpty(e.DisplayMessage, e.Message, e.SetupError, e.DriverError, e.DownloadError, e.KillReason)
+		if detail == "" {
+			return e.Type
+		}
+		return e.Type + ": " + detail
+	}
+	return ""
+}
+
+// firstNonEmpty returns the first value that is not blank, or "".
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // deregisterJob deregisters jobID and returns the response index (0 if the

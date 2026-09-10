@@ -1593,3 +1593,164 @@ func TestOpStopRetryAfterDeregisterFaultSkipsReEgress(t *testing.T) {
 		t.Fatalf("fs-cat count after retry = %d, want unchanged %d (egress must not re-run)", got, catCount)
 	}
 }
+
+// TestAwaitExecAllocReadyWaitsForTaskRunning is the cr-u9vul4 contract.
+// Nomad marks an allocation non-terminal the moment it is placed, so
+// currentAlloc answers for it while the agent task inside is still in
+// "Task Setup" — and an exec into that alloc gets its stream torn down
+// ("reading exec frame: EOF", ops.go retryAllocExecReady). The 2026-09-10
+// disposable-city proof watched one go Received 16:16:08 → Task Setup
+// 16:16:09 → killed 16:16:15, never Started, and the pack re-dispatched 26
+// boxes in five minutes. Readiness must be an alloc-state wait.
+func TestAwaitExecAllocReadyWaitsForTaskRunning(t *testing.T) {
+	l, srv := newTestLifecycle(t)
+	ctx := context.Background()
+	const session = "sess-slow-setup"
+
+	if err := l.opProvision(ctx, session); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	allocID, err := l.currentAlloc(ctx, session)
+	if err != nil {
+		t.Fatalf("current alloc: %v", err)
+	}
+	if !srv.SetTaskState(allocID, execTaskName, "pending") {
+		t.Fatalf("SetTaskState(%s, %q, pending): allocation not found", allocID, execTaskName)
+	}
+
+	resolved := make(chan string, 1)
+	go func() {
+		id, err := l.awaitExecAllocReadyWithin(ctx, session, 10*time.Second, 10*time.Millisecond)
+		if err != nil {
+			t.Errorf("await after the task reached running: %v", err)
+			resolved <- ""
+			return
+		}
+		resolved <- id
+	}()
+
+	select {
+	case id := <-resolved:
+		t.Fatalf("await resolved to %q while task %q was still pending — the exec seam is back to dialling a box in Task Setup", id, execTaskName)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	if !srv.SetTaskState(allocID, execTaskName, "running") {
+		t.Fatalf("SetTaskState(%s, %q, running): allocation not found", allocID, execTaskName)
+	}
+	select {
+	case id := <-resolved:
+		if id != allocID {
+			t.Fatalf("await alloc = %q, want %q", id, allocID)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("await never resolved after the task reached running")
+	}
+}
+
+// TestAwaitExecAllocReadyTimeoutNamesTheAllocsOwnState covers the other half of
+// the readiness contract: when the task never comes up, the provider error must
+// say so in the alloc's own terms and must NOT be folded into the best-effort
+// session-not-found class — the distinction that keeps a wedged box from
+// reading like a session that simply never existed.
+func TestAwaitExecAllocReadyTimeoutNamesTheAllocsOwnState(t *testing.T) {
+	l, srv := newTestLifecycle(t)
+	ctx := context.Background()
+	const session = "sess-never-starts"
+
+	if err := l.opProvision(ctx, session); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	allocID, err := l.currentAlloc(ctx, session)
+	if err != nil {
+		t.Fatalf("current alloc: %v", err)
+	}
+	if !srv.SetTaskState(allocID, execTaskName, "pending") {
+		t.Fatalf("SetTaskState(%s, %q, pending): allocation not found", allocID, execTaskName)
+	}
+
+	_, err = l.awaitExecAllocReadyWithin(ctx, session, 150*time.Millisecond, 10*time.Millisecond)
+	if err == nil {
+		t.Fatal("await on a task that never started = nil, want a bounded timeout error")
+	}
+	for _, want := range []string{session, execTaskName, "not running within", allocID, "pending"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("readiness timeout error %q does not name %q", err, want)
+		}
+	}
+	if errors.Is(err, errSessionNotFound) || errors.Is(err, errAllocNotReady) {
+		t.Fatalf("readiness timeout folded into the best-effort not-found class: %v", err)
+	}
+}
+
+// TestAwaitExecAllocReadyWithoutTaskStatesDoesNotStall guards the branch that
+// keeps every existing caller from turning into a 180 s stall: a read that
+// carries NO task states at all is the API declining to answer (a stub read;
+// fakenomad's own PlaceAlloc for a job whose tasks it never modelled), not an
+// answer that the task is down.
+func TestAwaitExecAllocReadyWithoutTaskStatesDoesNotStall(t *testing.T) {
+	l, srv := newTestLifecycle(t)
+	ctx := context.Background()
+	const session = "sess-unmodelled-tasks"
+	const childJob = "gc-sessions/sess-unmodelled-tasks"
+
+	allocID := srv.PlaceAlloc(childJob, "pending")
+	if err := l.sidecar.save(binding{SessionName: session, ChildJobID: childJob}); err != nil {
+		t.Fatalf("seed sidecar binding: %v", err)
+	}
+
+	started := time.Now()
+	got, err := l.awaitExecAllocReadyWithin(ctx, session, 5*time.Second, 250*time.Millisecond)
+	if err != nil {
+		t.Fatalf("await on a read with no task states: %v", err)
+	}
+	if got != allocID {
+		t.Fatalf("await alloc = %q, want %q", got, allocID)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("await on a read with no task states took %s — the no-answer branch must answer at once, not wait out the budget", elapsed)
+	}
+}
+
+// TestExecStageWaitsForTaskRunningBeforeExecing is the defect as it was actually
+// observed: the failure was in STAGING ("staging workspace … reading exec frame:
+// EOF"), before launch, on the very first exec the provision makes. Staging must
+// not touch the exec endpoint until the task is up.
+func TestExecStageWaitsForTaskRunningBeforeExecing(t *testing.T) {
+	l, srv := newTestLifecycle(t)
+	ctx := context.Background()
+	const session = "sess-staging-slow-setup"
+
+	if err := l.opProvision(ctx, session); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	allocID, err := l.currentAlloc(ctx, session)
+	if err != nil {
+		t.Fatalf("current alloc: %v", err)
+	}
+	if !srv.SetTaskState(allocID, execTaskName, "pending") {
+		t.Fatalf("SetTaskState(%s, %q, pending): allocation not found", allocID, execTaskName)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- l.execStage(ctx, session, []string{"/bin/tar", "-x"}, []byte("staged-payload"))
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("staging exec completed with %v while task %q was still pending — it execed into a box in Task Setup", err, execTaskName)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	if !srv.SetTaskState(allocID, execTaskName, "running") {
+		t.Fatalf("SetTaskState(%s, %q, running): allocation not found", allocID, execTaskName)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("staging exec after the task reached running: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("staging exec never completed after the task reached running")
+	}
+}
