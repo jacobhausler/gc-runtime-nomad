@@ -16,6 +16,15 @@ deployment-owned bootstrap that used to be able to stand in front of it is gone.
   unsetting it fails every lifecycle op closed (`cr-3vvnb5.2`) — so the fallback
   sentences in `toolchain/BUILD-RECEIPT.md` and `toolchain/TOOLCHAIN.lock` name
   a tag to point back at, not a shape to drop into.
+- **1.0.7 is the baseline: it has no rollback image.** Every artifact built
+  before image durability landed was reaped, so there is no earlier tag to point
+  back at, and a pre-1.0.7 engine image under this pack is a combination that has
+  never existed (`cr-3vvnb5.6`). Rolling back 1.0.7 means reinstalling the
+  previous pack and building its own image — not flipping a tag.
+- **The locked image is the estate's built tag** `gc-agent:b55e229e1`
+  (`toolchain/TOOLCHAIN.lock:agent_image`) — the value the fresh-leg proof
+  reached the prompt on. Local docker tag on the docker-driver host; registry
+  publication stays retired.
 
 # v1.0.6
 

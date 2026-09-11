@@ -224,3 +224,28 @@ written) or rebuild from the EDGE source and stamp `gc <ver> sha256:<measured
 binary digest>` here in the same change. Shipping an unstamped `gc` binary is
 exactly the gate-0 finding this atom exists to close, so the lock, not the
 Dockerfile, stays the source of truth.
+
+## 1.0.7 (cr-3vvnb5.6) — the release cut, and the image it ships
+
+Cut by `mechanic-1` 2026-09-11T04:5xZ from pack `main` `0a35596` on branch
+`release/v1.0.7`. Two build-input lines change: `pack.toml` `1.0.6` → `1.0.7`,
+and `agent_image` → `gc-agent:b55e229e1`. **This atom rebuilt nothing** — the
+image below was built by the executive's host step before the cut, and its
+proof is the fresh-leg run recorded on `cr-3vvnb5.6` (session start
+`outcome=success` in 7.039 s from this image, seat claimed/worked/closed a bead,
+zero reject-already-exists against 810 before the binding-age fix).
+
+| what | value | source |
+|---|---|---|
+| `GC_NOMAD_AGENT_IMAGE` | `gc-agent:b55e229e1` | the value the fresh-leg proof started with; a plain local docker tag, registry retired (`ops/receipts/nrt-d3/2026-09-11-registry-retired-for-the-native-knob.md`) |
+| image id | `sha256:3e49e2d23b0e9a2f81cea0762e80329abf73612e37e9bfc63bf8982c76358952` | `docker image inspect` on the docker host, 2026-09-11T04:47Z, this atom |
+| image size | 498542377 bytes | same |
+| gc pin carried | `b55e229e1` | the tag is named for the pin, and the Dockerfile's identity assertion is what makes the tag a claim the build must satisfy; the estate's own `gc version --json --long` reports commit `b55e229e1f`, so the locked image and the live engine are the same build |
+| rollback artifact | none present | same inspect — exactly one gc image on the host; `gc-session-toolchain:rollback` does not exist. 1.0.7 is the baseline (RELEASE-NOTES) |
+
+`gc_local_artifact` stays at the `e52f96f62` staged pin and its sha256 in this
+release, deliberately unchanged: this atom has no new staged bytes to stamp, and
+`build-image.sh refresh-pin --artifact=…` run on the host that stages the pin is
+the only sanctioned way that line moves. The next build refreshes it and fills
+`rollback_image` from whatever was live. `--push` stays refused; publication of
+the release commit is a separate gated act (cr-bmk3s).

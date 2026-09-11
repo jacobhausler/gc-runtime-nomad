@@ -31,7 +31,15 @@ build_image golang:1.26.6-bookworm@sha256:433f9dc4f8ea3a1ce4e28f9f15d0f7c056b104
 # The ONE image reference the pack consumes. build-image.sh prints the value to
 # export as GC_NOMAD_AGENT_IMAGE; it is never pushed (registry publication is a
 # later owner decision — AGENTS.md hard stop).
-agent_image gc-session-toolchain:1.0.5
+#
+# 1.0.7 (cr-3vvnb5.6): the ONE reference is the estate's own built tag, named
+# for the gc pin it carries. It is a plain local docker tag on the host that runs
+# the docker driver — NOT a registry reference; the local registry was retired as
+# the delivery path in favour of this native knob (owner ruling 2026-09-11,
+# ops/receipts/nrt-d3/2026-09-11-registry-retired-for-the-native-knob.md). This is
+# the exact value the fresh-leg proof started its session with and reached the
+# prompt on (proof: cr-3vvnb5.6, 2026-09-11T04:2xZ).
+agent_image gc-agent:b55e229e1
 
 # Rollback: build-image.sh re-tags whatever was live to this tag BEFORE it
 # builds, and records that image id in the deployment receipt. Rolling back is
@@ -41,6 +49,14 @@ agent_image gc-session-toolchain:1.0.5
 # lifecycle op fails closed without an image (cr-3vvnb5.2), and the legacy exec
 # + read-only artifact-volume shape this used to fall back to is deleted
 # (cr-3vvnb5).
+#
+# 1.0.7 HAS NO ROLLBACK ARTIFACT, and the release notes say so plainly rather
+# than manufacture a tag. Every image built before image durability landed was
+# reaped by Nomad's docker image GC (measured on the docker host at release time:
+# one gc image present, gc-agent:b55e229e1, id sha256:3e49e2d23b0e). There is no
+# previous release to fall back to, and an older engine image under this pack is
+# a combination that has never existed. 1.0.7 IS the baseline; the next
+# build-image.sh run fills this tag honestly from the image that was live.
 rollback_image gc-session-toolchain:rollback
 
 # --- components ------------------------------------------------------------
