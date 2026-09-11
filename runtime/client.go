@@ -27,6 +27,13 @@ const (
 	blockingWait    = 5 * time.Second
 	execTimeout     = 30 * time.Second
 	maxResponseByte = 1 << 20
+
+	// createdAtMetaKey carries the provider's dispatch timestamp through
+	// Nomad's durable child-job metadata. The jobs-list response exposes the
+	// session attribution metadata but no creation timestamp, so recovery needs
+	// this non-secret value to preserve the adoption-age boundary after a local
+	// sidecar loss.
+	createdAtMetaKey = "gc_created_at"
 )
 
 // errJobGone marks a 404 from the Nomad API against a job route — the
@@ -320,15 +327,26 @@ func (c *client) nsQuery() url.Values {
 // in the native idempotency token so a retry after a lost response cannot
 // create a second child.
 func (c *client) dispatchChild(ctx context.Context, parentID, sessionName, nonce string) (string, error) {
+	return c.dispatchChildAt(ctx, parentID, sessionName, nonce, time.Now().UTC())
+}
+
+// dispatchChildAt is dispatchChild with an explicit creation time so the
+// timestamp committed in the local intent record is exactly the one carried
+// in Nomad Meta and available to sidecar recovery.
+func (c *client) dispatchChildAt(ctx context.Context, parentID, sessionName, nonce string, createdAt time.Time) (string, error) {
 	ctx, cancel := clientContext(ctx, defaultTimeout)
 	defer cancel()
+	meta := map[string]string{"gc_session": sessionName, "gc_nonce": nonce}
+	if !createdAt.IsZero() {
+		meta[createdAtMetaKey] = createdAt.UTC().Format(time.RFC3339Nano)
+	}
 	options := (&nomadapi.WriteOptions{
 		Namespace:        c.namespace,
 		IdempotencyToken: dispatchIdempotencyToken(sessionName, nonce),
 	}).WithContext(ctx)
 	out, _, err := c.nomad.Jobs().Dispatch(
 		parentID,
-		map[string]string{"gc_session": sessionName, "gc_nonce": nonce},
+		meta,
 		nil,
 		"",
 		options,

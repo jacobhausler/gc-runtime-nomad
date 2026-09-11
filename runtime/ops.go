@@ -1182,7 +1182,7 @@ func (l *lifecycle) dispatch(ctx context.Context, sessionName string) error {
 		return err
 	}
 
-	childID, err := l.client.dispatchChild(ctx, l.parentJobID, sessionName, nonce)
+	childID, err := l.client.dispatchChildAt(ctx, l.parentJobID, sessionName, nonce, intent.CreatedAt)
 	if err != nil {
 		return err
 	}
@@ -1267,9 +1267,10 @@ func (l *lifecycle) parentJobSpec() nomadJob {
 // binding. With nothing live left to recover, a terminal match keeps its own
 // loud error: there is nothing to adopt, and refusing is what prevents a
 // dispatch around a stale or disputed binding.
-// CreatedAt remains zero because the jobs-list response does not provide a
-// creation timestamp. Adoption handles that unknown age explicitly instead
-// of silently bypassing the bounded adoption-age rule.
+// CreatedAt is recovered from the provider-stamped gc_created_at Meta value.
+// A child from before that metadata existed, or one with malformed metadata,
+// remains undated and the adoption gate refuses it rather than fabricating a
+// young timestamp and bypassing the bounded age rule.
 func (l *lifecycle) recoverBinding(ctx context.Context, sessionName string, prior *binding) (binding, error) {
 	children, err := l.client.listChildJobs(ctx, l.parentJobID)
 	if err != nil {
@@ -1306,7 +1307,13 @@ func (l *lifecycle) recoverBinding(ctx context.Context, sessionName string, prio
 		return binding{}, fmt.Errorf("sidecar binding recovery: child %q for session %q has no gc_nonce", child.ID, sessionName)
 	}
 
-	recovered := binding{SessionName: sessionName, ChildJobID: child.ID, Namespace: child.Namespace, Nonce: nonce}
+	recovered := binding{
+		SessionName: sessionName,
+		ChildJobID:  child.ID,
+		Namespace:   child.Namespace,
+		Nonce:       nonce,
+		CreatedAt:   parseCreatedAtMeta(child.Meta),
+	}
 	if prior != nil {
 		// A dispatch-intent record may already carry the local residue that
 		// Nomad cannot answer. Preserve it while replacing only the fields
@@ -1314,7 +1321,9 @@ func (l *lifecycle) recoverBinding(ctx context.Context, sessionName string, prio
 		// and staging state; a nil prior means the sidecar record was
 		// completely lost.
 		base := *prior
-		recovered.CreatedAt = base.CreatedAt
+		if !base.CreatedAt.IsZero() {
+			recovered.CreatedAt = base.CreatedAt
+		}
 		recovered.EgressComplete = base.EgressComplete
 		recovered.EvidenceLost = base.EvidenceLost
 		recovered.StagePending = base.StagePending
@@ -1329,6 +1338,22 @@ func (l *lifecycle) recoverBinding(ctx context.Context, sessionName string, prio
 		return binding{}, fmt.Errorf("repairing sidecar binding for session %q: %w", sessionName, err)
 	}
 	return recovered, nil
+}
+
+// parseCreatedAtMeta parses the provider-owned dispatch timestamp that
+// survives a sidecar loss in Nomad's child-job metadata. Invalid or absent
+// values deliberately return the zero time: classifyAdoption then refuses the
+// child, preserving the fail-closed behavior for genuinely unknown age.
+func parseCreatedAtMeta(meta map[string]string) time.Time {
+	raw := strings.TrimSpace(meta[createdAtMetaKey])
+	if raw == "" {
+		return time.Time{}
+	}
+	createdAt, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		return time.Time{}
+	}
+	return createdAt.UTC()
 }
 
 // findOrphanByNonce looks up the parent job's dispatched children (04 §2.1
