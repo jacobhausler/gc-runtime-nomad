@@ -42,6 +42,14 @@ const (
 	// after 5.2 s, and gc reaped and re-dispatched 26 boxes in five minutes.
 	// 180 s is the budget that bead names: generous for task setup on this
 	// estate's nodes, bounded, and cancelled with the caller's context.
+	// allocPlacementTimeout bounds how long provision waits for Nomad to place
+	// an allocation before calling the dispatch a failure. Placement is fast
+	// when it can happen at all; when it cannot — no eligible node, an image
+	// the node has no way to pull — waiting longer does not change the answer,
+	// it only delays a report the operator needs. Short on purpose.
+	allocPlacementTimeout = 30 * time.Second
+	allocPlacementPoll    = 1 * time.Second
+
 	allocTaskRunningTimeout = 180 * time.Second
 	allocTaskRunningPoll    = 500 * time.Millisecond
 )
@@ -493,7 +501,72 @@ func (l *lifecycle) opProvisionWithConfig(ctx context.Context, sessionName strin
 	if err := l.dispatch(ctx, sessionName); err != nil {
 		return err
 	}
+	// A dispatch that Nomad ACCEPTS is not a box. Before this check, provision
+	// returned 0 with empty stdout and empty stderr for an image no node has:
+	// the child was dispatched, nothing was ever placed for it, and the caller
+	// was told everything was fine. Measured T6, 2026-09-11 — provision with
+	// gc-agent:T6-does-not-exist exited 0 and silent, and the child reported
+	// "Placement Failure ... No allocations placed".
+	//
+	// A verb whose success means "I sent a request" is the wrong contract for
+	// one the caller uses to mean "the box exists". Confirm an allocation
+	// exists and is not already terminal, and say the image when it does not —
+	// "the image is not on this node" is the sentence an operator needs, three
+	// layers earlier than the exec-frame EOF they get today.
+	//
+	// FAIL CLOSED on an unreadable allocation list: a read error is reported as
+	// a provision failure, not swallowed. Exiting nonzero because we could not
+	// tell is still louder than exiting 0 while wrong.
+	if err := l.confirmDispatchPlaced(ctx, sessionName); err != nil {
+		return err
+	}
 	return l.stageTracked(ctx, sessionName, cfg)
+}
+
+// confirmDispatchPlaced turns "Nomad accepted the dispatch" into "a box exists".
+//
+// It waits briefly for an allocation to appear, because placement is not
+// instantaneous, and reports the driver's OWN failure text when the allocation
+// died instead of starting — a denied image pull says so in its events, and
+// that sentence is worth more than every error derived from it downstream.
+func (l *lifecycle) confirmDispatchPlaced(ctx context.Context, sessionName string) error {
+	b, _, err := l.liveChild(ctx, sessionName)
+	if err != nil {
+		return fmt.Errorf("provision %q: confirming the dispatch was placed: %w", sessionName, err)
+	}
+	if b.ChildJobID == "" {
+		return fmt.Errorf("provision %q: dispatch accepted but no child job is bound to this session", sessionName)
+	}
+	deadline := time.Now().Add(allocPlacementTimeout)
+	var lastStatus string
+	for {
+		allocs, _, lerr := l.client.listAllocsForJob(ctx, b.ChildJobID, 0, 0)
+		if lerr != nil {
+			return fmt.Errorf("provision %q: reading allocations of %s: %w", sessionName, b.ChildJobID, lerr)
+		}
+		for _, a := range allocs {
+			switch strings.ToLower(strings.TrimSpace(a.ClientStatus)) {
+			case "complete", "failed", "lost":
+				lastStatus = a.ClientStatus
+				continue
+			default:
+				return nil
+			}
+		}
+		if time.Now().After(deadline) {
+			if lastStatus != "" {
+				return fmt.Errorf("provision %q: child %s placed an allocation that went %s without starting — if the agent image (%s) is not present on the node, that is why; read `nomad alloc status` for the driver's own error",
+					sessionName, b.ChildJobID, lastStatus, l.agentImage)
+			}
+			return fmt.Errorf("provision %q: child %s was dispatched but NO allocation was placed within %s — the image (%s) or the node constraints cannot be satisfied",
+				sessionName, b.ChildJobID, allocPlacementTimeout, l.agentImage)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(allocPlacementPoll):
+		}
+	}
 }
 
 // opStart is provision + launch (04 §3 start row): dispatch a fresh child,
@@ -2223,6 +2296,39 @@ func (l *lifecycle) opIsRunning(ctx context.Context, sessionName string) (bool, 
 // launched box is not "running", same gate as opIsRunning. On ANY lookup
 // error it returns an error rather than a partial list — matching the
 // "list-based reap arms defer on ANY error" contract (04 §6).
+// childHasLiveAlloc reports whether a dispatched child still has an allocation
+// that could be running a session.
+//
+// "Live" is deliberately generous: anything that is not a terminal client
+// status counts, because a box in Task Setup or pending placement is a session
+// on its way up, not a corpse. Only a child whose allocations are ALL terminal
+// — or one that has no allocations at all after Nomad has had the chance to
+// place it — is dead.
+//
+// An error is returned rather than a guess. The caller keeps reporting the
+// child as running when it cannot tell, because a read failure is not evidence
+// of death.
+func (l *lifecycle) childHasLiveAlloc(ctx context.Context, childJobID string) (bool, error) {
+	allocs, _, err := l.client.listAllocsForJob(ctx, childJobID, 0, 0)
+	if err != nil {
+		return false, err
+	}
+	if len(allocs) == 0 {
+		// No allocation at all. This is the placement-failure shape (T6): the
+		// child was dispatched and nothing was ever placed for it.
+		return false, nil
+	}
+	for _, a := range allocs {
+		switch strings.ToLower(strings.TrimSpace(a.ClientStatus)) {
+		case "complete", "failed", "lost":
+			continue
+		default:
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (l *lifecycle) opListRunning(ctx context.Context, prefix string) ([]string, error) {
 	children, err := l.client.listChildJobs(ctx, l.parentJobID)
 	if err != nil {
@@ -2246,6 +2352,27 @@ func (l *lifecycle) opListRunning(ctx context.Context, prefix string) ([]string,
 		}
 		name := c.Meta["gc_session"]
 		if name == "" || (prefix != "" && !strings.HasPrefix(name, prefix)) {
+			continue
+		}
+		// A non-terminal child JOB is not a running SESSION. Killing an
+		// allocation does not make its parent dispatch terminal: the job still
+		// exists and Nomad has simply lost the alloc. So this loop reported a
+		// seat whose box was dead as running, and every caller that asks this
+		// verb "is the seat alive" got a confident yes about a corpse.
+		//
+		// Measured T5, 2026-09-11: alloc SIGKILLed, Nomad reporting
+		// ClientStatus=failed and Task "agent" dead twenty-five seconds later,
+		// and `gc-runtime-nomad list-running` still naming the seat five
+		// minutes on. gc's orphan-release probe consults this verb and fails
+		// closed on "still present", so the claim was never released and the
+		// bead stayed assigned to a dead seat.
+		//
+		// FAIL CLOSED on an unreadable allocation list: if the read errors we
+		// keep reporting the child as running, exactly as before. A transient
+		// Nomad blip must never look like a fleet of dead seats — that would
+		// release live work everywhere at once, which is far worse than holding
+		// one claim too long.
+		if live, err := l.childHasLiveAlloc(ctx, c.ID); err == nil && !live {
 			continue
 		}
 		names = append(names, name)

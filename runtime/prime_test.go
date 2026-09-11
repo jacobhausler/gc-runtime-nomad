@@ -255,7 +255,6 @@ func TestPrimeScriptHonorsReadyDelayAsPostReadySettle(t *testing.T) {
 	}
 }
 
-
 // primePasteCommand is the delivery command primeScript must use: tmux's own
 // paste path, reading the staged file and deleting the buffer as it pastes.
 const primePasteCommand = "tmux paste-buffer -p -d -t main -b gc-prime-nudge"
