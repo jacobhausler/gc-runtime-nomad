@@ -107,7 +107,17 @@ func parentJobSpec(namespace, nodePool, parentID string, logShipper logShipperCo
 			// Dispatch Meta carries only non-secret attribution
 			// (gc_session + a per-dispatch nonce, 04 §2.1 rule); the
 			// instance token/capability NEVER rides Meta (R2a-02).
-			MetaOptional: []string{"gc_session", "gc_nonce"},
+			// gc_created_at (client.go createdAtMetaKey) is the durable creation
+			// stamp the binding-adoption gate reads back: Nomad's jobs list carries
+			// SubmitTime, but a RECOVERED binding had no age, so adoption refused it
+			// permanently. It was added as a dispatch key without being declared
+			// here, and Nomad rejects an undeclared key outright - "Dispatch request
+			// included unpermitted metadata keys: [gc_created_at]", HTTP 500, on
+			// EVERY provision. Measured 2026-09-11 in the executive proof city: zero
+			// boxes started on the 0a35596 pack until this list matched what the
+			// dispatcher actually sends. Still non-secret attribution only - the
+			// instance token/capability NEVER rides Meta (R2a-02).
+			MetaOptional: []string{"gc_session", "gc_nonce", "gc_created_at"},
 			Payload:      "forbidden",
 		},
 		TaskGroups: []nomadTaskGroup{sessionTaskGroup(logShipper, agentImage, dep)},
