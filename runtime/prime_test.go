@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestPrimeScriptSubmitsLikeGcsNudgeSession is the RED/GREEN pair for
@@ -33,9 +34,9 @@ import (
 func TestPrimeScriptSubmitsLikeGcsNudgeSession(t *testing.T) {
 	script := primeScript
 
-	pasteIdx := strings.Index(script, `send-keys -t main -l --`)
+	pasteIdx := strings.Index(script, `tmux paste-buffer -p -d -t main -b gc-prime-nudge`)
 	if pasteIdx < 0 {
-		t.Fatal("primeScript never pastes the nudge text literally (send-keys -l)")
+		t.Fatal("primeScript never pastes the staged nudge with tmux's own paste path (load-buffer + paste-buffer)")
 	}
 
 	escapeIdx := strings.Index(script, `send-keys -t main Escape`)
@@ -236,7 +237,7 @@ func TestPrimeScriptHonorsReadyDelayAsPostReadySettle(t *testing.T) {
 	}
 	settleIdx := strings.Index(primeScript, `sleep "$settle"`)
 	readyIdx := strings.Index(primeScript, `ready=1`)
-	pasteIdx := strings.Index(primeScript, `send-keys -t main -l --`)
+	pasteIdx := strings.Index(primeScript, `tmux paste-buffer -p -d -t main -b gc-prime-nudge`)
 	if settleIdx < 0 {
 		t.Fatal(`primeScript never sleeps "$settle" (the ready_delay_ms settle) at all`)
 	}
@@ -251,5 +252,175 @@ func TestPrimeScriptHonorsReadyDelayAsPostReadySettle(t *testing.T) {
 	}
 	if got := readyDelayMs(4000); got != 4000 {
 		t.Fatalf("readyDelayMs(4000) = %d, want the wire value honored verbatim", got)
+	}
+}
+
+
+// primePasteCommand is the delivery command primeScript must use: tmux's own
+// paste path, reading the staged file and deleting the buffer as it pastes.
+const primePasteCommand = "tmux paste-buffer -p -d -t main -b gc-prime-nudge"
+
+// TestPrimeScriptCarriesNudgeOffTheArgumentList is the RED/GREEN pair for
+// cr-liv6ac. The worker-local charter renders a 20,857-byte startup prompt, and
+// tmux 3.7b refuses any single argument above ~16 KiB: `send-keys -l -- <text>`
+// died with "command too long" (rc=1) at prime.go:181, so the seat was left at
+// "Ask Codex to do anything", owned no issues, and every observer - including
+// gc's own session record - still saw a launched, primed session. Measured on
+// tmux 3.7b (the version in gc-agent:b55e229e1): a 16,000-byte argument lands,
+// 16,384 and 20,857 are refused, and load-buffer + paste-buffer delivers all
+// 20,858 bytes with the buffer gone afterwards.
+//
+// This is a structural test on the real generated primeScript, the same shape
+// TestPrimeScriptSubmitsLikeGcsNudgeSession uses: what it pins is that the text
+// never crosses the tmux argument boundary, and that a delivery which cannot be
+// verified fails CLOSED (status nudge_failed, no prompted_at marker).
+func TestPrimeScriptCarriesNudgeOffTheArgumentList(t *testing.T) {
+	script := primeScript
+
+	if strings.Contains(script, `send-keys -t main -l`) {
+		t.Fatal("primeScript still carries the nudge as a send-keys ARGUMENT - tmux 3.7b refuses an argument over ~16 KiB, so a charter-sized prompt silently delivers nothing")
+	}
+	if !strings.Contains(script, `tmux load-buffer -b gc-prime-nudge "$DIR/nudge.txt"`) {
+		t.Fatal(`primeScript must hand the nudge to tmux as a FILE (load-buffer -b gc-prime-nudge "$DIR/nudge.txt")`)
+	}
+	pasteIdx := strings.Index(script, primePasteCommand)
+	if pasteIdx < 0 {
+		t.Fatalf("primeScript must paste with %s: -p preserves the prompt's line feeds, -d deletes the buffer as it pastes", primePasteCommand)
+	}
+	loadIdx := strings.Index(script, `load-buffer -b gc-prime-nudge`)
+	if loadIdx > pasteIdx {
+		t.Fatalf("load-buffer (%d) must run before paste-buffer (%d)", loadIdx, pasteIdx)
+	}
+	// The buffer must not linger: -d consumes it on the success path, and an
+	// explicit delete-buffer has to cover a paste that died mid-way.
+	if !strings.Contains(script, `tmux delete-buffer -b gc-prime-nudge`) {
+		t.Fatal("primeScript has no explicit delete-buffer fallback for a failed paste")
+	}
+	deleteIdx := strings.Index(script, `tmux delete-buffer -b gc-prime-nudge`)
+	if deleteIdx < pasteIdx {
+		t.Fatalf("the delete-buffer fallback (%d) must come after the paste (%d)", deleteIdx, pasteIdx)
+	}
+
+	// Fail closed: the delivery is only accepted when the pane actually
+	// changed, and every nudge_failed path must exit BEFORE any prompted_at
+	// marker exists. A dark lane that records success is the defect this pins
+	// out - it is what made the gate "a seat that starts and prompts is not a
+	// migrated lane" necessary.
+	if !strings.Contains(script, `cmp -s "$BEFORE" "$AFTER"`) {
+		t.Fatal(`primeScript accepts the delivery without comparing the pane before and after the paste (cmp -s "$BEFORE" "$AFTER")`)
+	}
+	for i, idx := range allIndexes(script, "nudge_failed") {
+		end := strings.Index(script[idx:], `exit 0`)
+		if end < 0 {
+			t.Fatalf("nudge_failed branch %d never exits", i)
+		}
+		if strings.Contains(script[idx:idx+end], "prompted_at") {
+			t.Fatalf("nudge_failed branch %d writes prompted_at - a failed prime must not claim it primed the session", i)
+		}
+	}
+}
+
+func allIndexes(haystack, needle string) []int {
+	var out []int
+	for off := 0; ; {
+		i := strings.Index(haystack[off:], needle)
+		if i < 0 {
+			return out
+		}
+		out = append(out, off+i)
+		off += i + len(needle)
+	}
+}
+
+// TestTmuxArgumentCapMakesFilePasteTheOnlyNudgeDelivery encodes the bisect that
+// diagnosed cr-liv6ac, against a real tmux rather than as a comment: the
+// literal-argument form lands a 16,000-byte nudge and is REFUSED at charter
+// size, while the load-buffer/paste-buffer pair the pack now ships delivers the
+// whole 20,858-byte payload and leaves no buffer behind.
+//
+// tmux runs on a private socket owned by the test - never the default server,
+// which is where live city panes live - and the reader pane is `cat > file`,
+// the standing-in for an agent that consumes stdin. The prompt is newline
+// terminated here on purpose: an unterminated tail line stays in the tty's
+// canonical buffer unread, which is a property of the reader, not of delivery.
+func TestTmuxArgumentCapMakesFilePasteTheOnlyNudgeDelivery(t *testing.T) {
+	requireTmuxForDriverTest(t)
+
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "probe.sock")
+	paneOut := filepath.Join(dir, "landed.txt")
+
+	// The measured worker-local prompt size (ops/receipts/nrt-d3/
+	// 2026-09-11-d3-cutover-landed-gate-unmet.md), newline terminated.
+	nudge := "HEADMARKER\n" + strings.Repeat("LINE\n", 263) + "TAILMARKER-liv6ac\n"
+	nudgeFile := filepath.Join(dir, "nudge.txt")
+	if err := os.WriteFile(nudgeFile, []byte(nudge), 0o600); err != nil {
+		t.Fatalf("write nudge: %v", err)
+	}
+	if len(nudge) < 16384 {
+		t.Fatalf("the fixture must sit above tmux's argument cap, got %d bytes", len(nudge))
+	}
+
+	tmux := func(args ...string) (string, error) {
+		cmd := exec.Command("tmux", append([]string{"-S", sock}, args...)...)
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+	t.Cleanup(func() { _, _ = tmux("kill-server") })
+
+	if out, err := tmux("new-session", "-d", "-s", "gc-nudge-probe", "cat > "+paneOut); err != nil {
+		t.Fatalf("new-session on the private socket: %v (%s)", err, out)
+	}
+
+	// The boundary, measured rather than remembered. tmux tightened its
+	// per-argument ceiling between 3.5a and 3.7b, so the refusal is recorded as
+	// an observation of THIS tmux rather than asserted: the property that must
+	// hold on every version is the one below it - the file path delivers the
+	// whole payload. On gc-agent:b55e229e1 (tmux 3.7b, the box this pack runs
+	// on) the argument form is refused and that observation is the defect.
+	if out, err := tmux("send-keys", "-t", "gc-nudge-probe", "-l", "--", strings.Repeat("x", 16000)); err != nil {
+		t.Fatalf("a 16000-byte send-keys argument should land on any tmux: %v (%s)", err, out)
+	}
+	if out, err := tmux("send-keys", "-t", "gc-nudge-probe", "-l", "--", nudge); err != nil {
+		t.Logf("this tmux refuses a %d-byte send-keys argument (%s) - the cr-liv6ac shape; the pane must hold only the 16000 x's", len(nudge), strings.TrimSpace(out))
+		if probe, rerr := os.ReadFile(paneOut); rerr == nil && strings.Contains(string(probe), "TAILMARKER") {
+			t.Fatal("the refused send-keys still delivered its tail")
+		}
+	} else {
+		t.Logf("this tmux accepts a %d-byte send-keys argument - the ceiling landed after this version; the file path below is still the required form", len(nudge))
+		// Keep the fixture honest for the byte-exact assertion that follows.
+		if err := os.Truncate(paneOut, 0); err != nil {
+			t.Fatalf("reset the reader pane: %v", err)
+		}
+	}
+
+	if out, err := tmux("load-buffer", "-b", "gc-prime-nudge", nudgeFile); err != nil {
+		t.Fatalf("load-buffer on the same payload: %v (%s)", err, out)
+	}
+	if out, err := tmux("paste-buffer", "-p", "-d", "-t", "gc-nudge-probe", "-b", "gc-prime-nudge"); err != nil {
+		t.Fatalf("paste-buffer on the same payload: %v (%s)", err, out)
+	}
+
+	var landed []byte
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		b, err := os.ReadFile(paneOut)
+		if err == nil && len(b) == len(nudge) {
+			landed = b
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the pane never received the whole payload: got %d of %d bytes (read err %v)", len(b), len(nudge), err)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if !strings.Contains(string(landed), "TAILMARKER-liv6ac") {
+		t.Fatal("the pasted payload lost its tail - the prompt arrived truncated")
+	}
+	if strings.Count(string(landed), "\n") != strings.Count(nudge, "\n") {
+		t.Fatal("paste-buffer collapsed the prompt's line feeds (missing -p?)")
+	}
+	if out, _ := tmux("list-buffers"); strings.Contains(out, "gc-prime-nudge") {
+		t.Fatalf("paste-buffer -d left a 20 KB prompt in the box's tmux buffer state: %s", out)
 	}
 }
