@@ -7,13 +7,26 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	nomadapi "github.com/hashicorp/nomad/api"
 )
 
 func TestSidecarBindingRecoveryFromNomadMeta(t *testing.T) {
-	t.Run("repairs after a fresh lifecycle and refuses unknown age", func(t *testing.T) {
+	t.Run("repairs after a fresh lifecycle and preserves the dispatch age", func(t *testing.T) {
 		l, srv := newTestLifecycle(t)
 		ctx := context.Background()
 		const session = "sess-sidecar-recovery"
+
+		fakeBin := t.TempDir()
+		if err := os.WriteFile(filepath.Join(fakeBin, "tmux"), []byte(`#!/bin/sh
+case "$1" in
+has-session) exit 1 ;;
+*) exit 1 ;;
+esac
+`), 0o700); err != nil {
+			t.Fatalf("write fake tmux: %v", err)
+		}
+		t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 		if err := l.opProvision(ctx, session); err != nil {
 			t.Fatalf("initial provision: %v", err)
@@ -33,13 +46,8 @@ func TestSidecarBindingRecoveryFromNomadMeta(t *testing.T) {
 		}
 		fresh := &lifecycle{client: l.client, sidecar: sc, parentJobID: l.parentJobID}
 
-		// The recovered record has no creation timestamp because the jobs list
-		// does not provide one. A provision retry must refuse explicitly rather
-		// than silently bypassing the adoption age guard or dispatching another
-		// child into an unknown-age box.
-		if err := fresh.opProvision(ctx, session); err == nil ||
-			!strings.Contains(err.Error(), "age") {
-			t.Fatalf("provision after sidecar loss = %v, want an explicit unknown-age refusal", err)
+		if err := fresh.opProvision(ctx, session); err != nil {
+			t.Fatalf("provision after sidecar loss = %v, want the dated box adopted", err)
 		}
 
 		repaired, ok, err := fresh.sidecar.load(session)
@@ -50,11 +58,47 @@ func TestSidecarBindingRecoveryFromNomadMeta(t *testing.T) {
 			repaired.Namespace != before.Namespace || repaired.Nonce != before.Nonce {
 			t.Fatalf("repaired binding = %+v, want session/child/namespace/nonce from Nomad Meta and the existing child", repaired)
 		}
-		if !repaired.CreatedAt.IsZero() {
-			t.Fatalf("repaired CreatedAt = %v, want zero because Nomad jobs-list has no creation timestamp", repaired.CreatedAt)
+		if repaired.CreatedAt.IsZero() || !repaired.CreatedAt.Equal(before.CreatedAt) {
+			t.Fatalf("repaired CreatedAt = %v, want the original dispatch time %v", repaired.CreatedAt, before.CreatedAt)
 		}
 		if n := countDispatchCalls(srv.Trace(), l.parentJobID); n != 1 {
-			t.Fatalf("dispatch calls after recovery refusal = %d, want 1", n)
+			t.Fatalf("dispatch calls after recovery = %d, want 1", n)
+		}
+	})
+
+	t.Run("refuses a genuinely undated recovered child", func(t *testing.T) {
+		l, srv := newTestLifecycle(t)
+		ctx := context.Background()
+		const session = "sess-undated-recovery"
+
+		if err := l.ensureParentRegistered(ctx); err != nil {
+			t.Fatalf("register parent: %v", err)
+		}
+		options := (&nomadapi.WriteOptions{Namespace: l.client.namespace}).WithContext(ctx)
+		if _, _, err := l.client.nomad.Jobs().Dispatch(
+			l.parentJobID,
+			map[string]string{"gc_session": session, "gc_nonce": "nonce-undated"},
+			nil,
+			"",
+			options,
+		); err != nil {
+			t.Fatalf("dispatch undated child: %v", err)
+		}
+
+		sc, err := newSidecar(filepath.Join(t.TempDir(), "sidecar"))
+		if err != nil {
+			t.Fatalf("new sidecar: %v", err)
+		}
+		fresh := &lifecycle{client: l.client, sidecar: sc, parentJobID: l.parentJobID}
+		if err := fresh.opProvision(ctx, session); err == nil || !strings.Contains(err.Error(), "age") {
+			t.Fatalf("provision for undated child = %v, want explicit unknown-age refusal", err)
+		}
+		repaired, ok, err := fresh.sidecar.load(session)
+		if err != nil || !ok || !repaired.CreatedAt.IsZero() {
+			t.Fatalf("undated repaired binding = (%+v, %v, %v), want a zero timestamp preserved for refusal", repaired, ok, err)
+		}
+		if n := countDispatchCalls(srv.Trace(), l.parentJobID); n != 1 {
+			t.Fatalf("dispatch calls after undated recovery = %d, want 1", n)
 		}
 	})
 
