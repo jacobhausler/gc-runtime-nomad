@@ -178,12 +178,41 @@ pane_busy() {
 if [ "$ready" -eq 1 ]; then
   settle="$(awk -v ms="$DELAY_MS" 'BEGIN{printf "%%.3f", ms/1000}')"
   sleep "$settle"
-  if ! tmux send-keys -t main -l -- "$(cat "$DIR/nudge.txt")"; then
+  # Delivery rides tmux's own paste path, never send-keys with the text as an
+  # argument: tmux 3.7b rejects an argument over ~16 KiB ("command too long",
+  # rc=1) and the worker-local charter is 20,857 bytes, so the literal-argument
+  # form died right here and the seat was handed NOTHING while the launch still
+  # looked healthy (cr-liv6ac). load-buffer takes a FILE path, so no
+  # argument-size limit applies; paste-buffer -p keeps the prompt's line feeds
+  # and -d deletes the buffer as it pastes, so a 20 KB prompt does not linger
+  # in the box's tmux state. The explicit delete-buffer covers a paste that
+  # died mid-way, which is the only path where -d does not run.
+  if ! tmux load-buffer -b gc-prime-nudge "$DIR/nudge.txt"; then
+    printf 'nudge_failed\n' > "$DIR/status"
+    exit 0
+  fi
+  BEFORE="$DIR/.pane_pre_paste"
+  tmux capture-pane -p -t main >"$BEFORE" 2>/dev/null || : >"$BEFORE"
+  if ! tmux paste-buffer -p -d -t main -b gc-prime-nudge; then
+    tmux delete-buffer -b gc-prime-nudge 2>/dev/null
     printf 'nudge_failed\n' > "$DIR/status"
     exit 0
   fi
   # gc's own paste-to-submit debounce (tmux.NudgeSession -> nudgeSubmitDebounce).
   sleep %[3]s
+  # Fail CLOSED on delivery. A paste that leaves the pane byte-identical put
+  # nothing in front of the agent: status is nudge_failed and prompted_at is
+  # NOT written, because a prime that records success while the pane still
+  # reads "Ask Codex to do anything" is exactly what made a dark lane look
+  # healthy (cr-liv6ac). Only a definite no-change counts as failure - a pane
+  # that repainted for any reason at all passes - so this can never turn a real
+  # delivery into a false negative.
+  AFTER="$DIR/.pane_post_paste"
+  tmux capture-pane -p -t main >"$AFTER" 2>/dev/null || : >"$AFTER"
+  if cmp -s "$BEFORE" "$AFTER"; then
+    printf 'nudge_failed\n' > "$DIR/status"
+    exit 0
+  fi
   confirmed=0
   send=0
   while [ "$send" -lt %[4]d ]; do
