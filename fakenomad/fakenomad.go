@@ -199,9 +199,16 @@ type Server struct {
 	execFails   int // transient alloc-exec streams to close after stdin
 	execResets  int // transient alloc-exec streams to reset after stdin
 	execHangups int // transient alloc-exec streams to reset before stdin
-	dispSeq     uint64
-	portSeq     uint64 // dynamic-port assignment counter (fnrt-t4l.24)
-	trace       []string
+
+	// allocListErr makes every job-allocations read fail. noPlaceAllocs makes a
+	// dispatch place nothing. Both exist to script the two shapes that made a
+	// dark lane look alive: a runtime that cannot be read, and a dispatch that
+	// is accepted and never becomes a box.
+	allocListErr  bool
+	noPlaceAllocs bool
+	dispSeq       uint64
+	portSeq       uint64 // dynamic-port assignment counter (fnrt-t4l.24)
+	trace         []string
 
 	execRoot string // parent of every per-alloc exec scratch dir
 	httpSrv  *httptest.Server
@@ -436,6 +443,27 @@ func (s *Server) Trace() []string {
 	out := make([]string, len(s.trace))
 	copy(out, s.trace)
 	return out
+}
+
+// SetAllocListError makes every job-allocations read fail with a 500 until it
+// is turned off. It exists for one test that matters more than the happy path:
+// the orphan-release probe must keep reporting a seat as running when it CANNOT
+// READ the runtime, because an unreadable provider is not evidence of death and
+// treating it as such releases live work fleet-wide on a transient blip.
+func (s *Server) SetAllocListError(fail bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.allocListErr = fail
+}
+
+// SetPlaceAllocs controls whether a dispatch places an allocation at all. With
+// it off, a dispatch is ACCEPTED and nothing is ever placed - the shape Nomad
+// produces for an image no node can pull, or constraints nothing satisfies.
+// provision used to report success for exactly this and say nothing.
+func (s *Server) SetPlaceAllocs(place bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.noPlaceAllocs = !place
 }
 
 // SetAllocStatus updates an allocation's client status and advances the
@@ -776,6 +804,15 @@ func (s *Server) dispatchJob(w http.ResponseWriter, r *http.Request, parentID st
 		portEnv["NOMAD_PORT_"+label] = strconv.Itoa(port)
 	}
 
+	// noPlaceAllocs: the dispatch is ACCEPTED and nothing is placed. That is
+	// what Nomad does for an image no node can pull or constraints nothing
+	// satisfies, and provision used to return 0 and silent for exactly it.
+	if s.noPlaceAllocs {
+		s.mu.Unlock()
+		writeJSON(w, http.StatusOK, map[string]any{"DispatchedJobID": childID, "Index": s.index})
+		return
+	}
+
 	allocID := fmt.Sprintf("alloc-%06x", s.dispSeq)
 	allocIdx := s.bumpIndexLocked()
 	s.allocs[allocID] = &Allocation{
@@ -898,6 +935,13 @@ func copyAlloc(a *Allocation) Allocation {
 // (caught by `go test -race` once a dispatched job's task actually runs),
 // not just a theoretical one.
 func (s *Server) listAllocsForJob(w http.ResponseWriter, r *http.Request, jobID string) {
+	s.mu.Lock()
+	failList := s.allocListErr
+	s.mu.Unlock()
+	if failList {
+		writeJSONError(w, http.StatusInternalServerError, "allocation list unavailable")
+		return
+	}
 	if since, wait, blocking := blockingParams(r); blocking {
 		s.blockUntil(since, wait)
 	}
