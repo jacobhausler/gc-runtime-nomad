@@ -309,7 +309,13 @@ func TestPrimeScriptCarriesNudgeOffTheArgumentList(t *testing.T) {
 	if !strings.Contains(script, `cmp -s "$BEFORE" "$AFTER"`) {
 		t.Fatal(`primeScript accepts the delivery without comparing the pane before and after the paste (cmp -s "$BEFORE" "$AFTER")`)
 	}
-	for i, idx := range allIndexes(script, "nudge_failed") {
+	// Match the STATEMENT, not the bare word. The script explains itself in a
+	// comment that necessarily contains both "nudge_failed" and "prompted_at",
+	// and a bare-word scan reads that prose as a fourth failure branch whose
+	// next `exit 0` lies past the real prompted_at write - a false positive on
+	// the fix's own documentation. Same shape as the machinery guard's
+	// name-vs-invocation family: a NAME is not a STATEMENT.
+	for i, idx := range allIndexes(script, `printf 'nudge_failed\n' > "$DIR/status"`) {
 		end := strings.Index(script[idx:], `exit 0`)
 		if end < 0 {
 			t.Fatalf("nudge_failed branch %d never exits", i)
@@ -352,7 +358,7 @@ func TestTmuxArgumentCapMakesFilePasteTheOnlyNudgeDelivery(t *testing.T) {
 
 	// The measured worker-local prompt size (ops/receipts/nrt-d3/
 	// 2026-09-11-d3-cutover-landed-gate-unmet.md), newline terminated.
-	nudge := "HEADMARKER\n" + strings.Repeat("LINE\n", 263) + "TAILMARKER-liv6ac\n"
+	nudge := "HEADMARKER\n" + strings.Repeat("LINE\n", 3280) + "TAILMARKER-liv6ac\n"
 	nudgeFile := filepath.Join(dir, "nudge.txt")
 	if err := os.WriteFile(nudgeFile, []byte(nudge), 0o600); err != nil {
 		t.Fatalf("write nudge: %v", err)
