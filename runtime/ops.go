@@ -530,12 +530,19 @@ func (l *lifecycle) opProvisionWithConfig(ctx context.Context, sessionName strin
 // died instead of starting — a denied image pull says so in its events, and
 // that sentence is worth more than every error derived from it downstream.
 func (l *lifecycle) confirmDispatchPlaced(ctx context.Context, sessionName string) error {
-	b, _, err := l.liveChild(ctx, sessionName)
+	// Read the BINDING, not liveChild. liveChild filters for a child that is
+	// already live, and the whole point here is the child that is NOT — a
+	// dispatch that placed nothing comes back empty from liveChild and the
+	// caller then gets "no child job is bound", which is true but useless: it
+	// names our bookkeeping instead of the image that could not run. dispatch
+	// commits ChildJobID to the binding before returning, so the binding has
+	// what this check needs.
+	b, ok, err := l.sidecar.load(sessionName)
 	if err != nil {
 		return fmt.Errorf("provision %q: confirming the dispatch was placed: %w", sessionName, err)
 	}
-	if b.ChildJobID == "" {
-		return fmt.Errorf("provision %q: dispatch accepted but no child job is bound to this session", sessionName)
+	if !ok || b.ChildJobID == "" {
+		return fmt.Errorf("provision %q: dispatch accepted but no child job was recorded for this session", sessionName)
 	}
 	deadline := time.Now().Add(allocPlacementTimeout)
 	var lastStatus string
