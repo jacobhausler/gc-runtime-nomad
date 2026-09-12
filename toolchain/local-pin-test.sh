@@ -75,6 +75,32 @@ expect "half-supplied override is refused"       "GC_LOCAL_ARTIFACT is set but" 
   env GC_LOCAL_ARTIFACT=/nonexistent/gc bash "${REAL_SCRIPT}" check
 expect "check names the published default"       "published gc 1.4.1" bash "${REAL_SCRIPT}" check
 
+# --- the gc-less image mode ---------------------------------------------------
+# The derived-artifact shape fetches gc per allocation, so the toolchain image
+# does not need gc in it. Two properties matter more than the mode itself.
+
+# ONE: baking a pin AND fetching one is refused, not ordered. Two gc binaries in
+# a box means a PATH race decides which a seat runs — silently, and differently
+# per image. That is the exact class of defect the derived artifact removes, so
+# reintroducing it by configuration must be impossible.
+PO="$(mint_pack omitgc)"
+FAKE3="${PO}/staged/gc"; mkdir -p "${PO}/staged"; printf 'fake\n' > "${FAKE3}"
+FAKE3_SHA="$(if command -v sha256sum >/dev/null 2>&1; then sha256sum -b "$FAKE3" | awk '{print $1}'; else shasum -a 256 -b "$FAKE3" | awk '{print $1}'; fi)"
+set_lock_pin "${PO}" "${FAKE3}" "${FAKE3_SHA}" "deadbeef0"
+refuse "omit-gc plus a pinned artifact is refused" "Pick one" \
+  env GC_TOOLCHAIN_OMIT_GC=1 GC_TOOLCHAIN_HOST_STEP=1 bash "${PO}/toolchain/build-image.sh" build --dry-run
+
+# TWO: libicu STAYS. The fetched gc links libicui18n.so.74 exactly as a baked
+# one does, so removing gc does not remove its ABI requirement — and the lock's
+# libicu assertion ("ldd /usr/local/bin/gc reports no not found") would have no
+# target in this mode and pass vacuously. The Dockerfile must assert the soname
+# is present instead.
+grep -qF 'libicui18n.so.74' "${REAL_ROOT:-.}/toolchain/Dockerfile" 2>/dev/null ||
+  grep -qF 'libicui18n.so.74' toolchain/Dockerfile ||
+  bad "the Dockerfile does not assert the ICU soname; in GC_OMIT mode the fetched gc's ABI
+requirement is unproven and the libicu ldd assertion has no target"
+ok "the gc-less mode still asserts the ICU soname the fetched gc needs"
+
 # --- 2. the preference, and a bounded context ---------------------------------
 P="$(mint_pack prefer)"
 FAKE="${P}/staged/gc"; mkdir -p "${P}/staged"

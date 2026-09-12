@@ -377,9 +377,22 @@ case "$cmd" in
       [ "$staged_sha" = "$art_sha" ] || { rm -rf "$ctx"; die "staged copy changed checksum: ${staged_sha} != ${art_sha}"; }
       staged="${ctx}/.local/gc"
     fi
-    local_args=(--build-arg=GC_LOCAL_ARTIFACT= --build-arg=GC_LOCAL_SHA256= --build-arg=GC_PIN_COMMIT=)
+    local_args=(--build-arg=GC_LOCAL_ARTIFACT= --build-arg=GC_LOCAL_SHA256= --build-arg=GC_PIN_COMMIT= --build-arg=GC_OMIT=)
     if [ -n "$art" ]; then
-      local_args=(--build-arg=GC_LOCAL_ARTIFACT=gc --build-arg=GC_LOCAL_SHA256="$art_sha" --build-arg=GC_PIN_COMMIT="$art_pin")
+      local_args=(--build-arg=GC_LOCAL_ARTIFACT=gc --build-arg=GC_LOCAL_SHA256="$art_sha" --build-arg=GC_PIN_COMMIT="$art_pin" --build-arg=GC_OMIT=)
+    fi
+    # GC_OMIT builds the toolchain without gc, for the derived-artifact shape
+    # where a Nomad allocation fetches gc by commit. It is mutually exclusive
+    # with naming a local artifact: baking a pin AND fetching one would leave
+    # two gc binaries in the box and a PATH race deciding which one a seat runs
+    # — silently, and differently per image. Refused rather than ordered.
+    if [ -n "${GC_TOOLCHAIN_OMIT_GC:-}" ]; then
+      [ -z "$art" ] || { rm -rf "$ctx"; die "GC_TOOLCHAIN_OMIT_GC is set AND a local gc artifact is
+pinned. Pick one: an image with gc baked in, or a gc-less image whose gc arrives per-allocation.
+Doing both leaves two binaries in the box and a PATH race deciding which a seat runs."; }
+      local_args=(--build-arg=GC_LOCAL_ARTIFACT= --build-arg=GC_LOCAL_SHA256= --build-arg=GC_PIN_COMMIT= --build-arg=GC_OMIT=1)
+      echo "toolchain: building a gc-LESS image — the runtime must have GC_NOMAD_GC_ARTIFACT_URL set," >&2
+      echo "toolchain: or boxes will have no gc at all" >&2
     fi
     # shellcheck disable=SC2046
     run docker build -f "$DOCKERFILE" -t "$agent" $(args_from_lock) "${local_args[@]}" "$ctx"

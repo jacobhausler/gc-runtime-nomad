@@ -66,6 +66,25 @@ ARG GC_SHA256=8d8c8b511db3fc44931445aab5cb9f212509c0867105c880d6c3d0e6e5d33e42
 ARG GC_LOCAL_ARTIFACT=
 ARG GC_LOCAL_SHA256=
 ARG GC_PIN_COMMIT=
+# GC_OMIT builds the toolchain WITHOUT gc, for the derived-artifact shape where
+# a Nomad allocation fetches gc by commit instead of inheriting whatever the
+# image was built with. Empty keeps gc in the image.
+#
+# libicu74 STAYS EITHER WAY, and that is the part worth reading twice: the
+# FETCHED gc links libicui18n.so.74 exactly as a baked one does, so removing gc
+# does not remove its ABI requirement. What it removes is the ABILITY TO PROVE
+# the requirement at build time — the lock records libicu's assertion as
+# "gc loads at all -- ldd /usr/local/bin/gc reports no not found", and with no
+# gc in the image that ldd has no target and would pass vacuously.
+#
+# So in this mode the assertion is replaced, not dropped: the soname the fetched
+# gc will need is asserted PRESENT at its recorded path. The remaining half of
+# the contract — that the fetched gc and this image's ICU actually agree — moves
+# to launch time, where the pack's in-box probe runs `gc version` and reports a
+# gc that cannot start. That is a real trade and not a free one: a mismatch is
+# found on the first box rather than at build, so it costs a session instead of
+# a build.
+ARG GC_OMIT=
 ARG GIT_VERSION=1:2.43.0-1ubuntu7.3
 ARG TMUX_VERSION=3.4-1ubuntu0.1
 # libicu74 is not decoration: a locally built gc NEEDS it. `ldd` on the
@@ -122,7 +141,13 @@ COPY .local/ /tmp/toolchain-local/
 # (`gc build-image --help` composes city content onto ARG BASE and names no gc).
 RUN set -eu; \
     cd /; \
-    if [ -n "${GC_LOCAL_ARTIFACT}" ]; then \
+    if [ -n "${GC_OMIT}" ]; then \
+      soname=/usr/lib/x86_64-linux-gnu/libicui18n.so.74; \
+      test -e "$soname" || { echo "GC_OMIT image is missing ${soname}: the FETCHED gc links it, so removing gc from the image does not remove the requirement" >&2; exit 1; }; \
+      echo "gc OMITTED from this image by GC_OMIT; ${soname} present for the fetched gc"; \
+      echo "the gc<->ICU ABI agreement is now verified at LAUNCH by the pack's in-box probe, not here"; \
+      rm -rf /tmp/toolchain-local; \
+    elif [ -n "${GC_LOCAL_ARTIFACT}" ]; then \
       src="/tmp/toolchain-local/${GC_LOCAL_ARTIFACT}"; \
       test -f "$src"; \
       echo "${GC_LOCAL_SHA256}  ${src}" | sha256sum --check --strict; \
