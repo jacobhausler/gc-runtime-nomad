@@ -35,22 +35,29 @@ placement, and the full table. That file is the authority; this is the
 summary.
 
 The failure mode when the dependency is missing is the reason this
-section is first: **the pack does not refuse, it goes dark.** Two
-measured examples:
+section is first: **the pack does not refuse, it goes dark.** The
+measured example:
 
-- Without the `runtime-provider` config seam, `gc` silently drops
-  `runtime_provider` and `[[agent_groups]]` while parsing the city
-  config. The pack's own `[runtimes.nomad]` declaration is discarded,
-  the runtime is simply never selected, and the lane looks configured
-  and serves nothing.
 - Without `remote-worker-lifecycle`, a seat inside an alloc cannot claim
   at all. It starts, connects, and drains with
   `{"action":"drain","reason":"no_work"}` while the city lists its work
   as ready.
 
-**One of those two now fails closed.** `remote-worker-lifecycle` is the
-family that decides whether a seat can claim work at all, so the pack
-probes for it before minting a box and refuses when it is absent:
+**Retracted: a second example used to stand here.** It claimed that
+without the `runtime-provider` seam, `gc` drops `runtime_provider` and
+`[[agent_groups]]` while parsing the city config, so this pack's runtime
+is never selected. That is not true of a stock `gc`, and this page
+asserted it thirty lines after saying the same family "turns out not to
+be required" — the page contradicted itself, and the wrong half was the
+one written as measured fact. Upstream resolves `session = "nomad"`
+through its own pack-runtime registry; the selection path is present on
+`origin/main`. The retraction is recorded rather than deleted because a
+doc that overstates what it needs from its host is the specific way this
+kind of page misleads an adopter, and the shape is worth keeping visible.
+
+**That one now fails closed.** `remote-worker-lifecycle` is the family
+that decides whether a seat can claim work at all, so the pack probes for
+it before minting a box and refuses when it is absent:
 
 ```
 $ gc-runtime-nomad check
@@ -67,8 +74,32 @@ becomes stranded allocations.
 The probe is a local `gc bd claim` under a remote target, which both
 lineages refuse at the target gate *before any network dial*: no city, no
 token, no reachable host, ~30ms. It distinguishes them by which refusal
-comes back. An unrecognised answer is reported as **unknown** and never
-blocks — an unfamiliar `gc` is not evidence of a missing family.
+comes back.
+
+Three outcomes, and the difference between the last two matters:
+
+| outcome | meaning | box-minting ops |
+|---|---|---|
+| present | the family is there | proceed |
+| missing | this `gc` answers with the upstream capability gate | **refuse** |
+| absent | no `gc` answered — nothing on PATH, or it printed nothing | **refuse** |
+| unknown | a `gc` answered in a shape this pack does not recognise | proceed |
+
+**Unknown proceeds; absent does not.** An unfamiliar `gc` is not evidence
+of a missing family, and a future `gc` may legitimately reword its
+refusal — so refusing a session over an unparsed string would be worse
+than the fault. But "no `gc` answered" is not an unparsed answer, it is
+no answer, and this pack shells out to `gc` for everything a seat does.
+Absent used to be folded into unknown, which meant the deployment least
+likely to have the right `gc` — a stranger installing from public sources
+who has not installed `gc` yet — was the one waved through into a green
+box with a dark seat. It gets its own refusal, naming the absence rather
+than the dependency table, because "gc is not installed" and "gc is the
+wrong build" have different fixes.
+
+If you are running an offline harness that mints no real sessions, set
+`GC_NOMAD_SKIP_GC_CAPABILITY_GATE=1`. It warns on every use, loudly, and
+in a real deployment it restores the dark lane.
 
 **The other eighteen families are still undetected**, and for those the
 paragraph above stands unchanged: no error names this pack. Budget for

@@ -157,13 +157,20 @@ func probeGCWorkerSurface(ctx context.Context) gcWorkerSurface {
 	cmd := exec.CommandContext(ctx, gc, "bd", "claim", "gc-runtime-nomad-capability-probe",
 		"--city-url", "https://127.0.0.1:1", "--city-name", "gc-runtime-nomad-probe")
 	out, _ := cmd.CombinedOutput()
+	return probeGCWorkerSurfaceFromOutput(string(out))
+}
+
+// probeGCWorkerSurfaceFromOutput is the classification half, split from the
+// subprocess so the absent rule is readable by a test without a gc on PATH —
+// and so the doc guard can assert against the LIVE rule rather than a copy.
+func probeGCWorkerSurfaceFromOutput(out string) gcWorkerSurface {
 	// Empty output is not an unrecognised answer, it is no answer: the probe
 	// never reached the target gate both lineages refuse at. Classifying it
 	// Unknown let a gc that could not execute at all read as "proceed".
-	if strings.TrimSpace(string(out)) == "" {
+	if strings.TrimSpace(out) == "" {
 		return gcWorkerSurfaceAbsent
 	}
-	return classifyWorkerSurface(string(out))
+	return classifyWorkerSurface(out)
 }
 
 // gcProbeTimeout bounds the probe. It is refused locally and returns in

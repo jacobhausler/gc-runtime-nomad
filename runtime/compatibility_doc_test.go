@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -211,5 +212,75 @@ func TestArgvAllowListStillPresumesCredential(t *testing.T) {
 		if envArgvSafeNames[credentialish] {
 			t.Errorf("%q is argv-safe; the allow-list is supposed to presume credential", credentialish)
 		}
+	}
+}
+
+// TestCompatibilityDocDoesNotClaimRuntimeProviderIsRequired guards a retraction.
+//
+// COMPATIBILITY.md used to carry, as one of two "measured examples" of the
+// dark-lane failure, the claim that without the `runtime-provider` seam gc
+// drops `runtime_provider` and `[[agent_groups]]` while parsing the city
+// config. An outside audit found that false — upstream resolves
+// `session = "nomad"` through its own pack-runtime registry — and found the
+// page contradicting itself, since thirty lines earlier it says that same
+// family "turns out not to be required".
+//
+// The retraction is kept in the page, so this guard CANNOT be a grep for the
+// old words: it would fire on the correction itself, which is a mistake this
+// estate has made before. It asserts the shape instead — the claim must not
+// stand as a bullet in the examples list.
+func TestCompatibilityDocDoesNotClaimRuntimeProviderIsRequired(t *testing.T) {
+	body, err := os.ReadFile(filepath.Join("..", "COMPATIBILITY.md"))
+	if err != nil {
+		t.Fatalf("reading COMPATIBILITY.md: %v", err)
+	}
+	for _, line := range strings.Split(string(body), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "- ") {
+			continue // prose, including the retraction, is not the assertion
+		}
+		if strings.Contains(trimmed, "runtime-provider") && strings.Contains(trimmed, "Without") {
+			t.Errorf("COMPATIBILITY.md asserts runtime-provider as a dark-lane example again:\n  %s\n"+
+				"It is not required: upstream resolves session = \"nomad\" through its own "+
+				"pack-runtime registry. See the retraction in the same section.", trimmed)
+		}
+	}
+	if !strings.Contains(string(body), "Retracted") {
+		t.Error("the runtime-provider retraction is gone from COMPATIBILITY.md; it is kept " +
+			"deliberately, because a doc overstating what it needs from its host is the " +
+			"specific way this kind of page misleads an adopter")
+	}
+}
+
+// TestCompatibilityDocStatesTheAbsentRefusal pins the doc to the LIVE gate.
+//
+// The page must say that absent refuses and unknown proceeds, because that
+// distinction is the whole reason the gate is not decorative — and a page that
+// describes a fail-open gate while the code fails closed (or the reverse) is
+// worse than no page.
+func TestCompatibilityDocStatesTheAbsentRefusal(t *testing.T) {
+	body, err := os.ReadFile(filepath.Join("..", "COMPATIBILITY.md"))
+	if err != nil {
+		t.Fatalf("reading COMPATIBILITY.md: %v", err)
+	}
+	doc := string(body)
+
+	// Read the live behaviour rather than trusting either side.
+	if got := probeGCWorkerSurfaceFromOutput(""); got != gcWorkerSurfaceAbsent {
+		t.Fatalf("empty probe output classifies as %v, not absent — the doc's table would be "+
+			"describing a gate that no longer exists", got)
+	}
+	for _, want := range []string{"absent", "unknown"} {
+		if !strings.Contains(strings.ToLower(doc), want) {
+			t.Errorf("COMPATIBILITY.md never mentions the %q probe outcome", want)
+		}
+	}
+	if !strings.Contains(doc, "Unknown proceeds; absent does not") {
+		t.Error("COMPATIBILITY.md does not state the distinction that makes the gate " +
+			"non-decorative: unknown proceeds, absent refuses")
+	}
+	if !strings.Contains(doc, envSkipCapabilityGate) {
+		t.Errorf("COMPATIBILITY.md does not name %s, so an offline harness has no documented "+
+			"way past a gate that now refuses more cases", envSkipCapabilityGate)
 	}
 }
