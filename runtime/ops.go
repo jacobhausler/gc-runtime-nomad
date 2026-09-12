@@ -1493,8 +1493,15 @@ func (l *lifecycle) capturePanePID(ctx context.Context, sessionName string) (int
 // stop being a bare shell. An agent process appears within a second or two of
 // the launch exec; this window is generous so a slow image never trips it.
 var (
-	paneLaunchSettle = 20 * time.Second
-	paneLaunchPoll   = 1 * time.Second
+	// Short on purpose. This window is only ever spent to decide whether to
+	// WARN (warnIfPaneRunsNoAgent), so paying for it is pure latency on every
+	// single launch — and in a harness whose panes legitimately hold a shell it
+	// is paid in full every time. Measured 2026-09-12: at 20s it pushed the pack
+	// suite past a 12-minute timeout that it had been finishing inside before,
+	// which is a real cost for an advisory signal. An agent that is going to
+	// appear appears within a second or two.
+	paneLaunchSettle = 3 * time.Second
+	paneLaunchPoll   = 500 * time.Millisecond
 )
 
 // bareShellCommands are the pane commands that mean "nothing was started here".

@@ -33,6 +33,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -1295,7 +1296,8 @@ func (s *Server) startMainTask(allocID string, task TaskSpec, portEnv map[string
 		return
 	}
 
-	cmd := exec.Command(task.Command[0], task.Command[1:]...)
+	taskCommand := portableIdleCommand(task.Command)
+	cmd := exec.Command(taskCommand[0], taskCommand[1:]...)
 	cmd.Dir = dir
 	cmd.Env = isolatedTmuxEnv(dir, "")
 
@@ -1339,6 +1341,40 @@ func (s *Server) startMainTask(allocID string, task TaskSpec, portEnv map[string
 	}()
 }
 
+// portableIdleCommand rewrites a container idle command this host's userland
+// cannot run.
+//
+// The pack's session task is `/bin/sleep infinity` — correct for its Linux
+// image, where GNU coreutils accepts it. This fake runs a task's command as a
+// REAL local subprocess, and BSD sleep (macOS) rejects "infinity" outright:
+//
+//	$ /bin/sleep infinity
+//	usage: sleep number[unit] [...]
+//
+// so the main task exited instantly, the allocation went terminal, and every
+// test that started a session failed with "has no non-terminal alloc: session
+// not found" — 40 of 61 failures on a clean tree, all from this one line, and
+// not one of them a defect in the pack. Measured 2026-09-12 (cr-zkfl4t).
+//
+// The duration is irrelevant to every caller: the process exists only to hold
+// the allocation open while a test drives it, so a long finite sleep is
+// equivalent and portable. On linux the command passes through untouched, as
+// does anything that is not `sleep infinity`.
+func portableIdleCommand(command []string) []string {
+	if len(command) != 2 || command[1] != "infinity" {
+		return command
+	}
+	if filepath.Base(command[0]) != "sleep" {
+		return command
+	}
+	if runtime.GOOS == "linux" {
+		return command
+	}
+	out := append([]string(nil), command...)
+	out[1] = "86400"
+	return out
+}
+
 // startSideTask renders task's template stanzas (if any) and then runs its
 // command as a real subprocess standing in for a non-main task in the group
 // (e.g. fnrt-t4l.13's log-shipper) — best effort, and deliberately never
@@ -1361,7 +1397,8 @@ func (s *Server) startSideTask(allocID string, task TaskSpec, portEnv map[string
 		return
 	}
 
-	cmd := exec.Command(task.Command[0], task.Command[1:]...)
+	taskCommand := portableIdleCommand(task.Command)
+	cmd := exec.Command(taskCommand[0], taskCommand[1:]...)
 	cmd.Dir = dir
 	cmd.Env = isolatedTmuxEnv(dir, "")
 
