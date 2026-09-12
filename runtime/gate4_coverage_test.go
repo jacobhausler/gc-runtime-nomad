@@ -124,6 +124,7 @@ func TestGate4CausesAreEachNamed(t *testing.T) {
 		{"the agent's own last words are quoted", "Its stderr ended"},
 		{"orchestrator-only paths in argv are named", "PATHS THAT DO NOT EXIST IN IT"},
 		{"a fetched gc that cannot load", "THE gc IN THE BOX CANNOT START"},
+		{"a credential staged into the process environment", "credential-shaped key(s) into the agent's PROCESS ENVIRONMENT"},
 	} {
 		if !strings.Contains(src, c.phrase) {
 			t.Errorf("gate 4 cause %q is no longer named: expected a message containing %q",

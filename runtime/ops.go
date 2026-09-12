@@ -661,6 +661,11 @@ func (l *lifecycle) warnDeclaredSecrets(sessionName string, cfg stageConfig) {
 	w := l.durableWarn()
 	warnAbsentSecretKeys(w, sessionName, absent)
 	warnIncompleteCityTarget(w, sessionName, merged)
+	// Which SIDE of the naming rule this deployment landed on. See
+	// pem_advice.go: a security reviewer reading only the shipped docs found
+	// that nothing ties a credential-shaped name to the _PEM suffix that
+	// routes it to a file, though the docs call the choice irreversible.
+	warnCredentialShapedNames(w, sessionName, extraSecretKeys)
 }
 
 // warnIncompleteCityTarget names a remote city target that is half-configured.
