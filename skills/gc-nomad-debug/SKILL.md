@@ -92,7 +92,7 @@ nothing. The FAIL is the answer; the warnings are a to-do list.
 | Symptom | Read first | Usual cause |
 |---|---|---|
 | **Seats drain `no_work` while the city lists work as ready** — box healthy, agent up, pane fine | `gc-runtime-nomad check` **first**. To confirm by hand, or to test the `gc` INSIDE the image, run the gate's own probe: `gc bd claim probe --city-url https://127.0.0.1:1 --city-name probe` | The driving `gc` lacks `remote-worker-lifecycle`, so the seat cannot claim at all. `check` names it and exits nonzero. **Do not reach for `gc version --json`** — it prints a commit and the literal string `dev`, which looks perfectly normal and only incriminates if you already know that commit is the upstream base. The probe answers directly: `remote worker subset` in the refusal means the family is PRESENT; `remote support is being enabled incrementally` means it is ABSENT. If the host passes, suspect the **in-box** `gc` — the gate probes the host's, the image's is the one that claims |
-| **Every seat reports HEALTHY and the pool mints nothing, while routed work sits** — no drains, no errors, no starvation alarm | `gc-runtime-nomad check` **first** — it FAILS on this now. Then this pack's own `diagnostics.log` under `GC_NOMAD_SIDECAR_DIR` | The credential cannot LIST ALLOCATIONS. Ops that MINT a box keep working, so nothing looks broken — but `is-running` has no evidence except the allocation list, so it answers last-known-good on every call and every session reports healthy. A pool whose seats all report healthy sees no starvation and mints no replacement, so routed work sits against a lane that looks alive. Distinguish from the first row by the SYMPTOM: there, seats drain `no_work`; here they never drain at all, because nothing observes them. The usual cause is no token reaching the runtime — and note WHERE it is read from: the environment of the process running this pack, i.e. the **supervisor's**, not your shell's. A token you can see in your terminal is not a token the runtime has. Confirm with a bare HTTP status, never by printing the token: `curl -s -o /dev/null -w '%{http_code}' -H "X-Nomad-Token: $TOKEN" "$GC_NOMAD_ADDR/v1/jobs?namespace=$NS"` — 403 with no token and 200 with a good one |
+| **Every seat reports HEALTHY and the pool mints nothing, while routed work sits** — no drains, no errors, no starvation alarm | `gc-runtime-nomad check` **first**. It FAILS when it OBSERVES the refusal (403); when it cannot determine the capability at all — no address configured, cluster unreachable — it WARNS instead, and that warning is not an all-clear. Read which of the two you got. Then this pack's own `diagnostics.log` under `GC_NOMAD_SIDECAR_DIR` | The credential cannot LIST ALLOCATIONS. Ops that MINT a box keep working, so nothing looks broken — but `is-running` has no evidence except the allocation list, so it answers last-known-good on every call and every session reports healthy. A pool whose seats all report healthy sees no starvation and mints no replacement, so routed work sits against a lane that looks alive. Distinguish from the first row by the SYMPTOM: there, seats drain `no_work`; here they never drain at all, because nothing observes them. The usual cause is no token reaching the runtime — and note WHERE it is read from: the environment of the process running this pack, i.e. the **supervisor's**, not your shell's. A token you can see in your terminal is not a token the runtime has. Confirm with a bare HTTP status, never by printing the token: `curl -s -o /dev/null -w '%{http_code}' -H "X-Nomad-Token: $TOKEN" "$GC_NOMAD_ADDR/v1/jobs?namespace=$NS"` — 403 with no token and 200 with a good one |
 | Every lifecycle op fails at once | `gc-runtime-nomad check` | `GC_NOMAD_AGENT_IMAGE` unset; the required image fails every op closed |
 | `parent job "gc-sessions" is stale - re-register with a management token` | parent `gc_jobspec_hash` vs current jobspec | Any task-spec, resolver, or placement change is a jobspec change; the runtime token cannot fix it |
 | Child job exists, never places, no error | placement keys and scheduler events | A placement selection with no eligible client stays pending forever; look at placement facts, not dispatch or liveness |
@@ -152,12 +152,13 @@ Cluster side, read-only, correlated by child job and allocation id:
 
 **The sidecar binding is the only layer that can tell two faults apart.** Law 3
 names it as one of the five signals; this is what is in it. Under
-`GC_NOMAD_SIDECAR_DIR`, per session, it holds `ChildJobID`, `Launched`,
-`AgentPID` and `StagePending`. Every other layer is inferring:
+`GC_NOMAD_SIDECAR_DIR`, per session, it holds the child job id, whether the
+agent was launched, the pane pid, and whether staging is pending. Every other
+layer is inferring:
 
-- `StagePending` set with no `Launched` → **provisioned but never launched.**
+- `stage_pending` set with no `launched` → **provisioned but never launched.**
   The allocation can be running and healthy; nothing was ever started in it.
-- `Launched` set with a dead `AgentPID` → **launched, then the agent died**
+- `launched` set with a dead `agent_pid` → **launched, then the agent died**
   inside a live allocation. `ClientStatus` will never show this, because the
   box is fine.
 
@@ -180,6 +181,55 @@ parent fingerprint, pack and Nomad versions, the fact that a TLS or custody
 check passed, and custody-file paths. Allocation and child-job ids only when
 they correlate two observations. A token value in a transcript is an incident,
 not evidence.
+
+### Reading the binding — the part every decisive claim above depends on
+
+Three things make this unreadable if you guess, and all three have bitten
+someone already:
+
+1. **You need `GC_NOMAD_SIDECAR_DIR`, and you cannot read it from your own
+   shell** — the pack takes it from the SUPERVISOR's environment. Do not go
+   hunting in the process table. Ask the pack:
+
+   ```
+   gc-runtime-nomad check
+   ```
+
+   It prints `diagnostics: <dir>/diagnostics.log`. That directory IS the
+   sidecar dir, and that file is this pack's own durable account of every
+   failure and every dark-lane warning — read it before anything else.
+
+2. **The filename is base64url of the session name, with `=` padding
+   stripped, plus `.json`.** An `ls` shows opaque names and tells you nothing:
+
+   ```
+   SESSION=worker-local-1-pool
+   DIR=<the dir check printed>
+   F="$DIR/$(printf %s "$SESSION" | basenc --base64url | tr -d '=').json"
+   # macOS without basenc: python3 -c 'import base64,sys;print(base64.urlsafe_b64encode(sys.argv[1].encode()).decode().rstrip("="))' "$SESSION"
+   cat "$F"
+   ```
+
+3. **The on-disk keys are snake_case**, not the field names above:
+   `child_job_id`, `launched`, `agent_pid`, `stage_pending`. Grepping for
+   a CamelCase field name returns nothing and reads exactly like "the bindings are empty" —
+   which is the wrong conclusion, reached twice.
+
+   No binding file at all is itself an answer: the session was never
+   provisioned under this sidecar dir, or it was stopped and tombstoned (look
+   in `tombstones/`).
+
+**Reaching inside a box.** Several rows above say to run `ps` or
+`tmux has-session` in the allocation. Use the pack's own verb, which resolves
+the session's current allocation for you and needs no alloc id:
+
+```
+gc-runtime-nomad exec <session> ps -eo pid,comm
+gc-runtime-nomad peek <session>
+```
+
+`exec`'s exit code is the remote command's own. Note this streams the box's
+stdout verbatim, so never run a command there that prints the environment.
 
 ## 3. Bounded checks
 
