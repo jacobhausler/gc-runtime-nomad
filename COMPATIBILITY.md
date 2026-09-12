@@ -601,6 +601,83 @@ than by care:
   attribution only.
 - It is never written into the **jobspec**.
 
+### Rotating a credential, when one has leaked
+
+Three outside readers were asked to deliver, approve and rotate a credential
+from these docs alone. Two could follow a delivery procedure; **none would put
+a real credential through it, and rotation was not possible at all** — no
+restart command, no bounded fleet operation, no verification, no purge. Their
+findings are the reason this section exists, and it is written to be usable
+under a clock rather than to be reassuring.
+
+**First, say which credential you mean.** The docs previously used one word for
+two things, and a reader had to infer the difference:
+
+| | What it is | How it reaches a box | Rotating it |
+|---|---|---|---|
+| `GC_NOMAD_TOKEN` | the **Nomad ACL token** this pack uses to talk to the cluster | never leaves the orchestrator — it authenticates the API calls | mint a new one, update the supervisor's env, cycle the supervisor. Running boxes are unaffected: they never had it |
+| a **staged provider secret** (`GC_NOMAD_EXTRA_SECRET_KEYS`, provider env) | a value the AGENT needs | staged into the box at start/provision — as a file for a `_PEM` name, as `env.sh` otherwise | needs every affected box **replaced**; see below |
+
+**The fact that decides the whole procedure:** a staged secret is materialised
+at **start/provision** time and never again. `relaunch` re-execs inside the
+SAME allocation with no fresh dispatch and no fresh staging — the pack's own
+comment says so — and `gc reload` cannot revoke an environment the supervisor
+has already composed. **Neither rotates a live seat.** Only replacing the box
+does.
+
+**The procedure, and where it stops being ours.**
+
+1. **Rotate at the source** (your secrets manager) and update whatever composes
+   the supervisor's process environment. *This pack does not own that step and
+   cannot tell you how to do it* — it reads the supervisor's env and nothing
+   else. If you have no documented way to change that env and restart the
+   supervisor, you have no rotation story, and that is worth fixing before you
+   need one rather than during.
+2. **Cycle the supervisor** so new sessions compose the new value. **This pack
+   ships no command for that and never will** — the supervisor is started by
+   *your* process manager (launchd, systemd, a container orchestrator), and the
+   pack has no handle on it. Two docs assert a cycle is required; neither could
+   tell you how, which is the gap this paragraph closes by naming it as yours.
+3. **Replace every live box.** There is no bulk operation — `stop` is
+   per-session by design — so the loop is explicit:
+
+   ```sh
+   gc-runtime-nomad list-running | while read -r s; do gc-runtime-nomad stop "$s"; done
+   ```
+
+   Each replacement stages the new value at provision. Budget for it: this is
+   one dispatch per seat, and a large pool will not finish in ten minutes.
+
+   **Check the exit code of that loop.** `list-running` exits **1 on any lookup
+   error** rather than printing a partial list, so a transport fault makes the
+   loop above iterate over nothing, complete instantly, and look like it
+   rotated a fleet that it never touched. During a leak response that is the
+   worst failure available:
+
+   ```sh
+   names=$(gc-runtime-nomad list-running) || { echo "list-running failed — NOTHING was rotated" >&2; exit 1; }
+   printf '%s\n' "$names" | while read -r s; do [ -n "$s" ] && gc-runtime-nomad stop "$s"; done
+   ```
+
+**What you can and cannot verify.** Be exact about this, because the readers
+were right that the docs implied more than they delivered:
+
+- **`GC_NOMAD_TOKEN`: verifiable.** A bare HTTP status against the Nomad API
+  with the OLD token proves it is dead — `403` means revoked. Never print the
+  token to check it.
+- **A staged provider secret: NOT verifiable by this pack.** It has no read-back
+  path for a staged value by design, and it must not acquire one. Verification
+  belongs where the credential is *honoured* — revoke at the issuer and confirm
+  there. If your issuer cannot tell you whether a key is still in use, that is
+  the gap, and it is not one the pack can close.
+
+**The copy you will forget.** If the agent ever printed its environment, the
+value may already sit in plaintext in your **log sink** and your
+`GC_NOMAD_EGRESS_DIR`. The pack scrubs what IT composes; it cannot scrub what
+an agent chose to print. Rotation is not complete until those are purged, and
+the pack cannot do it for you — it does not own either store. Treat both as
+in-scope for any leak response.
+
 ### Where credentials actually end up
 
 The staging channel itself is value-blind and does not log secret
