@@ -109,6 +109,12 @@ nothing. The FAIL is the answer; the warnings are a to-do list.
 | `evidence_lost` on a stop, or no egress at all | sidecar tombstone, `GC_NOMAD_EGRESS_DIR` | Stop order is agent stop, shipper flush, egress, deregister; up to three egress retries then an explicit loss marker |
 | A call you expected to work is silently a no-op | which op the caller actually named | Exit 2 on an unimplemented op is RPP forward compatibility, not a failure |
 | A warning that a key is not a boolean, or a duration will not parse | that key's value | Bad config values are errors, and the operation stops naming the variable rather than defaulting |
+| **Every box dies before its task starts: `Failed Artifact Download: failed to download artifact`** | the allocation's task events, then whether an artifact is PUBLISHED for the live pin | `GC_NOMAD_GC_ARTIFACT_URL` is a TEMPLATE and `{commit}` is substituted with the commit of the gc **driving the pack**, so the URL is a function of the live pin. A pin roll that did not publish an artifact for its new commit leaves every box fetching a 404 and dying before the task runs — which is strictly worse than a stale in-box gc, because that only warns. Publish for the pin, or unset the variable and let boxes use the image's gc |
+| **The artifact downloads, the box starts, and the fetched `gc` will not run: `error while loading shared libraries: libicui18n.so.NN`** | `ldd <the fetched gc>` INSIDE the image, not on the build host | The ICU ABI trap, and it is the most expensive mistake in this area because the binary is fine everywhere except where it has to run. gc links ICU through a cgo dependency, so a binary built on one base and run on another fails at load. Debian bookworm is ICU 72, trixie is 76, Ubuntu 24.04 is 74. **Build the published artifact against the AGENT IMAGE's own base**, and verify by running it in that image (`docker run --rm -v …:/out <agent image> /out/gc version --json --long`), never by running it on the build host, where it always works |
+| **Nothing in the box can find any command: `tar exited 127` on staging, `sh: not found`, `ls: not found`** | the box's `PATH`: `nomad alloc exec … /bin/sh -c 'echo $PATH'` | Something set `PATH` in the **task env**. Nomad interpolates its own variables there but not `${PATH}`, so a value like `${NOMAD_TASK_DIR}/bin:${PATH}` becomes that literal string and the box's PATH is exactly one directory. A box's PATH can only be prepended from INSIDE the box, in a shell. Everything downstream reads as a missing tool |
+| **`the "agent" task never started (state "pending"): Downloading Artifacts … reading exec frame: EOF`** | the allocation's `ClientStatus` and its task states | Staging raced the artifact fetch. The readiness gate treats an allocation carrying **no task states** as ready — correct for a stub API, wrong for an allocation Nomad has just created and not yet filled in, and a large artifact widens that instant into a window every staging exec falls into. Fixed by gating on `ClientStatus` too; if you see it, the gc driving the pack predates that fix |
+| **The pane's command exited and you want to know WHY** | `alloc/data/agent.exit`, then `alloc/data/agent.stdout` | See §2's capture-channel subsection. **Not `alloc/logs`** — Nomad bind-mounts that directory READ-ONLY into the task, so nothing running in the box can write there even though it reports mode 0777. Any instruction that tells you to read a box-written file under `alloc/logs` is describing a file that cannot exist |
+| **`AND THE BOX WAS GIVEN PATHS THAT DO NOT EXIST IN IT: …`** | the named path, and the provider argument it came from | An orchestrator-only path riding in the agent's own argv (`-c key=/abs/path`, `--config /abs/path`). The environment is stripped of host paths before launch; an argument cannot be, because dropping it changes what the agent does. **The remedy is never in the image** — the path is valid where the argument was rendered, and that asymmetry IS the defect. Fix the provider configuration, or let the pack stage the file |
 
 ## 2. Collect evidence with native verbs, in this order
 
@@ -208,6 +214,41 @@ parent fingerprint, pack and Nomad versions, the fact that a TLS or custody
 check passed, and custody-file paths. Allocation and child-job ids only when
 they correlate two observations. A token value in a transcript is an incident,
 not evidence.
+
+### Reading the box's own account of its death
+
+When a pane's command exits, the tmux server exits with its last session, so
+every in-box probe you would reach for next is already gone: no server, no
+pane, no process list. The box writes down what happened before that, in three
+files under `alloc/data/` — **not `alloc/logs/`**, which Nomad mounts read-only
+into the task, so nothing in the box can write there regardless of its mode.
+
+| File | What it is | Read it when |
+|---|---|---|
+| `alloc/data/agent.exit` | one line: `exit= started= ended= pane= argv0= alloc=`, written by the pane wrapper and renamed into place | always first. `started` and `ended` in the same second means the agent never ran, not that it crashed under load |
+| `alloc/data/agent.stdout` | the pane's own output, tapped with `tmux pipe-pane` so the agent keeps its tty | the exit code is not the reason. This is where the agent's own error message is |
+| `alloc/data/agent.paths` | `missing-path: <path>` per absolute path in the agent's argv that does not exist in the box | the agent died at once and its argv names files. A line here is always a defect |
+
+The record carries the command's NAME and timestamps, never argument values,
+which is what makes it safe to ship off the box.
+
+```sh
+# while the allocation still exists
+nomad alloc exec -namespace "$NS" -task agent "$ALLOC" \
+  /bin/sh -c 'cat "$NOMAD_ALLOC_DIR"/data/agent.exit "$NOMAD_ALLOC_DIR"/data/agent.paths 2>&1'
+```
+
+The pack reads these itself and quotes them in the failure it reports, so in
+the normal case you do not go looking — the error already contains them. Go
+looking when the pack says it found **no usable record**: that means the pane
+died before the wrapper ran, or the allocation directory was not writable, and
+those are different faults.
+
+A caution paid for in a full day of diagnosis: **an absent record used to be
+indistinguishable from a pane that never started**, because the write
+discarded its own stderr. If you are on a build where `agent.exit` is missing
+and the box looks otherwise healthy, check that the directory is writable
+before concluding the agent never launched.
 
 ### Reading the binding — the part every decisive claim above depends on
 
