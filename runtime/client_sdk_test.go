@@ -35,7 +35,7 @@ func TestDispatchChildCarriesStableIdempotencyToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newClient: %v", err)
 	}
-	if _, err := c.dispatchChild(context.Background(), "parent", "worker", "nonce-1"); err != nil {
+	if _, err := c.dispatchChild(context.Background(), "parent", "worker", "nonce-1", ""); err != nil {
 		t.Fatalf("dispatchChild: %v", err)
 	}
 	if gotNamespace != "sessions" {

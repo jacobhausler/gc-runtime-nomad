@@ -136,7 +136,7 @@ func parentJobSpec(namespace, nodePool, parentID string, logShipper logShipperCo
 			// boxes started on the 0a35596 pack until this list matched what the
 			// dispatcher actually sends. Still non-secret attribution only - the
 			// instance token/capability NEVER rides Meta (R2a-02).
-			MetaOptional: []string{"gc_session", "gc_nonce", "gc_created_at"},
+			MetaOptional: []string{"gc_session", "gc_nonce", "gc_created_at", agentImageMetaKey},
 			Payload:      "forbidden",
 		},
 		TaskGroups: []nomadTaskGroup{sessionTaskGroup(logShipper, agentImage, dep)},
@@ -152,9 +152,19 @@ func parentJobSpec(namespace, nodePool, parentID string, logShipper logShipperCo
 	// drift-visible to ensureParentRegistered rather than silently ignored on an
 	// already-registered parent (fnrt-t4l.9).
 	job.Constraints = append(job.Constraints, dep.nodeConstraints...)
-	job.Meta = map[string]string{jobspecHashMetaKey: jobspecHash(job)}
+	// The deployment default rides in the parent's Meta and is hashed WITH the
+	// job, so changing the default is drift-visible exactly as changing the
+	// baked image used to be. A per-dispatch override never touches the parent,
+	// which is the whole point: one parent, many images.
+	job.Meta = map[string]string{agentImageMetaKey: agentImage}
+	job.Meta[jobspecHashMetaKey] = jobspecHash(job)
 	return job
 }
+
+// agentImageMetaKey is the dispatch metadata key carrying the agent image.
+// The parent declares the deployment default under it; a dispatch may override
+// it for one session.
+const agentImageMetaKey = "gc_image"
 
 // jobspecHashMetaKey is the parent job Meta key ensureParentRegistered reads
 // back via getJob to detect drift beyond NodePool (fnrt-t4l.9).
@@ -307,7 +317,24 @@ func sessionTask(agentImage string) nomadTask {
 		Name:   "agent",
 		Driver: "docker",
 		Config: map[string]any{
-			"image":   agentImage,
+			// The image is resolved from dispatch metadata, not frozen here.
+			//
+			// Baking the literal made the parent job image-specific, so one
+			// deployment served exactly one image and two lanes wanting
+			// different agent toolchains could not coexist on this runtime at
+			// all (cr-420zkj). The parent now carries the deployment default
+			// in Meta and a dispatch may override it per session, which is
+			// what lets a lane onboard by naming its runtime rather than by
+			// standing up a second deployment.
+			//
+			// Nomad's own parameterized metadata, verified live on this
+			// fleet's Nomad 2.0.5: ${NOMAD_META_*} interpolates into the
+			// docker driver's config image, dispatch metadata MERGES over the
+			// job's meta block rather than replacing it, and a key not
+			// declared in meta_optional is refused outright. The constraint
+			// stanza is the one place interpolation does NOT apply, which is
+			// why the fatal placement rules stay literal above.
+			"image":   "${NOMAD_META_" + agentImageMetaKey + "}",
 			"command": "/bin/sleep",
 			"args":    []string{"infinity"},
 		},

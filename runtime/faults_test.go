@@ -503,7 +503,7 @@ func TestFaultCrashPointSuite(t *testing.T) {
 		if err := l.sidecar.save(intent); err != nil {
 			t.Fatalf("sidecar.save(intent): %v", err)
 		}
-		orphanID, err := l.client.dispatchChild(ctx, l.parentJobID, session, nonce)
+		orphanID, err := l.client.dispatchChild(ctx, l.parentJobID, session, nonce, "")
 		if err != nil {
 			t.Fatalf("dispatchChild: %v", err)
 		}
@@ -548,7 +548,7 @@ func TestFaultCrashPointSuite(t *testing.T) {
 		// after it commits the binding (with ChildJobID set) but before
 		// markLaunched runs would leave: a bound, live, not-yet-launched
 		// child.
-		if err := l.dispatch(ctx, session); err != nil {
+		if err := l.dispatch(ctx, session, ""); err != nil {
 			t.Fatalf("dispatch: %v", err)
 		}
 		b, ok, err := l.sidecar.load(session)

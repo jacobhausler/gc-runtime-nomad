@@ -160,7 +160,7 @@ esac
 			t.Fatalf("register parent: %v", err)
 		}
 		for _, nonce := range []string{"nonce-one", "nonce-two"} {
-			if _, err := l.client.dispatchChild(ctx, l.parentJobID, "sess-ambiguous", nonce); err != nil {
+			if _, err := l.client.dispatchChild(ctx, l.parentJobID, "sess-ambiguous", nonce, ""); err != nil {
 				t.Fatalf("dispatch candidate %q: %v", nonce, err)
 			}
 		}
@@ -180,7 +180,7 @@ esac
 		if err := l.ensureParentRegistered(ctx); err != nil {
 			t.Fatalf("register parent: %v", err)
 		}
-		childID, err := l.client.dispatchChild(ctx, l.parentJobID, "sess-terminal-match", "nonce-terminal")
+		childID, err := l.client.dispatchChild(ctx, l.parentJobID, "sess-terminal-match", "nonce-terminal", "")
 		if err != nil {
 			t.Fatalf("dispatch terminal candidate: %v", err)
 		}
@@ -208,11 +208,11 @@ esac
 			t.Fatalf("register parent: %v", err)
 		}
 		const session = "sess-terminal-residue"
-		staleID, err := l.client.dispatchChild(ctx, l.parentJobID, session, "nonce-stale")
+		staleID, err := l.client.dispatchChild(ctx, l.parentJobID, session, "nonce-stale", "")
 		if err != nil {
 			t.Fatalf("dispatch stale candidate: %v", err)
 		}
-		liveID, err := l.client.dispatchChild(ctx, l.parentJobID, session, "nonce-live")
+		liveID, err := l.client.dispatchChild(ctx, l.parentJobID, session, "nonce-live", "")
 		if err != nil {
 			t.Fatalf("dispatch live candidate: %v", err)
 		}
@@ -251,7 +251,7 @@ esac
 		}
 		const session = "sess-two-terminal-one-live"
 		for _, nonce := range []string{"nonce-dead-a", "nonce-dead-b"} {
-			childID, err := l.client.dispatchChild(ctx, l.parentJobID, session, nonce)
+			childID, err := l.client.dispatchChild(ctx, l.parentJobID, session, nonce, "")
 			if err != nil {
 				t.Fatalf("dispatch terminal candidate %q: %v", nonce, err)
 			}
@@ -263,7 +263,7 @@ esac
 				t.Fatalf("set terminal candidate %q: allocation %q not found", childID, allocs[0].ID)
 			}
 		}
-		liveID, err := l.client.dispatchChild(ctx, l.parentJobID, session, "nonce-live")
+		liveID, err := l.client.dispatchChild(ctx, l.parentJobID, session, "nonce-live", "")
 		if err != nil {
 			t.Fatalf("dispatch live candidate: %v", err)
 		}
@@ -285,7 +285,7 @@ esac
 		}
 		const session = "sess-terminal-only-pair"
 		for _, nonce := range []string{"nonce-dead-c", "nonce-dead-d"} {
-			childID, err := l.client.dispatchChild(ctx, l.parentJobID, session, nonce)
+			childID, err := l.client.dispatchChild(ctx, l.parentJobID, session, nonce, "")
 			if err != nil {
 				t.Fatalf("dispatch terminal candidate %q: %v", nonce, err)
 			}

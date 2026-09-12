@@ -56,8 +56,15 @@ func TestParentJobSpecUsesConfiguredDockerAgentImage(t *testing.T) {
 	if agent.Driver != "docker" {
 		t.Fatalf("agent Driver = %q, want docker", agent.Driver)
 	}
-	if got := agent.Config["image"]; got != image {
-		t.Fatalf("agent Config[image] = %#v, want %q", got, image)
+	// The configured image is still what the deployment runs — it just arrives
+	// through dispatch metadata now instead of being frozen in the task, so
+	// one parent can serve lanes that want different agent toolchains. Assert
+	// the whole path: the task interpolates, and the parent carries the value.
+	if got := agent.Config["image"]; got != "${NOMAD_META_"+agentImageMetaKey+"}" {
+		t.Fatalf("agent Config[image] = %#v, want the dispatch-meta interpolation", got)
+	}
+	if got := spec.Meta[agentImageMetaKey]; got != image {
+		t.Fatalf("parent Meta[%s] = %q, want the configured image %q", agentImageMetaKey, got, image)
 	}
 }
 
@@ -976,4 +983,74 @@ func TestParentJobSpecFencesPlacementToAmd64(t *testing.T) {
 	}
 	t.Fatalf("constraints = %+v, want one to be %+v — an arm64 client can place this\n"+
 		"group today and the log-shipper then fails silently", spec.Constraints, want)
+}
+
+// TestParentJobSpecResolvesTheImageFromDispatchMeta pins the change that lets
+// two lanes with different agent toolchains share one deployment.
+//
+// The image used to be baked into the parent's task, which made the parent
+// image-specific: one deployment served exactly one image, and a codex lane
+// and a claude lane could not coexist on this runtime at all (cr-420zkj). The
+// parent now carries the deployment default in Meta and the task interpolates
+// it, so a dispatch can name a different image for one session without
+// touching the parent.
+func TestParentJobSpecResolvesTheImageFromDispatchMeta(t *testing.T) {
+	spec := parentJobSpec("gc", "", "gc-sessions", logShipperConfig{}, testAgentImage, placementConfig{})
+
+	agent := spec.TaskGroups[0].Tasks[0]
+	got, _ := agent.Config["image"].(string)
+	if want := "${NOMAD_META_" + agentImageMetaKey + "}"; got != want {
+		t.Errorf("task image = %q, want %q — a literal image freezes the parent to one toolchain", got, want)
+	}
+	if got == testAgentImage {
+		t.Error("the task still bakes the literal image")
+	}
+
+	if spec.Meta[agentImageMetaKey] != testAgentImage {
+		t.Errorf("parent Meta[%s] = %q, want the deployment default %q",
+			agentImageMetaKey, spec.Meta[agentImageMetaKey], testAgentImage)
+	}
+
+	// Nomad refuses a dispatch carrying a key the parent does not declare —
+	// with an HTTP 500 on EVERY provision, which is how gc_created_at once
+	// stopped every box in this estate. Declaring it is load-bearing.
+	var declared bool
+	for _, k := range spec.ParameterizedJob.MetaOptional {
+		if k == agentImageMetaKey {
+			declared = true
+		}
+	}
+	if !declared {
+		t.Errorf("%s is not in MetaOptional %v; a dispatch carrying it would be refused outright",
+			agentImageMetaKey, spec.ParameterizedJob.MetaOptional)
+	}
+}
+
+// TestParentJobSpecHashTracksTheDefaultImage pins that moving the image into
+// Meta did not make a changed DEFAULT invisible. A per-dispatch override must
+// not touch the parent; a changed deployment default must still read as drift,
+// exactly as it did when the image was baked into the task.
+func TestParentJobSpecHashTracksTheDefaultImage(t *testing.T) {
+	a := parentJobSpec("gc", "", "gc-sessions", logShipperConfig{}, "gc-agent:one", placementConfig{})
+	b := parentJobSpec("gc", "", "gc-sessions", logShipperConfig{}, "gc-agent:two", placementConfig{})
+	if a.Meta[jobspecHashMetaKey] == b.Meta[jobspecHashMetaKey] {
+		t.Fatalf("two different default images produced the same jobspec hash %q — a changed default would never re-register",
+			a.Meta[jobspecHashMetaKey])
+	}
+}
+
+// TestSessionAgentImageComesFromTheStartPayload pins the seam that makes two
+// lanes on one deployment possible: a provider names its agent image in the
+// session env, and that session's dispatch carries it while every other lane
+// keeps the deployment default.
+func TestSessionAgentImageComesFromTheStartPayload(t *testing.T) {
+	if got := sessionAgentImage(stageConfig{}); got != "" {
+		t.Errorf("an empty payload named an image %q; empty must mean the deployment default", got)
+	}
+	if got := sessionAgentImage(stageConfig{Env: map[string]string{envAgentImage: "  gc-agent:claude  "}}); got != "gc-agent:claude" {
+		t.Errorf("sessionAgentImage = %q, want the trimmed session image", got)
+	}
+	if got := sessionAgentImage(stageConfig{Env: map[string]string{envAgentImage: "   "}}); got != "" {
+		t.Errorf("a whitespace-only image = %q, want empty so it falls back rather than dispatching a blank image", got)
+	}
 }

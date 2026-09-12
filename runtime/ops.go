@@ -498,7 +498,7 @@ func (l *lifecycle) opProvisionWithConfig(ctx context.Context, sessionName strin
 		// and it is what said "this box is no longer the one to reuse").
 	}
 
-	if err := l.dispatch(ctx, sessionName); err != nil {
+	if err := l.dispatch(ctx, sessionName, sessionAgentImage(cfg)); err != nil {
 		return err
 	}
 	// A dispatch that Nomad ACCEPTS is not a box. Before this check, provision
@@ -629,7 +629,7 @@ func (l *lifecycle) opStartWithConfig(ctx context.Context, sessionName string, c
 		// door above).
 	}
 
-	if err := l.dispatch(ctx, sessionName); err != nil {
+	if err := l.dispatch(ctx, sessionName, sessionAgentImage(cfg)); err != nil {
 		return err
 	}
 	if err := l.stageTracked(ctx, sessionName, cfg); err != nil {
@@ -1167,7 +1167,21 @@ func (l *lifecycle) runDrivingVerb(ctx context.Context, sessionName, verb string
 // dispatch registers the parent job (idempotent upsert) if needed, then
 // dispatches a tmux-only child for sessionName — the mechanism shared by
 // opProvision directly and opStart (provision half).
-func (l *lifecycle) dispatch(ctx context.Context, sessionName string) error {
+// sessionAgentImage reads a per-session agent image out of the start payload's
+// environment.
+//
+// This is the seam that lets a lane onboard by NAMING its runtime rather than
+// by standing up a second deployment: a provider that wants a different agent
+// toolchain sets GC_NOMAD_AGENT_IMAGE in the session env, and that session's
+// box runs it while every other lane keeps the deployment default. Empty means
+// "use the default", which the parent job already carries in its own Meta.
+func sessionAgentImage(cfg stageConfig) string {
+	return strings.TrimSpace(cfg.Env[envAgentImage])
+}
+
+// dispatch mints a child job for sessionName. image names a per-session agent
+// image; empty uses the deployment default the parent already carries.
+func (l *lifecycle) dispatch(ctx context.Context, sessionName, image string) error {
 	existing, existingOK, err := l.sidecar.load(sessionName)
 	if err != nil {
 		return err
@@ -1212,7 +1226,7 @@ func (l *lifecycle) dispatch(ctx context.Context, sessionName string) error {
 		return err
 	}
 
-	childID, err := l.client.dispatchChildAt(ctx, l.parentJobID, sessionName, nonce, intent.CreatedAt)
+	childID, err := l.client.dispatchChildAt(ctx, l.parentJobID, sessionName, nonce, intent.CreatedAt, image)
 	if err != nil {
 		return err
 	}

@@ -367,19 +367,26 @@ func (c *client) nsQuery() url.Values {
 // per-dispatch nonce — never a capability); the same intent is also carried
 // in the native idempotency token so a retry after a lost response cannot
 // create a second child.
-func (c *client) dispatchChild(ctx context.Context, parentID, sessionName, nonce string) (string, error) {
-	return c.dispatchChildAt(ctx, parentID, sessionName, nonce, time.Now().UTC())
+func (c *client) dispatchChild(ctx context.Context, parentID, sessionName, nonce, image string) (string, error) {
+	return c.dispatchChildAt(ctx, parentID, sessionName, nonce, time.Now().UTC(), image)
 }
 
 // dispatchChildAt is dispatchChild with an explicit creation time so the
 // timestamp committed in the local intent record is exactly the one carried
 // in Nomad Meta and available to sidecar recovery.
-func (c *client) dispatchChildAt(ctx context.Context, parentID, sessionName, nonce string, createdAt time.Time) (string, error) {
+func (c *client) dispatchChildAt(ctx context.Context, parentID, sessionName, nonce string, createdAt time.Time, image string) (string, error) {
 	ctx, cancel := clientContext(ctx, defaultTimeout)
 	defer cancel()
 	meta := map[string]string{"gc_session": sessionName, "gc_nonce": nonce}
 	if !createdAt.IsZero() {
 		meta[createdAtMetaKey] = createdAt.UTC().Format(time.RFC3339Nano)
+	}
+	// A per-session image rides the dispatch and overrides the parent's
+	// default; empty means "use the deployment default", which the parent
+	// already carries. Dispatch metadata MERGES over the job's meta block, so
+	// omitting the key is not the same as clearing it.
+	if image = strings.TrimSpace(image); image != "" {
+		meta[agentImageMetaKey] = image
 	}
 	options := (&nomadapi.WriteOptions{
 		Namespace:        c.namespace,
