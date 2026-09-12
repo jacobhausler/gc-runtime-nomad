@@ -232,11 +232,57 @@ Provider-agnostic: what any deployment of this pack needs.
    forms are present. Values are paths only: certificate and key contents stay
    in deployment custody and never enter a jobspec, argv, log, or receipt.
 
-   Image *content* is not this pack's contract. `gc build-image` can produce such
-   an image, but at the pinned gc its own contract is K8s-shaped
-   (`cmd/gc/cmd_build_image.go:34-41` - `[session.k8s]`, Pods, K8s Secret) and
-   names no Nomad at all; the pack's own prebake and release work (see
-   `toolchain/`) owns what goes into the image this key points at.
+   **How you actually get an image.** This was the most common dead end for
+   people trying to install this pack, because the answer was scattered across
+   caveats instead of written down. It is two layers, and neither alone is the
+   agent image:
+
+   1. **The toolchain base**, built by this pack:
+
+      ```
+      toolchain/build-image.sh check     # verify the lock offline first
+      toolchain/build-image.sh build --artifact=<path to your linux/amd64 gc>
+      ```
+
+      This is the checksum-pinned session toolchain — `gc`, `bd`, `git`,
+      `tmux`, `codex`, `libicu` — pinned in `toolchain/TOOLCHAIN.lock`. It must
+      be built on a host where a **linux/amd64** `gc` is staged; a darwin or
+      arm64 build cannot ship in a linux/amd64 image. Supply the checksum and
+      pin alongside the path (`GC_LOCAL_ARTIFACT_SHA256`,
+      `GC_LOCAL_ARTIFACT_PIN`) — see `toolchain/TOOLCHAIN.lock`.
+
+   2. **City content composed onto it**, by gc:
+
+      ```
+      gc build-image <city-path> --tag <your-registry>/<name>:<tag>
+      ```
+
+      Point `GC_NOMAD_AGENT_IMAGE` at the result.
+
+   One caveat about step 2, stated because it misleads people: `gc build-image`
+   is documented entirely in Kubernetes terms — Pods, init containers, K8s
+   Secret mounts, `prebaked = true` in `[session.k8s]` — and at the pinned gc
+   it names Nomad zero times. That is a **documentation** gap, not an artifact
+   one. What it emits is an ordinary OCI image, and this pack runs it as a
+   docker task. You do not need a Kubernetes cluster to use it.
+
+   Image *content* beyond that is not this pack's contract.
+
+   **Per-role images.** `GC_NOMAD_AGENT_IMAGE` is not only a deployment-wide
+   default. The pack reads it from each session's own start payload
+   (`sessionAgentImage`), carries it as Nomad meta `gc_image`, and interpolates
+   it into the child job's `config.image`. Set it in a provider's
+   `runtime_env.nomad` and that role gets its own toolchain while every other
+   lane keeps the default:
+
+   ```toml
+   [providers.my-codex-lane.runtime_env.nomad]
+   GC_NOMAD_AGENT_IMAGE = "registry.example/agent-codex:1.4"
+   ```
+
+   Empty means "use the deployment default the parent job already carries", so
+   adding one role's image never disturbs the others. This is what lets a codex
+   lane and a claude lane coexist in a single deployment.
 
    The identity/config side of the allocation is *not* configured here:
    `GC_CITY_URL`, `GC_CITY_NAME`, and whatever transport credentials the
