@@ -12,8 +12,39 @@ released upstream `gc`.
 
 ## Gas City (`gc`) — READ THIS FIRST
 
-**Required: a `gc` built from the maintainer's private development lineage.
-No released upstream `gc` can run this pack.**
+**Required: a `gc` carrying behaviour families that are not all upstream. No
+released upstream `gc` can run this pack. A build of the pin this pack is
+tested against IS published, for linux/amd64 and darwin/arm64, with sha256
+sidecars: <https://github.com/jacobhausler/gascity/releases>.**
+
+### Auditing what that build is, before you run it
+
+It is a fork build, and you should not run a 260 MB binary from a stranger's
+release page on trust. The fork is public, so the source at that commit is
+readable and the build is reproducible from it:
+
+```sh
+git clone https://github.com/jacobhausler/gascity gascity-fork && cd gascity-fork
+git remote add upstream https://github.com/gastownhall/gascity && git fetch upstream
+git log --oneline upstream/main..75fbc2cf5b      # what the fork adds
+make build COMMIT=75fbc2cf5b VERSION=dev         # reproduce the published binary
+```
+
+Be clear about the size of that audit, because the number is not small:
+**the pin is 97 commits ahead of `upstream/main`, and `upstream/main` is 100
+commits ahead of the pin** (measured 2026-09-12). This is a diverged fork, not
+a patch series.
+
+What makes the audit tractable is that **only six of those families are
+load-bearing for this pack** — the rest are the maintainer's own city work that
+happens to share the lineage. Those six, their upstream PRs, and what each one
+does are the table in
+[`docs/PIN-DEPENDENCIES.md`](docs/PIN-DEPENDENCIES.md). Audit those six; you do
+not need to read 97 commits to decide.
+
+If your policy is "no forks in production", that policy is correct here and the
+honest answer is to wait for the upstream PRs. This section exists so the
+decision is yours on real numbers, not on a reassuring sentence.
 
 This is not a version floor that a newer release will eventually clear on
 its own. The pack rides a *city pin* carrying ~19 behaviour families.

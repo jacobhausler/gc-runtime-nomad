@@ -27,7 +27,15 @@ in the private lineage and will not resolve against `gastownhall/gascity`):
   └─ 3c28c0430 ─ 60543e0db ─ e6c792597 ─ 400a7af53 ─ f75c33003 ─ 1afd6736a ─ 857ed398a
 ```
 
-`857ed398a` is the live pin since 2026-09-08T19:25Z, per the maintainer's own
+**Stale as of 2026-09-12: the live pin is now `75fbc2cf5b`**, which carries
+the same families plus the runtime-provider-shape ordering fix (the shape that
+imposes the runtime's argv on a lane was computed and then discarded, so a lane
+naming `runtime_provider = "nomad"` still got its provider's `args_append` in
+argv — see the pin-roll receipt in the maintainer's estate). The lineage below
+is otherwise unchanged; treat the shas as the order in which each family
+arrived, not as the current head.
+
+`857ed398a` was the live pin from 2026-09-08T19:25Z, per the maintainer's own
 pin-swap receipt (not part of this repository).
 
 **Merge states** were read live on 2026-09-08T21:52Z with
