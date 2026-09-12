@@ -66,16 +66,19 @@ import (
 )
 
 const (
-	envAddr           = "GC_NOMAD_ADDR"
-	envToken          = "GC_NOMAD_TOKEN"
-	envNamespace      = "GC_NOMAD_NAMESPACE"
-	envNodePool       = "GC_NOMAD_NODE_POOL"
-	envParentJob      = "GC_NOMAD_PARENT_JOB"
-	envSidecarDir     = "GC_NOMAD_SIDECAR_DIR"
-	envEgressDir      = "GC_NOMAD_EGRESS_DIR"
-	envForbidReg      = "GC_NOMAD_FORBID_REGISTER"
-	envLogSink        = "GC_NOMAD_LOG_SINK"
-	envLogTokFile     = "GC_NOMAD_LOG_SINK_TOKEN_FILE"
+	envAddr       = "GC_NOMAD_ADDR"
+	envToken      = "GC_NOMAD_TOKEN"
+	envNamespace  = "GC_NOMAD_NAMESPACE"
+	envNodePool   = "GC_NOMAD_NODE_POOL"
+	envParentJob  = "GC_NOMAD_PARENT_JOB"
+	envSidecarDir = "GC_NOMAD_SIDECAR_DIR"
+	envEgressDir  = "GC_NOMAD_EGRESS_DIR"
+	envForbidReg  = "GC_NOMAD_FORBID_REGISTER"
+	envLogSink    = "GC_NOMAD_LOG_SINK"
+	envLogTokFile = "GC_NOMAD_LOG_SINK_TOKEN_FILE"
+	// envACLFile names a FILE holding the Nomad ACL token, and its name is
+	// chosen the way it is on purpose. See resolveNomadToken.
+	envACLFile        = "GC_NOMAD_ACL_FILE"
 	envLogLabels      = "GC_NOMAD_LOG_LABELS"
 	envLogArtifact    = "GC_NOMAD_LOG_SHIPPER_ARTIFACT"
 	envAgentImage     = "GC_NOMAD_AGENT_IMAGE"
@@ -461,7 +464,11 @@ func run(args []string, stdin io.Reader, stdout, stderr *os.File) int {
 
 // newLifecycle builds the Nomad client + sidecar from the environment.
 func newLifecycle() (*lifecycle, error) {
-	c, err := newClient(os.Getenv(envAddr), os.Getenv(envToken), os.Getenv(envNamespace))
+	token, err := resolveNomadToken()
+	if err != nil {
+		return nil, err
+	}
+	c, err := newClient(os.Getenv(envAddr), token, os.Getenv(envNamespace))
 	if err != nil {
 		return nil, err
 	}
@@ -660,4 +667,63 @@ func errJobGoneOrEmpty(err error) bool {
 		return true
 	}
 	return errors.Is(err, errJobGone) || strings.Contains(err.Error(), "404")
+}
+
+// resolveNomadToken reads the Nomad ACL token from GC_NOMAD_TOKEN, or from the
+// FILE named by GC_NOMAD_ACL_FILE.
+//
+// WHY A FILE SOURCE EXISTS, and why its variable is not called *_TOKEN_FILE.
+//
+// gc filters its own environment before handing it to child processes:
+// internal/execenv.IsSensitiveKey treats any key CONTAINING "TOKEN" (or
+// PASSWORD, SECRET, CREDENTIAL, OAUTH, ...) as sensitive and drops it. That is
+// correct behaviour — a credential should not be inherited by every process a
+// supervisor spawns — but it has a consequence this pack has to live with:
+// GC_NOMAD_TOKEN can NEVER reach this binary by inheritance, because its own
+// name matches the filter. There is also no config path for it: PackRuntimeEntry
+// carries command, protocol and prompt-delivery, and no env map.
+//
+// Measured on a live deployment: GC_NOMAD_AGENT_IMAGE, exported by the same
+// wrapper script in the same way, arrives here fine. GC_NOMAD_TOKEN does not.
+// The only difference between them is the name.
+//
+// The symptom that produces is the worst one this pack has. Ops that MINT a box
+// keep working, so nothing looks broken, while is-running cannot read the
+// allocation list and answers last-known-good on every call — every session
+// reports healthy, the pool sees no starvation, and routed work sits against a
+// lane that looks alive.
+//
+// So the token travels as a PATH instead. A path is not a credential, so
+// GC_NOMAD_ACL_FILE survives the filter honestly rather than by disguising a
+// secret under an innocuous name — and it is the better shape anyway: the value
+// never enters any environment, never appears in a process listing, and the file
+// can be 0600. It is the same convention this pack already uses for _PEM keys
+// and the log shipper's token file.
+//
+// GC_NOMAD_TOKEN still wins when both are set, so no existing deployment that
+// manages to deliver it changes behaviour.
+func resolveNomadToken() (string, error) {
+	if t := strings.TrimSpace(os.Getenv(envToken)); t != "" {
+		return t, nil
+	}
+	path := strings.TrimSpace(os.Getenv(envACLFile))
+	if path == "" {
+		return "", nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		// Named but unusable is an error, not a silent fall-through to no
+		// token: falling through is exactly how a deployment ends up
+		// unauthenticated while believing it is configured.
+		return "", fmt.Errorf("reading the Nomad ACL token from %s=%q: %w "+
+			"(the file must exist and be readable by the process running this pack; "+
+			"an unreadable one is refused rather than quietly running with no token, "+
+			"because no token means every session reports healthy while claiming nothing)",
+			envACLFile, path, err)
+	}
+	token := strings.TrimSpace(string(raw))
+	if token == "" {
+		return "", fmt.Errorf("the Nomad ACL token file %s=%q is empty", envACLFile, path)
+	}
+	return token, nil
 }
