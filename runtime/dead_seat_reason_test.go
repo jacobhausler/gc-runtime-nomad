@@ -58,7 +58,7 @@ func TestDeadSeatCausesAreNamed(t *testing.T) {
 					"agent": {State: "dead", FailureEvent: tc.event},
 				},
 			}}
-			got := allocFailureDiagnosis(image, allocs, "agent")
+			got := allocFailureDiagnosis(image, allocs, "agent", knownArtifacts{})
 			if got == "" {
 				t.Fatalf("no cause named for %q — %s", tc.event, tc.why)
 			}
@@ -72,7 +72,7 @@ func TestDeadSeatCausesAreNamed(t *testing.T) {
 
 	t.Run("no reason offered stays silent", func(t *testing.T) {
 		allocs := []allocRecord{{ID: "a2", ClientStatus: "failed"}}
-		if got := allocFailureDiagnosis(image, allocs, "agent"); got != "" {
+		if got := allocFailureDiagnosis(image, allocs, "agent", knownArtifacts{}); got != "" {
 			t.Fatalf("invented a cause from nothing: %q — silence is correct when Nomad offers no reason", got)
 		}
 	})

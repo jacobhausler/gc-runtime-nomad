@@ -125,6 +125,16 @@ func TestGate4CausesAreEachNamed(t *testing.T) {
 		{"orchestrator-only paths in argv are named", "PATHS THAT DO NOT EXIST IN IT"},
 		{"a fetched gc that cannot load", "THE gc IN THE BOX CANNOT START"},
 		{"a credential staged into the process environment", "credential-shaped key(s) into the agent's PROCESS ENVIRONMENT"},
+		// An artifact that will not fetch was the last cause on this list to be
+		// a generic "never started", and it is the one that took the whole
+		// fleet down on 2026-09-12: a pin rolled, no gc was published for the
+		// new commit, and every box 404'd a URL nobody had configured. The
+		// cause has to say whose fix it is, because the two artifact URLs this
+		// pack declares have opposite remedies — one is derived from the live
+		// pin and one is set by hand.
+		{"an artifact that will not fetch", "FETCH fault, not a start fault"},
+		{"a derived artifact URL nobody configured", "NOT CONFIGURED ANYWHERE"},
+		{"an artifact that arrived and failed verification", "bytes ARRIVED and failed verification"},
 	} {
 		if !strings.Contains(src, c.phrase) {
 			t.Errorf("gate 4 cause %q is no longer named: expected a message containing %q",

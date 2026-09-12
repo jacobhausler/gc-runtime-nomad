@@ -1645,6 +1645,18 @@ func (l *lifecycle) gcArtifact() gcArtifactConfig {
 	return resolveGCArtifact(tmpl, hostGCCommit(context.Background()))
 }
 
+// knownArtifacts collects the artifact URLs this pack declares for the agent
+// task, for the diagnosis that has to name which one failed. Read through the
+// same two resolvers the jobspec uses, and read fresh for the same reason they
+// are: the gc URL is a function of the live pin, so a value captured earlier in
+// the process could name a commit that is no longer the one being fetched.
+func (l *lifecycle) knownArtifacts() knownArtifacts {
+	return knownArtifacts{
+		gc:       l.gcArtifact().Source,
+		imageTar: l.imageTar().Source,
+	}
+}
+
 // recoverBinding reconstructs the part of a sidecar binding that Nomad's
 // native children-of-parent jobs list can answer. The list is intentionally
 // filtered by the child namespace as well as gc_session: the request's
@@ -3109,7 +3121,7 @@ func (l *lifecycle) deadChildReason(ctx context.Context, childJobID string) stri
 	if err != nil || len(allocs) == 0 {
 		return ""
 	}
-	return allocFailureDiagnosis(l.agentImage, allocs, execTaskName)
+	return allocFailureDiagnosis(l.agentImage, allocs, execTaskName, l.knownArtifacts())
 }
 
 // allocFailureDiagnosis turns an allocation's OWN task state into a sentence that
@@ -3140,7 +3152,7 @@ func (l *lifecycle) deadChildReason(ctx context.Context, childJobID string) stri
 //
 // Empty return means "no answer", never a guess: a caller that cannot read the
 // allocation keeps its original error rather than inventing a cause.
-func allocFailureDiagnosis(agentImage string, allocs []allocRecord, taskName string) string {
+func allocFailureDiagnosis(agentImage string, allocs []allocRecord, taskName string, known knownArtifacts) string {
 	if len(allocs) == 0 {
 		// Nothing placed at all is the PLACEMENT shape, which
 		// confirmDispatchPlaced already reports with its own message.
@@ -3171,6 +3183,12 @@ func allocFailureDiagnosis(agentImage string, allocs []allocRecord, taskName str
 	}
 	if event == "" {
 		return ""
+	}
+	if isArtifactFetchFailure(event) {
+		// Ahead of the pull and OOM cases deliberately: artifacts are staged
+		// before the driver is asked for the image, so an allocation that died
+		// fetching never got as far as a pull and cannot have been OOM-killed.
+		return describeArtifactFetchFailure(taskName, event, known)
 	}
 	if isImagePullFailure(event) {
 		if img := strings.TrimSpace(agentImage); img != "" {
@@ -3276,7 +3294,7 @@ func (l *lifecycle) provisionFailureDetail(ctx context.Context, sessionName stri
 	if err != nil {
 		return fmt.Sprintf("could not read the allocations of child %q to diagnose this: %v", b.ChildJobID, err)
 	}
-	if d := allocFailureDiagnosis(l.agentImage, allocs, execTaskName); d != "" {
+	if d := allocFailureDiagnosis(l.agentImage, allocs, execTaskName, l.knownArtifacts()); d != "" {
 		return d
 	}
 	// Nomad had nothing to say about the task. Report THAT rather than going

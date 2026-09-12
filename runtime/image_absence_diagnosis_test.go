@@ -119,7 +119,7 @@ func TestAllocFailureDiagnosisNamesTheCause(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := allocFailureDiagnosis(tc.image, tc.allocs, "agent")
+			got := allocFailureDiagnosis(tc.image, tc.allocs, "agent", knownArtifacts{})
 			if tc.wantNone {
 				if got != "" {
 					t.Fatalf("diagnosis = %q, want empty — %s", got, tc.why)
