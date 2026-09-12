@@ -22,6 +22,15 @@ which `GC_TOOLCHAIN_HOST_STEP=1` encodes. Until someone exports
 (the volume mount is suppressed only when that variable is set), so this commit
 is reversible with `git revert <sha>` and needs no estate action.
 
+> **Superseded 2026-09-12.** The two sentences above describe a fallback that
+> no longer exists. v1.0.7 (`cr-3vvnb5.2`) deleted the legacy `exec` task and
+> the `GC_NOMAD_ARTIFACT_VOLUME` mount: the Docker image is now the only
+> session shape, `GC_NOMAD_AGENT_IMAGE` is **required**, and unsetting it
+> fails every lifecycle op closed rather than falling back. Rollback is a
+> previous image tag, not a shape to drop into. The measurements below stand
+> as recorded; only this reversibility claim is retired.
+
+
 ## The pins, and how each was verified (2026-09-09T03:4xZ, by this atom)
 
 | component | version | sha256 | publisher / verification |

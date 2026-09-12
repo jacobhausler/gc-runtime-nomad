@@ -40,8 +40,14 @@ drills/
   `https://...` API address, plus all three `GC_NOMAD_TLS_*` vars (the
   NRT-P2-02 mTLS baseline: CA cert, client cert, client key). `Driver.New`
   then starts a local plain-HTTP proxy that terminates real mTLS to the lab
-  on the pack CLI subprocess's behalf — the CLI itself still has zero TLS
-  config (an intentional pack boundary, NRT-P1-04/NRT-P2-05); this
+  on the pack CLI subprocess's behalf — the CLI itself had zero TLS
+  config when this harness was written (an intentional pack boundary,
+  NRT-P1-04/NRT-P2-05) — **no longer true as of v1.0.6**, which taught the
+  Nomad transport the standard `NOMAD_CACERT`/`NOMAD_CLIENT_CERT`/
+  `NOMAD_CLIENT_KEY`/`NOMAD_TLS_SERVER_NAME` variables plus `GC_NOMAD_*`
+  aliases, alloc-exec WebSockets included, so direct mTLS no longer needs the
+  proxy at all; the proxy stays here because this harness has not been
+  reworked, not because the boundary still holds. This
   harness's own `reconcilersim.Client` (used for every direct observation
   read) talks mTLS to the lab directly, no proxy involved.
 
