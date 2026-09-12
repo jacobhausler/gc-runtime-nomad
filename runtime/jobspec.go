@@ -102,6 +102,25 @@ func parentJobSpec(namespace, nodePool, parentID string, logShipper logShipperCo
 			// non-Linux placement must fail closed rather than silently
 			// fall back to host mode.
 			{LTarget: "${attr.kernel.name}", RTarget: "linux", Operand: "="},
+			// amd64 is the second half of the same fatal rule. Everything
+			// this pack can run is amd64 by construction:
+			// toolchain/Dockerfile fetches the linux_amd64 gc release and
+			// reads the binary-amd64 apt index, toolchain/build-image.sh
+			// refuses to pin a gc that is not an x86-64 ELF, and the
+			// log-shipper's vector artifact is pinned by URL AND sha256 to
+			// x86_64-unknown-linux-gnu. Verified on a live client
+			// 2026-09-12: `nomad node status -self -verbose` reports
+			// `cpu.arch = amd64`, so this is the attribute and spelling
+			// Nomad actually fingerprints.
+			//
+			// Without it an arm64 client places the group and only HALF of
+			// it breaks. The agent is the group leader and the shipper is a
+			// non-leader poststart sidecar, so a shipper that cannot exec
+			// its wrong-arch binary tears nothing down and raises nothing —
+			// the session runs, looks healthy, and its logs silently never
+			// ship. Fail the placement closed instead, exactly as the
+			// kernel rule above does for a non-Linux client (04 §4, R2a-05).
+			{LTarget: "${attr.cpu.arch}", RTarget: "amd64", Operand: "="},
 		},
 		ParameterizedJob: &nomadParameterizedJob{
 			// Dispatch Meta carries only non-secret attribution

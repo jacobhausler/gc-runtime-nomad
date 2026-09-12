@@ -82,7 +82,7 @@ requires, if you want to reason about an older cluster yourself:
 | task `lifecycle` poststart sidecar | the log-shipper task |
 | artifact stanza with `checksum` | fetching the pinned Vector binary |
 | `X-Nomad-Index` on write responses | the pack tolerates a proxy that strips it, but native Nomad supplies it |
-| namespaces | default namespace is `gc`, override with `GC_NOMAD_NAMESPACE` |
+| namespaces | `GC_NOMAD_NAMESPACE`, defaulting to `default` (`newClient`, runtime/client.go) — the pack creates no namespace, so if you set one it must already exist |
 
 **ACLs.** A token is optional (`GC_NOMAD_TOKEN`, sent as
 `X-Nomad-Token`). If your cluster has ACLs on, the pack expects **two**
@@ -159,13 +159,30 @@ over alloc-exec, so the image must provide:
 | `/bin/sleep` | the task's own keepalive process |
 | `/bin/sh` | every exec the runtime issues wraps in it |
 | `tmux` | the session is a tmux session; the runtime drives it directly |
-| `ps` | the liveness probe (`ps -eo comm`, falling back to `ps -o comm`) — this is how the runtime tells a working seat from an empty box |
+| `tar` | workspace and secret staging is a tar stream over exec-stdin, extracted in the box with `tar -x -f - -C <dir>` |
+| `ps` | the launch-time agent probe (`ps -eo comm`, falling back to `ps -o comm`) — see below |
 | `gc`, `bd` | the seat's own Gas City toolchain, from the same EDGE lineage as the host `gc` |
 | your agent CLI | codex, claude, or whatever the provider resolves to |
 
 **The in-box `gc` must match the pin, not merely be recent.** Everything
 in the *Gas City* section above applies to the `gc` inside the container
 as much as to the one on the host.
+
+**Two different liveness probes, at two different layers.** They are easy to
+confuse and the answer to "is this seat alive?" depends on which one you
+mean:
+
+- `is-running` (the RPP op) asks the box `tmux has-session -t main`, and
+  `kill -0 <pane pid>` when it has a recorded pid. That answers *does the
+  session still exist*.
+- The launch-time probe (`boxRunsAnAgent`, runtime/ops.go) reads `ps -eo
+  comm` and asks whether any process is running that is not just the
+  keepalive, tmux and a shell. That answers *did an agent actually start*.
+
+The second exists because the first says ALIVE for an empty box. Judge a
+seat on the process list, never on the pane's foreground command — a pane
+body that wraps the command keeps the shell in front while the agent runs
+beneath it, so `pane_current_command` reads `sh` on healthy seats too.
 
 **ABI, not just version.** A `gc` compiled on Debian bookworm (ICU 72)
 links cleanly and then dies at runtime inside an Ubuntu noble image (ICU

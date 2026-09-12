@@ -68,8 +68,11 @@ func TestParentJobSpecDockerImagePreservesNomadControls(t *testing.T) {
 		nodeConstraints: []nomadConstraint{constraint},
 	})
 
-	if spec.NodePool != "lab-session" || len(spec.Constraints) != 2 || spec.Constraints[1] != constraint {
-		t.Fatalf("placement = node_pool=%q constraints=%+v, want node_pool lab-session plus configured constraint", spec.NodePool, spec.Constraints)
+	// Containment: the configured fence must be LAST (behind every fatal
+	// rule), not at a fixed index that a new fatal rule would shift.
+	if spec.NodePool != "lab-session" || len(spec.Constraints) < 2 ||
+		spec.Constraints[len(spec.Constraints)-1] != constraint {
+		t.Fatalf("placement = node_pool=%q constraints=%+v, want node_pool lab-session plus the configured constraint last", spec.NodePool, spec.Constraints)
 	}
 	group := spec.TaskGroups[0]
 	if len(group.Networks) != 1 || group.Networks[0].DNS == nil || group.Networks[0].DNS.Servers[0] != "192.168.0.202" {
@@ -826,8 +829,12 @@ func TestParentJobSpecCarriesDeploymentDNS(t *testing.T) {
 }
 
 // TestParentJobSpecAppendsNodeConstraintsAfterKernelFatalRule pins the ordering
-// an operator fence must never disturb: the host-network fatal rule stays first
-// and a deployment constraint rides beside it, not in its place.
+// an operator fence must never disturb: the fatal placement rules stay first
+// and a deployment constraint rides beside them, not in their place.
+//
+// The assertions are containment, not a length equality. An exact count went
+// red when the amd64 fatal rule was added — a WIDENING of the very property
+// this test exists to protect — which is the wrong reason for a guard to fail.
 func TestParentJobSpecAppendsNodeConstraintsAfterKernelFatalRule(t *testing.T) {
 	constraint, err := parseNodeConstraints(`${node.unique.name} != prod-nomad`)
 	if err != nil {
@@ -835,15 +842,20 @@ func TestParentJobSpecAppendsNodeConstraintsAfterKernelFatalRule(t *testing.T) {
 	}
 	spec := parentJobSpec("default", "", "gc-sessions", logShipperConfig{}, testAgentImage, placementConfig{nodeConstraints: constraint})
 
-	if len(spec.Constraints) != 2 {
-		t.Fatalf("constraints = %+v, want the kernel rule plus the deployment fence", spec.Constraints)
+	if len(spec.Constraints) < 2 {
+		t.Fatalf("constraints = %+v, want the fatal rules plus the deployment fence", spec.Constraints)
 	}
 	if first := spec.Constraints[0]; first.LTarget != "${attr.kernel.name}" || first.RTarget != "linux" || first.Operand != "=" {
 		t.Fatalf("constraints[0] = %+v, want the linux-kernel fatal rule first", first)
 	}
 	want := nomadConstraint{LTarget: "${node.unique.name}", RTarget: "prod-nomad", Operand: "!="}
-	if got := spec.Constraints[1]; got != want {
-		t.Fatalf("constraints[1] = %+v, want %+v", got, want)
+	if last := spec.Constraints[len(spec.Constraints)-1]; last != want {
+		t.Fatalf("last constraint = %+v, want the deployment fence %+v — every fatal rule comes first", last, want)
+	}
+	for _, c := range spec.Constraints[:len(spec.Constraints)-1] {
+		if c == want {
+			t.Fatalf("deployment fence appears among the fatal rules: %+v", spec.Constraints)
+		}
 	}
 }
 
@@ -938,4 +950,30 @@ func TestParseNodeConstraints(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestParentJobSpecFencesPlacementToAmd64 pins the second half of the fatal
+// placement rule. The kernel.name fence has always been there because
+// bridge/CNI is Linux-only; the arch fence is the same argument. Everything
+// this pack can actually run is amd64: toolchain/Dockerfile fetches the
+// linux_amd64 gc release and reads the binary-amd64 apt index,
+// toolchain/build-image.sh refuses outright to pin a gc that is not an x86-64
+// ELF, and the log-shipper's vector artifact is pinned by URL AND sha256 to
+// x86_64-unknown-linux-gnu.
+//
+// Without this fence an arm64 client places the group happily. The agent is
+// the group leader and the shipper is a non-leader poststart sidecar, so the
+// shipper's failure to exec a wrong-arch binary tears nothing down and raises
+// nothing: the session runs and its logs silently never ship. A placement that
+// cannot work must fail closed, the same way a darwin placement does.
+func TestParentJobSpecFencesPlacementToAmd64(t *testing.T) {
+	spec := parentJobSpec("default", "", "gc-sessions", logShipperConfig{}, testAgentImage, placementConfig{})
+	want := nomadConstraint{LTarget: "${attr.cpu.arch}", RTarget: "amd64", Operand: "="}
+	for _, got := range spec.Constraints {
+		if got == want {
+			return
+		}
+	}
+	t.Fatalf("constraints = %+v, want one to be %+v — an arm64 client can place this\n"+
+		"group today and the log-shipper then fails silently", spec.Constraints, want)
 }
