@@ -156,11 +156,24 @@ var mintsABox = map[string]bool{
 // drive it with an in-memory stream and assert exit codes.
 func run(args []string, stdin io.Reader, stdout, stderr *os.File) int {
 	if len(args) == 0 {
+		// Name them. "missing operation" without a list sent the reader to the
+		// source to learn what this binary does.
 		fmt.Fprintln(stderr, "gc-runtime-nomad: missing operation")
+		fmt.Fprintln(stderr)
+		writeUsage(stderr)
 		return exitError
 	}
 	op := args[0]
 	rest := args[1:]
+
+	// Before the lifecycleOps gate: these are not RPP operation names, so the
+	// gate's silent exit 2 (the forward-compatibility answer gc depends on)
+	// used to swallow them, and `--help` printed nothing.
+	switch op {
+	case "help", "--help", "-h":
+		writeUsage(stdout)
+		return exitOK
+	}
 	// Recorded for the diagnostics sink: every line it writes is attributed to
 	// the operation that produced it, which is the first thing an operator
 	// needs and the first thing a bare exit code loses.
