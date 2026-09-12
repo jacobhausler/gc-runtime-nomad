@@ -1347,6 +1347,33 @@ func (l *lifecycle) ensureParentRegistered(ctx context.Context) error {
 		return nil
 	}
 
+	// A pool change is not a task-spec change, and conflating them cost a live
+	// outage. Re-registering an existing parent to pick up a new task spec is
+	// routine — that is what a pack upgrade does. Moving the parent to a
+	// different NODE POOL repoints where every future session is placed, and
+	// this function used to do it silently whenever the calling process's
+	// environment happened to differ from the registered job.
+	//
+	// The unintentional shape is specific and worth refusing outright: the
+	// registered parent names a pool, and this process computed NO pool,
+	// because GC_NOMAD_NODE_POOL is simply absent from its environment. That
+	// is a forgotten variable, not a decision. Observed 2026-09-12 — a
+	// hand-run `start` for diagnosis, without that variable, moved the parent
+	// from "prod-services" into "default", which held zero nodes; every
+	// dispatch then pended forever, and nothing said why until the supervisor
+	// restored it on its next pass.
+	//
+	// Widening a pool is still allowed when it is EXPRESSED: set
+	// GC_NOMAD_NODE_POOL to the pool you mean, including to move it back.
+	if err := parentPoolMoveRefusal(ok, nodePool, l.nodePool, l.parentJobID); err != nil {
+		return err
+	}
+	if w := parentPoolMoveWarning(ok, nodePool, l.nodePool, l.parentJobID); w != "" {
+		// Never quietly, and durably, because the consequence outlives the
+		// command that caused it.
+		l.logDecision("%s", w)
+	}
+
 	if l.forbidRegistration {
 		if ok {
 			return fmt.Errorf("parent job %q exists but has drifted from this build's jobspec (node pool and/or task spec), and GC_NOMAD_FORBID_REGISTER forbids registering to fix it: register it out-of-band with a token holding the submit-job capability", l.parentJobID)
@@ -2985,4 +3012,49 @@ func (l *lifecycle) opListRunning(ctx context.Context, prefix string) ([]string,
 	}
 	sort.Strings(names)
 	return names, nil
+}
+
+// parentPoolMoveRefusal refuses the one parent-pool change that is never
+// intentional: the registered parent names a pool and the calling process
+// computed NONE, because GC_NOMAD_NODE_POOL is absent from its environment.
+//
+// A pool change is not a task-spec change, and conflating them cost a live
+// outage. Re-registering to pick up a new task spec is routine — that is what a
+// pack upgrade does. Moving the parent to a different NODE POOL repoints where
+// every future session is placed, and this used to happen silently whenever the
+// calling process's environment differed from the registered job.
+//
+// Observed 2026-09-12: a hand-run `start`, for diagnosis, without that variable
+// set, moved the parent from "prod-services" into Nomad's "default" pool, which
+// held zero nodes. Every dispatch then pended forever and nothing on the
+// session said why, until the supervisor restored the parent on its next pass.
+//
+// Widening or moving a pool is still allowed when it is EXPRESSED. An absent
+// variable is a forgotten one, not a decision.
+func parentPoolMoveRefusal(exists bool, registeredPool, computedPool, parentJobID string) error {
+	if !exists || registeredPool == "" || computedPool != "" {
+		return nil
+	}
+	return fmt.Errorf("refusing to re-register parent job %q: it is registered in node pool %q "+
+		"and this process computed no pool at all, because %s is unset in ITS environment. "+
+		"Re-registering would move the parent to Nomad's \"default\" pool and repoint where every "+
+		"future session is placed — if that pool holds no nodes, every dispatch pends forever with "+
+		"no error on the session itself. This is refused rather than warned because an absent "+
+		"variable is a forgotten one, not a decision: a hand-run of this binary for diagnosis must "+
+		"not silently move the fleet. Set %s=%s to proceed with the pool it already has, or to "+
+		"another pool to move it deliberately.",
+		parentJobID, registeredPool, envNodePool, envNodePool, registeredPool)
+}
+
+// parentPoolMoveWarning is the deliberate case: both pools expressed and
+// different. That is a decision, so it proceeds — but it is announced, because
+// a pool with no eligible nodes leaves every dispatch pending with no error on
+// the session.
+func parentPoolMoveWarning(exists bool, registeredPool, computedPool, parentJobID string) string {
+	if !exists || registeredPool == "" || computedPool == "" || registeredPool == computedPool {
+		return ""
+	}
+	return fmt.Sprintf("re-registering parent %q MOVES its node pool %q -> %q; every future session "+
+		"dispatch will be placed in %q. A pool with no eligible nodes leaves dispatches pending with "+
+		"no error on the session itself.", parentJobID, registeredPool, computedPool, computedPool)
 }
