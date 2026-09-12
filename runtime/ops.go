@@ -126,6 +126,10 @@ type lifecycle struct {
 	// because cr-3vvnb5.2 deletes the legacy exec task it used to select.
 	agentImage string
 
+	// diagnostics is the durable half of logf — the file under the sidecar
+	// dir that survives gc discarding this process's stderr.
+	diagnostics diagnosticsSink
+
 	// placement is the deployment-configured DNS servers and node constraints
 	// that ride the parent job body parentJobSpec builds (cr-tzsxk.18), read
 	// from GC_NOMAD_DNS_SERVERS / GC_NOMAD_NODE_CONSTRAINT by newLifecycle.

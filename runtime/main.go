@@ -151,6 +151,10 @@ func run(args []string, stdin io.Reader, stdout, stderr *os.File) int {
 	}
 	op := args[0]
 	rest := args[1:]
+	// Recorded for the diagnostics sink: every line it writes is attributed to
+	// the operation that produced it, which is the first thing an operator
+	// needs and the first thing a bare exit code loses.
+	currentOp = op
 
 	if op == "protocol" {
 		fmt.Fprintln(stdout, protocolHandshakeJSON)
@@ -214,6 +218,12 @@ func run(args []string, stdin io.Reader, stdout, stderr *os.File) int {
 
 	fail := func(err error) int {
 		fmt.Fprintf(stderr, "gc-runtime-nomad %s: %v\n", op, err)
+		// THE LINE THAT MATTERS. gc's exec transport turns a nonzero exit into
+		// "tmux exited N" and discards this stderr, so without the durable
+		// copy the operator is left with an exit code and no cause — which is
+		// exactly the shape this pack exists to stop producing, produced by
+		// the pack itself.
+		l.diagnostics.write(op, "FAILED: "+err.Error())
 		return exitError
 	}
 	needName := func() (string, bool) {
@@ -420,6 +430,7 @@ func newLifecycle() (*lifecycle, error) {
 	if err != nil {
 		return nil, err
 	}
+	diag := newDiagnosticsSink(os.Getenv(envSidecarDir))
 	sc, err := newSidecar(os.Getenv(envSidecarDir))
 	if err != nil {
 		return nil, err
@@ -472,8 +483,12 @@ func newLifecycle() (*lifecycle, error) {
 			dnsServers:      dnsServers,
 			nodeConstraints: nodeConstraints,
 		},
+		diagnostics: diag,
 		logf: func(format string, args ...any) {
-			fmt.Fprintf(os.Stderr, "gc-runtime-nomad: "+format+"\n", args...)
+			line := fmt.Sprintf(format, args...)
+			fmt.Fprintf(os.Stderr, "gc-runtime-nomad: %s\n", line)
+			// And to a file the caller cannot discard. See diagnostics.go.
+			diag.write(currentOp, line)
 		},
 	}, nil
 }
