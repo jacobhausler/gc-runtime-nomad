@@ -240,11 +240,18 @@ The `gc-runtime-nomad` executable runs wherever `gc` runs — it is a
 client of the Nomad HTTP API and needs no Nomad agent locally. It is
 exercised on **macOS (darwin/arm64)** and **Linux**.
 
-The test suite runs green on both, with no expected failures: all
-three modules — `runtime/`, `fakenomad/` and `drills/` — pass `gofmt`,
-`go vet` and `go test`. If you see a failure, it is a defect, not a
-known quirk of your machine; `receipt.sh` runs every module and fails if
-the tree ever grows one it does not run.
+**`./check.sh` is the whole suite**, and it runs green on both with no
+expected failures and **no skipped tests**: all three modules —
+`runtime/`, `fakenomad/` and `drills/` — pass `gofmt`, `go vet` and
+`go test`. Verified 2026-09-12 on macOS (darwin/arm64) and on Debian 13
+(linux/amd64, tmux 3.5a).
+
+If you see a failure, it is a defect, not a known quirk of your machine.
+`check.sh` discovers modules from `*/go.mod` rather than listing them,
+and reports skipped tests as well as failures — a suite that quietly
+skips its driver tests on a host without `tmux` would otherwise report
+success while asserting nothing. `receipt.sh` likewise runs every module
+and fails if the tree grows one it does not run.
 
 Note that only the *conformance and unit* suites are portable; they run
 offline against this pack's own in-memory Nomad fake (`fakenomad/`),
