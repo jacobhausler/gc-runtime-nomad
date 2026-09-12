@@ -39,10 +39,14 @@ unset, this task is never added at all.
 > seven of them have no upstream PR at all — the full table is
 > [`docs/PIN-DEPENDENCIES.md`](docs/PIN-DEPENDENCIES.md).
 >
-> Budget for the failure mode, because it is the expensive part: when that
-> dependency is missing **the pack does not refuse, it goes dark.** A lane
-> reads as configured and serves nothing. Two measured examples are in
-> `COMPATIBILITY.md`.
+> The pack now **refuses to start** on a `gc` missing the decisive family
+> (`remote-worker-lifecycle`) rather than going dark, and `gc-runtime-nomad
+> check` exits nonzero on one. That refusal names the family, the symptom you
+> would otherwise have chased, and where the table is. It covers **one** of the
+> nineteen families — the one that decides whether a seat can claim at all.
+> For the other eighteen the old warning still stands: **the pack does not
+> refuse, it goes dark**, and a lane reads as configured while serving
+> nothing. Two measured examples are in `COMPATIBILITY.md`.
 >
 > What would have to become true for this line to be deleted: those families
 > land upstream, or the lineage is published so a reader can build the `gc`

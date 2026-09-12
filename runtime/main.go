@@ -132,6 +132,16 @@ var lifecycleOps = map[string]bool{
 	"clear-scrollback": true,
 }
 
+// mintsABox is the subset of lifecycleOps that brings a new allocation into
+// existence. The gc capability gate applies to exactly these: a box that can
+// never claim should not be created, but a box that already exists must stay
+// stoppable and readable.
+var mintsABox = map[string]bool{
+	"start":     true,
+	"provision": true,
+	"relaunch":  true,
+}
+
 // run dispatches one RPP operation. It is separated from main so tests can
 // drive it with an in-memory stream and assert exit codes.
 func run(args []string, stdin io.Reader, stdout, stderr *os.File) int {
@@ -158,6 +168,17 @@ func run(args []string, stdin io.Reader, stdout, stderr *os.File) int {
 		if skipVerifyRequested() {
 			fmt.Fprintln(stderr, tlsVerificationDisabledWarning)
 		}
+		switch probeGCWorkerSurface(context.Background()) {
+		case gcWorkerSurfaceMissing:
+			fmt.Fprintf(stderr, "FAIL: %v\n", gcMissingWorkerSurfaceError())
+			return exitError
+		case gcWorkerSurfaceUnknown:
+			fmt.Fprintln(stderr, "warning: could not determine whether the `gc` on PATH carries "+
+				"the remote-worker-lifecycle family this pack requires (no gc on PATH, or it "+
+				"answered in a shape this probe does not recognise). Proceeding: an "+
+				"unrecognised gc is not evidence of a missing family. See "+
+				"docs/PIN-DEPENDENCIES.md.")
+		}
 		if os.Getenv(envDNSServers) == "" {
 			fmt.Fprintln(stderr, "warning: session boxes will declare no dns stanza and inherit the client host's resolv.conf (GC_NOMAD_DNS_SERVERS unset) — on a systemd-resolved host that stub resolver is unreachable from a bridge alloc (cr-tzsxk.18)")
 		}
@@ -165,6 +186,23 @@ func run(args []string, stdin io.Reader, stdout, stderr *os.File) int {
 	}
 	if !lifecycleOps[op] {
 		return exitUnknown
+	}
+
+	// The capability gate runs BEFORE the lifecycle is built, and only for the
+	// ops that MINT a box.
+	//
+	// Before, because "the gc driving this pack cannot claim work" is a deeper
+	// and more actionable fault than "GC_NOMAD_ADDR is unset", and an operator
+	// who fixes the address first only gets to the real problem later, by way
+	// of a box that looks healthy and does nothing.
+	//
+	// Only box-minting ops, because stop/is-running/list-running must keep
+	// working against boxes that already exist. Refusing those would strand
+	// allocations on the very gc that cannot drive them — converting a startup
+	// refusal into an orphaned-box problem, which is strictly worse.
+	if mintsABox[op] && probeGCWorkerSurface(context.Background()) == gcWorkerSurfaceMissing {
+		fmt.Fprintf(stderr, "gc-runtime-nomad %s: %v\n", op, gcMissingWorkerSurfaceError())
+		return exitError
 	}
 
 	l, err := newLifecycle()

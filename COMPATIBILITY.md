@@ -37,8 +37,31 @@ measured examples:
   `{"action":"drain","reason":"no_work"}` while the city lists its work
   as ready.
 
-Neither prints an error naming this pack. Budget for that when you are
-deciding whether to adopt.
+**One of those two now fails closed.** `remote-worker-lifecycle` is the
+family that decides whether a seat can claim work at all, so the pack
+probes for it before minting a box and refuses when it is absent:
+
+```
+$ gc-runtime-nomad check
+FAIL: refusing to start: the `gc` on PATH does not carry the
+remote-worker-lifecycle family, so a seat in an allocation cannot claim
+work through /v0/city/{city}/worker/* ...
+```
+
+`check` exits nonzero, and `start`, `provision` and `relaunch` refuse the
+same way. `stop`, `is-running` and `list-running` deliberately do **not**
+— a box that already exists has to stay stoppable, or a startup refusal
+becomes stranded allocations.
+
+The probe is a local `gc bd claim` under a remote target, which both
+lineages refuse at the target gate *before any network dial*: no city, no
+token, no reachable host, ~30ms. It distinguishes them by which refusal
+comes back. An unrecognised answer is reported as **unknown** and never
+blocks — an unfamiliar `gc` is not evidence of a missing family.
+
+**The other eighteen families are still undetected**, and for those the
+paragraph above stands unchanged: no error names this pack. Budget for
+that when you are deciding whether to adopt.
 
 **Version numbers are useless here; use the commit.** The `gc` this pack
 was last exercised against reports:

@@ -162,3 +162,19 @@ func TestCompatibilityDocFakeBlindnessListIsStillTrue(t *testing.T) {
 		}
 	}
 }
+
+// TestCompatibilityDocStatesTheCapabilityGate pins the disclosure of which
+// families the pack can actually detect. Claiming to fail closed is a promise
+// about a specific family; if the gate is removed or the marker it keys on
+// changes, the document must stop making that promise.
+func TestCompatibilityDocStatesTheCapabilityGate(t *testing.T) {
+	doc := readCompatibilityDoc(t)
+	if !strings.Contains(doc, "remote-worker-lifecycle") {
+		t.Errorf("%s does not name the family the pack gates on", compatibilityDoc)
+	}
+	// The promise is bounded: one family detected, the rest not.
+	if !strings.Contains(doc, "still undetected") {
+		t.Errorf("%s does not bound the promise — a reader could conclude every\n"+
+			"pin dependency fails closed, when exactly one does", compatibilityDoc)
+	}
+}
