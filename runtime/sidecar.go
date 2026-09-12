@@ -13,10 +13,10 @@ import (
 	"time"
 )
 
-// binding is the sidecar's record of a session's current child job (04 §1
-// "sidecar state dir": provider-owned KV under the city's private dir,
-// stable handles — current-child job ID per session, plus the launched
-// marker (04 §1/§6: the provision-vs-launched disambiguator). The fuller
+// binding is the sidecar's record of a session's current child job: the
+// provider-owned KV under the city's private dir, stable handles —
+// current-child job ID per session, plus the launched marker (the
+// provision-vs-launched disambiguator). The fuller
 // record (dispatch-attempt counter, disputed ledger, staleness datum, ...)
 // is still out of scope here (staging lands it later).
 type binding struct {
@@ -27,38 +27,37 @@ type binding struct {
 	CreatedAt   time.Time `json:"created_at"`
 
 	// EgressComplete receipts that the stop-path transcript/evidence fs
-	// egress (NRT-P1-07) finished for this binding's current child job
+	// egress finished for this binding's current child job
 	// before deregister was called. Written to the sidecar (still resident
 	// at that point) so a stop that crashes after egress but before
 	// deregister does not re-copy files on retry.
 	EgressComplete bool `json:"egress_complete,omitempty"`
 
 	// EvidenceLost marks that required stop-path evidence was unavailable
-	// after bounded retries and stop proceeded anyway (04 §6 R2b-04:
-	// evidence-best-effort beats a wedged fleet). This covers both local
+	// after bounded retries and stop proceeded anyway (evidence-best-effort
+	// beats a wedged fleet). This covers both local
 	// egress and the optional log-shipper flush, so it may coexist with
 	// EgressComplete when the local bundle was captured but live logs could
 	// not be flushed.
 	EvidenceLost bool `json:"evidence_lost,omitempty"`
 
 	// StagePending marks that this binding's box was dispatched and its
-	// NRT-P1-06 staging (workspace/secrets materialization) was started but
+	// staging (workspace/secrets materialization) was started but
 	// never confirmed complete. It is the provision-path analog of
 	// dispatch's own intent record: written before the first tar-over-exec
 	// call and cleared once every staging call has succeeded, so a binding
 	// left by a provision that died mid-staging (the lab's mid-stdin exec
-	// half-close, fnrt-t4l.18) says so on its face. Provision's retry no
+	// half-close) says so on its face. Provision's retry no
 	// longer needs to consult it — adoption keys off liveChild, which
 	// covers every live-but-unlaunched box, not just a half-staged one
-	// (fnrt-t4l.46) — so this stays as the durable record of which staging
+	// — so this stays as the durable record of which staging
 	// halves never finished. Absent on bindings written before this field
 	// existed.
 	StagePending bool `json:"stage_pending,omitempty"`
 
 	// Launched distinguishes "provisioned, agent never launched" (false)
 	// from "launched" (true) — the two states that are otherwise
-	// observationally identical from the Nomad alloc alone (04 §6:
-	// RPP-PROVISION-001).
+	// observationally identical from the Nomad alloc alone.
 	Launched bool `json:"launched"`
 
 	// AgentPID is the in-box pid of the tmux pane launch created, captured
@@ -66,13 +65,13 @@ type binding struct {
 	// opIsRunning's liveness probe kill -0 the exact process launch
 	// started, not just the tmux session wrapping it — a session that
 	// survives with its pane process gone is still an agent-dead answer
-	// (04 §3 provision row, in-box agent kill). Zero for bindings recorded
+	// (the in-box agent-kill case). Zero for bindings recorded
 	// before this field existed; the probe falls back to a tmux-session-only
 	// check in that case.
 	AgentPID int `json:"agent_pid,omitempty"`
 
-	// WorkDir is the pane working directory the launch was given (cr-gdeav.6.10
-	// deliverable 3). gc's cfg.WorkDir is a Mac path — the rig's checkout on the
+	// WorkDir is the pane working directory the launch was given. gc's
+	// cfg.WorkDir is a Mac path — the rig's checkout on the
 	// supervisor host — which does not exist inside the alloc, so the pack
 	// records what it actually used and relaunch/transport-launch reuse it
 	// rather than falling back to the exec driver's cwd ("/").
@@ -89,12 +88,12 @@ type binding struct {
 	// immutable session-to-child record and is what recovers a lost binding
 	// (liveChild's Meta recovery); the sidecar keeps only the host-local facts
 	// Nomad cannot answer, and this is one of them. Absent on bindings written
-	// before the image-mode weld (cr-hcgaxt): such a box relaunches through the
+	// before the image-mode weld: such a box relaunches through the
 	// legacy deployment bootstrap, exactly as it did before.
 	ProviderCommand string `json:"provider_command,omitempty"`
 
 	// PromptedAt receipts the moment the startup prompt was actually typed
-	// into the pane (cr-gdeav.6.10). It is what makes the delivery exactly-once
+	// into the pane. It is what makes the delivery exactly-once
 	// across processes: gc execs this binary fresh per op, so a retried
 	// `start`, an adopt-reuse, and a relaunch are three separate chances to
 	// type the same prompt twice — only the sidecar outlives them. Absent
@@ -107,14 +106,14 @@ type binding struct {
 	// It exists because gc's GC_STARTUP_PROMPT_DELIVERED env marker reports
 	// that the prompt was ROUTED to a delivery mechanism
 	// (cmd/gc/prompt_delivery.go:49), not that anything reached the agent —
-	// for an RPP lane those two were indistinguishable, which is how
-	// cr-gdeav.6.9's canary read as primed for eight minutes while sitting
-	// at an empty prompt.
+	// for an RPP lane those two were indistinguishable, which is how a
+	// canary read as primed for eight minutes while sitting at an empty
+	// prompt.
 	PromptStatus string `json:"prompt_status,omitempty"`
 
 	// PromptPending carries the startup-prompt/priming subset of the
 	// stageConfig gc sent at provision/start time forward to whichever launch
-	// path actually runs (cr-gdeav.6.12). It exists because gc's
+	// path actually runs. It exists because gc's
 	// proc.provision path stages the prompt fields separately from the
 	// launch it later drives through opExec's transport-launch handshake
 	// (markTransportLaunched, ops.go), which carries no stageConfig of its
@@ -128,7 +127,7 @@ type binding struct {
 }
 
 // sidecar is a file-based KV under a directory: one JSON file per session,
-// written temp+rename (04 §1 "temp+rename — e1a §4.5 privatedir contract").
+// written temp+rename (the privatedir contract).
 type sidecar struct {
 	dir string
 }
@@ -192,8 +191,8 @@ func (s *sidecar) remove(sessionName string) error {
 }
 
 // list returns every current binding. opListRunning uses it only for the
-// launched marker (04 §6 RPP-PROVISION-001) — existence and non-terminal
-// status come from the children-of-parent jobs list (04 §2.1 rule 2/3) via
+// launched marker — existence and non-terminal
+// status come from the children-of-parent jobs list via
 // client.listChildJobs, not this sidecar scan. dispatch's narrower
 // positive-attribution adoption (rule 6: recovering a SINGLE session's own
 // orphaned child by nonce match, in ops.go) uses the same client call.
@@ -229,8 +228,8 @@ func (s *sidecar) list() ([]binding, error) {
 const tombstonesDirName = "tombstones"
 
 // tombstone is the durable record of a session box this pack deregistered
-// without being asked to — the adoption gate's receipt (cr-gdeav.6.1,
-// executive ruling cr-mnl96 G2). The archival policy governs records, not
+// without being asked to — the adoption gate's receipt. The archival policy
+// governs records, not
 // ephemeral runtime allocs, so the alloc is what gets removed and this entry
 // (child job, alloc, age, why, when) is what gets kept, written beside the
 // binding it describes before the stop removes that binding.
@@ -276,9 +275,9 @@ func (s *sidecar) tombstone(t tombstone) error {
 	return nil
 }
 
-// newNonce generates the per-dispatch attribution nonce (04 §2.1: dispatch
-// Meta carries gc_session + a random nonce chosen by the pack, never a
-// capability).
+// newNonce generates the per-dispatch attribution nonce: dispatch Meta
+// carries gc_session + a random nonce chosen by the pack, never a
+// capability.
 func newNonce() (string, error) {
 	buf := make([]byte, 16)
 	if _, err := rand.Read(buf); err != nil {

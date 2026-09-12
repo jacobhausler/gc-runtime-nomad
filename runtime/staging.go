@@ -15,7 +15,7 @@ import (
 )
 
 // stageFile is one workspace file or secret to place inside a session's
-// alloc (04 §5 data contract: "CopyFiles/overlays ride the same channel" as
+// alloc (the data contract: "CopyFiles/overlays ride the same channel" as
 // workspace tar staging). Path is always relative to the extraction root
 // the caller picks (WorkDir for workspace files, NOMAD_SECRETS_DIR for
 // secrets) — never absolute, never containing "..".
@@ -26,8 +26,8 @@ type stageFile struct {
 }
 
 // stageConfig is the wire "start config" this pack reads from stdin for
-// `start`/`provision` (04 §5: "the wire start config is a SUBSET of
-// runtime.Config"). The field names below are gc's, verbatim, and they are
+// `start`/`provision`: the wire start config is a SUBSET of
+// runtime.Config. The field names below are gc's, verbatim, and they are
 // now ALL of them: gc's marshalStartConfig
 // (internal/runtime/exec/json.go:45-67 at pin 857ed398a) serializes exactly
 // 15 keys and this pack decodes all 15. That is a transcription of the
@@ -35,15 +35,15 @@ type stageFile struct {
 // file this zero-gascity-import pack cannot read at compile time), and
 // startup_test.go pins every name against gc's own struct in BOTH
 // directions, so a rename upstream lands here as a test failure instead of
-// another silent drop (cr-gdeav.6.9 receipt §1.4).
+// another silent drop.
 //
 // What this pack ACTS on today:
 //   - WorkDir + Env - the staging half it was built for;
 //   - CopyFiles - translated into this pack's own tar-over-exec-stdin
 //     transport by copyFilesToStageFiles, so a native copy needs no second
-//     file protocol (cr-u7b0s.40);
+//     file protocol;
 //   - Command / Nudge / ProcessNames / ReadyPromptPrefix / ReadyDelayMs -
-//     the launch/priming half (cr-gdeav.6.10/.12), which gc has been sending
+//     the launch/priming half, which gc has been sending
 //     all along and the pack used to drop on the floor.
 //
 // Lifecycle, PreStart, SessionSetup, SessionSetupScript, SessionLive,
@@ -60,7 +60,7 @@ type stageFile struct {
 // landed when a caller sends no config.
 //
 // Two keys the pack used to decode are GONE, because gc does not and never
-// did serialize them (cr-u7b0s.40):
+// did serialize them:
 //   - `files` - an inline-content file list. gc sends host-side paths in
 //     `copy_files`, never file bodies; the bodies are read off the
 //     orchestrator here, then archived.
@@ -79,14 +79,14 @@ type stageConfig struct {
 	WorkDir string            `json:"work_dir,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`
 
-	// The launch/priming half of the same `start` payload (cr-gdeav.6.10).
+	// The launch/priming half of the same `start` payload.
 	Command           string   `json:"command,omitempty"`
 	Nudge             string   `json:"nudge,omitempty"`
 	ProcessNames      []string `json:"process_names,omitempty"`
 	ReadyPromptPrefix string   `json:"ready_prompt_prefix,omitempty"`
 	ReadyDelayMs      int      `json:"ready_delay_ms,omitempty"`
 
-	// The remaining native start-wire keys (cr-u7b0s.40), with gc's JSON
+	// The remaining native start-wire keys, with gc's JSON
 	// names and types verbatim. See the doc above for which of them this
 	// pack acts on today.
 	Lifecycle          string      `json:"lifecycle,omitempty"`
@@ -111,7 +111,7 @@ type copyEntry struct {
 // copyFilesToStageFiles reads gc's `copy_files` entries off the orchestrator
 // filesystem and returns them as the stageFiles this pack already archives
 // with buildTar and ships over exec stdin. It is deliberately the pack's
-// ONE file transport (04 §5): a native copy entry becomes a stageFile, not
+// ONE file transport: a native copy entry becomes a stageFile, not
 // a second protocol.
 //
 // A regular file lands at RelDst, or at its own base name when RelDst is
@@ -317,7 +317,7 @@ func safeLaunchOptionValue(raw string, effort bool) string {
 // agent's configured nudge (cmd/gc/prompt_delivery.go:161-164 at pin
 // 857ed398a). Nothing else is consulted: the exec wire has no prompt_suffix
 // key to fall back to, so the forward-compat branch this function carried had
-// no producer (cr-u7b0s.40).
+// no producer.
 func (c stageConfig) startupPrompt() (text, source string) {
 	if strings.TrimSpace(c.Nudge) != "" {
 		return c.Nudge, "nudge"
@@ -326,8 +326,8 @@ func (c stageConfig) startupPrompt() (text, source string) {
 }
 
 // promptSubset returns only the startup-prompt/priming fields of cfg — never
-// WorkDir, Env, or CopyFiles — for persisting onto a session's binding
-// (cr-gdeav.6.12). It exists because gc's proc.provision path carries these
+// WorkDir, Env, or CopyFiles — for persisting onto a session's binding. It
+// exists because gc's proc.provision path carries these
 // fields on opProvisionWithConfig's stageConfig, but opExec's transport-launch
 // path (markTransportLaunched, ops.go) runs with no stageConfig of its own —
 // gc's canonical tmux launch argv carries only the transport handshake — so
@@ -348,8 +348,7 @@ func (c stageConfig) promptSubset() stageConfig {
 // busy indicator. They are PROVIDER facts — codex paints one thing, another
 // family paints another — and the pack previously hardcoded codex's own strings
 // while README promised nothing provider-specific lives in the runtime, so a
-// non-codex agent behind prime got silently wrong ready/busy detection
-// (cr-8eagyh).
+// non-codex agent behind prime got silently wrong ready/busy detection.
 //
 // They arrive through the session ENV rather than through stageConfig, because
 // stageConfig mirrors gc's launch wire field-for-field (enforced by
@@ -366,7 +365,7 @@ const (
 	// The readiness pair, by the same argument and for a sharper reason.
 	//
 	// A provider can run a DIFFERENT INTERACTION MODE depending on where its
-	// session runs. Measured case (cr-8eagyh): one estate's codex provider runs
+	// session runs. Measured case: one estate's codex provider runs
 	// `codex exec` locally — non-interactive, driven by argv, no prompt ever
 	// printed — and the same provider under this runtime runs the interactive
 	// TUI, which must be primed by typing into a pane and therefore needs the
@@ -469,13 +468,13 @@ func unshellQuote(word string) string {
 }
 
 // envArgvSafeNames is this pack's reimplementation of gc's envArgvSafe
-// allow-list (E1a §4.5: "an ALLOW list of names whose values may ride argv
+// allow-list ("an ALLOW list of names whose values may ride argv
 // — locale/terminal, city/rig/agent identity, session identity+epochs,
 // derived paths; anything unlisted is presumed credential"). The pack
 // cannot import gc's envsecret.go (zero-gascity-dependency contract), so
 // this is a faithful-but-independent classification pinned to those same
 // categories, not a byte-identical copy. GC_INSTANCE_TOKEN is deliberately
-// NOT here even though it is identity-adjacent: E1a §4.5 calls it out as a
+// NOT here even though it is identity-adjacent: it is a
 // CAPABILITY, not an identifier, and capabilities are exactly what argv
 // (world-readable via /proc/<pid>/cmdline) must never carry.
 var envArgvSafeNames = map[string]bool{
@@ -507,7 +506,7 @@ func envArgvSafe(key string) bool {
 // already present in base, that name's value read from this process's own
 // environment — the supervisor's process env, set via ~/.gc/secrets.env
 // passthrough, bridging a value gc's own city.toml provider env map has no
-// way to interpolate (GC_NOMAD_EXTRA_SECRET_KEYS, cr-u4plc.2).
+// way to interpolate (GC_NOMAD_EXTRA_SECRET_KEYS).
 // Caller-supplied base always wins on collision. The returned set marks
 // which keys came from this merge so stage() can always route them to the
 // secrets dir even if their name coincidentally matches envArgvSafeNames —
@@ -614,7 +613,7 @@ func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
-// pemPointerSuffix names the mTLS identity bridge convention (cr-gdeav.6.15):
+// pemPointerSuffix names the mTLS identity bridge convention:
 // an extra secret key GC_NOMAD_EXTRA_SECRET_KEYS bridges in named FOO_PEM is
 // materialized as a file exactly like any other staged secret (stage()'s
 // per-key stageFile loop, unchanged), but its BYTES never ride env.sh — only
@@ -678,7 +677,7 @@ func buildEnvScript(env map[string]string) []byte {
 	return []byte(b.String())
 }
 
-// Remote-context staging (cr-gdeav.6.15): a Nomad-launched Codex box can
+// Remote-context staging: a Nomad-launched Codex box can
 // reach the city over its own native TLS/context mechanism — no flags, no
 // bespoke wiring — if this pack stages a GC_HOME with a contexts.toml gc's
 // own resolver already knows how to read (cmd/gc/remote_target.go:104-106,
@@ -707,7 +706,7 @@ const (
 )
 
 // remoteContextPEMKeys names the three identity roles this bridge wires into
-// a context, and the *_PEM secret key each expects (cr-gdeav.6.15, matching
+// a context, and the *_PEM secret key each expects (matching
 // what the executive stages via GC_NOMAD_EXTRA_SECRET_KEYS). Order is the
 // order their fields appear in the rendered TOML.
 var remoteContextPEMKeys = [3]struct{ field, key string }{
@@ -726,7 +725,7 @@ var remoteContextPEMKeys = [3]struct{ field, key string }{
 // empty string is the exec driver's platform constant (nomadSecretsDirPath),
 // and the docker-driver shape passes the point it resolved from the box
 // (lifecycle.boxSecretsDir) instead of assuming that constant also holds
-// inside a container (cr-hcgaxt). Runtime secret BYTES never ride here — only
+// inside a container. Runtime secret BYTES never ride here — only
 // the paths that name them do.
 func buildRemoteContextFile(secretEnv map[string]string, secretsDir string) *stageFile {
 	if secretsDir == "" {
@@ -835,8 +834,8 @@ func validateStagePath(path string) error {
 }
 
 // buildTar archives files into a tar byte stream suitable for
-// `tar -x -f - -C <dir>` over exec-stdin (04 §5: "staging = tar stream over
-// exec stdin from the controller"). Every path is validated first so a
+// `tar -x -f - -C <dir>` over exec-stdin (staging = a tar stream over
+// exec stdin from the controller). Every path is validated first so a
 // caller-supplied Path can never place a file outside the extraction root.
 func buildTar(files []stageFile) ([]byte, error) {
 	var buf bytes.Buffer

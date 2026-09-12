@@ -1,8 +1,8 @@
-# drills — the L4 reconciler-sim harness (NRT-P2-06a)
+# drills — the L4 reconciler-sim harness
 
-08's own words for what an L4 drill is built from: "the L4 harness = pack
-CLI + scripted reconciler-sim driver, standing in for GC until L5" (08 §1.1
-"controller-restart mid-exec" row). This module is that driver. It never
+The design's own words for what an L4 drill is built from: "the L4 harness =
+pack CLI + scripted reconciler-sim driver, standing in for GC until L5"
+(the "controller-restart mid-exec" row). This module is that driver. It never
 reimplements a lifecycle op — every mutation goes through the real,
 unmodified `gc-runtime-nomad` binary (`../runtime`) as a subprocess, exactly
 how GC itself execs it (`main.go`'s "gc execs the binary directly" calling
@@ -38,11 +38,11 @@ drills/
   fake or real, is a live dependency.
 - **L4 (real T1 lab)**: set `GC_NOMAD_ADDR` to the lab's real
   `https://...` API address, plus all three `GC_NOMAD_TLS_*` vars (the
-  NRT-P2-02 mTLS baseline: CA cert, client cert, client key). `Driver.New`
+  mTLS baseline: CA cert, client cert, client key). `Driver.New`
   then starts a local plain-HTTP proxy that terminates real mTLS to the lab
   on the pack CLI subprocess's behalf — the CLI itself had zero TLS
-  config when this harness was written (an intentional pack boundary,
-  NRT-P1-04/NRT-P2-05) — **no longer true as of v1.0.6**, which taught the
+  config when this harness was written (an intentional pack boundary) —
+  **no longer true as of v1.0.6**, which taught the
   Nomad transport the standard `NOMAD_CACERT`/`NOMAD_CLIENT_CERT`/
   `NOMAD_CLIENT_KEY`/`NOMAD_TLS_SERVER_NAME` variables plus `GC_NOMAD_*`
   aliases, alloc-exec WebSockets included, so direct mTLS no longer needs the
@@ -77,27 +77,26 @@ non-zero if any step failed.
 
 ## Writing a per-drill scenario
 
-Each 08 §1.1 L4 drill bead (`fnrt-o37.3` .. `fnrt-o37.14`) is expected to
+Each L4 drill is expected to
 script its own scenario as a short Go program (or `_test.go`, offline)
 importing this package directly — `reconcilersim.New`, `[]reconcilersim.Step`,
 `reconcilersim.RunScript`, and whichever `classify.go` helper matches its
 drill row's pass criterion. `scenarios.go`'s `LifecycleRoundtripSteps` is a
 complete worked example of that shape. The one thing this harness
 deliberately has no opinion on is how a real box/agent/link actually gets
-killed at L4 — that's lab-access-specific and belongs in each drill bead's
+killed at L4 — that's lab-access-specific and belongs in each drill's
 own `Step.Inject`, not in this shared package.
 
-## Out of scope (this bead, NRT-P2-06a)
+## Out of scope
 
-- Executing any of the eleven §1.1 drills themselves against the real T1
-  lab — that's the twelve blocked `fnrt-o37.3`..`fnrt-o37.14` beads' own
-  scope, each producing its own runbook receipt.
+- Executing any of the eleven drills themselves against the real T1
+  lab — that's each drill's own scope, each producing its own runbook
+  receipt.
 - Adding TLS/mTLS support to the production `../runtime/client.go` — that
-  boundary was deliberately drawn at NRT-P1-04 and reaffirmed at NRT-P2-05;
+  boundary was deliberately drawn and repeatedly reaffirmed;
   this harness reaches the lab by fronting the unmodified pack CLI with its
   own local proxy instead (`tlsproxy.go`).
 - `GC_NOMAD_NODE_POOL` / the T1 lab's `lab-session` node-pool mismatch
-  (recorded, not fixed, in `ops/receipts/nrt-p2-05-fakenomad-reconcile.md`
-  in the westlands city repo) — a real drill run against the current lab
+  (recorded, not fixed) — a real drill run against the current lab
   topology will need that resolved first; this harness's job is being
   ready the moment it is.

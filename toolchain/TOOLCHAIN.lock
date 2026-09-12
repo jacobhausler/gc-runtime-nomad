@@ -1,24 +1,22 @@
 # toolchain/TOOLCHAIN.lock — checksum-pinned session toolchain build input
 #
-# Written by cr-u7b0s.45 (Remediate G: package the box toolchain as a
-# checksum-pinned prebaked image). Consumed by toolchain/Dockerfile through
-# toolchain/build-image.sh, which reads every value below and passes it as a
-# build ARG. The component lines below are upstream-PUBLISHED checksums, each
-# one re-verified against its publisher on 2026-09-09T03:4xZ (measurements,
-# dates, and the two rejected pins: toolchain/BUILD-RECEIPT.md). The single
-# exception is `gc_local_artifact` — the estate's own built pin, which has
-# no publisher, verified instead against its staged bytes and the gc commit
-# it reports (cr-dk9i2, below).
+# Packages the box toolchain as a checksum-pinned prebaked image. Consumed by
+# toolchain/Dockerfile through toolchain/build-image.sh, which reads every value
+# below and passes it as a build ARG. The component lines below are
+# upstream-PUBLISHED checksums, each one re-verified against its publisher on
+# 2026-09-09T03:4xZ (measurements, dates, and the two rejected pins:
+# toolchain/BUILD-RECEIPT.md). The single exception is `gc_local_artifact` — the
+# maintainer's own built pin, which has no publisher, verified instead against
+# its staged bytes and the gc commit it reports (see the block below).
 #
 # This file is the layout+checksum assertion that README §"Worked example —
 # Codex" demands of any toolchain staging receipt: the artifact, its sha256,
 # and the layout it asserts — for the whole session toolchain, not one binary.
 #
-# It ships NO delivery layer: no host volume, no /mnt/nomad path, no
+# It ships NO delivery layer: no host volume, no runtime artifact path, no
 # [session.k8s] prebaked key, no second image knob. The image it describes is
-# the single value GC_NOMAD_AGENT_IMAGE takes (seam owned by cr-u7b0s.41, which
-# this atom does not rename), and publishing stays an executive host step —
-# allocations never write /mnt/nomad/gc/bin (ruling cr-on8x4 on cr-gdeav.2.13).
+# the single value GC_NOMAD_AGENT_IMAGE takes, and publishing stays a build-host
+# step — allocations never write the pin-staging directory.
 
 # Base image, pinned by digest — never a floating tag. This is the digest
 # upstream's own contrib/k8s/Dockerfile.base:13,:103 builds its system-package
@@ -30,7 +28,7 @@ build_image golang:1.26.6-bookworm@sha256:433f9dc4f8ea3a1ce4e28f9f15d0f7c056b104
 
 # The ONE image reference the pack consumes. build-image.sh prints the value to
 # export as GC_NOMAD_AGENT_IMAGE; it is never pushed (registry publication is a
-# later owner decision — AGENTS.md hard stop).
+# later owner decision).
 agent_image gc-session-toolchain:1.0.5
 
 # Rollback: build-image.sh re-tags whatever was live to this tag BEFORE it
@@ -38,9 +36,8 @@ agent_image gc-session-toolchain:1.0.5
 # pointing GC_NOMAD_AGENT_IMAGE back at this tag, or at any earlier tag the
 # receipt names — a previous IMAGE TAG is the only rollback there is. Unsetting
 # it is not a rollback: the Docker task is the only session shape and every
-# lifecycle op fails closed without an image (cr-3vvnb5.2), and the legacy exec
-# + read-only artifact-volume shape this used to fall back to is deleted
-# (cr-3vvnb5).
+# lifecycle op fails closed without an image, and the legacy exec + read-only
+# artifact-volume shape this used to fall back to is deleted (1.0.7).
 rollback_image gc-session-toolchain:rollback
 
 # --- components ------------------------------------------------------------
@@ -48,10 +45,10 @@ rollback_image gc-session-toolchain:rollback
 # layout=… provenance=…  (`sha256sum --check --strict` is the assertion form.)
 
 gc 1.4.1 sha256:8d8c8b511db3fc44931445aab5cb9f212509c0867105c880d6c3d0e6e5d33e42 artifact=gascity_1.4.1_linux_amd64.tar.gz url=https://github.com/gastownhall/gascity/releases/download/v1.4.1/gascity_1.4.1_linux_amd64.tar.gz layout=/usr/local/bin/gc asserts=gc version -> v1.4.1 commit 58ef17e3bd685fd5cf7f21286277b208d3324590, embedded grpc v1.82.1 provenance=https://github.com/gastownhall/gascity/releases/download/v1.4.1/gascity_1.4.1_checksums.txt
-# --- the LIVE pin (cr-dk9i2) -------------------------------------------------
+# --- the LIVE pin ------------------------------------------------------------
 # The gc line above is the upstream-PUBLISHED release and stays the PUBLIC
-# DEFAULT — it is what a stranger to this estate gets, and `build --published`
-# still builds exactly it. It is NOT what the estate runs: the live pin is newer
+# DEFAULT — it is what any outside adopter gets, and `build --published`
+# still builds exactly it. It is NOT what the maintainer runs: the live pin is newer
 # (measured 2026-09-09T14:2xZ, `gc version --json --long` ->
 # {"commit":"e52f96f62","version":"dev"}), so an image assembled only from
 # published release bytes ships a gc OLDER than the pin it exists to carry.
@@ -61,11 +58,28 @@ gc 1.4.1 sha256:8d8c8b511db3fc44931445aab5cb9f212509c0867105c880d6c3d0e6e5d33e42
 #
 # This is a BUILD-HOST path read at docker-build time and copied INTO the image,
 # not a runtime delivery layer: the image still mounts nothing, no
-# [session.k8s] key appears, and no allocation writes /mnt/nomad/gc/bin — the
-# ruling the header records (cr-on8x4) is untouched. Refresh it in one command
-# ON THE HOST THAT STAGES THE PIN (a Mac's live pin is a darwin build):
-#   toolchain/build-image.sh refresh-pin --artifact=/mnt/nomad/gc/bin/<pin>/gc
-gc_local_artifact /mnt/nomad/gc/bin/e52f96f62/gc sha256=0f3b9e3a3e115ba95096ce9ea01e08d4f97b397243ddca0ec259de6e0c2b25a7 pin=e52f96f62 asserts=gc version --json --long -> commit == pin
+# [session.k8s] key appears, and no allocation writes the pin-staging directory.
+# Refresh it in one command ON THE HOST THAT STAGES THE PIN (a darwin or arm64
+# build cannot ship in a linux/amd64 image):
+#   toolchain/build-image.sh refresh-pin --artifact=<path-to-staged-linux-gc>
+# gc_local_artifact <path> sha256=<hex> pin=<gc commit> asserts=gc version --json --long -> commit == pin
+#
+# DELIBERATELY UNSET IN THE SHIPPED LOCK. This line pins a locally-built
+# linux/amd64 gc that has no publisher, so any value here is a path on ONE
+# machine — it cannot be right for anyone else, and a checked-in absolute
+# path is the thing that makes an artifact unbuildable off its author's box.
+#
+# Supply your own at build time instead, all three together:
+#   GC_LOCAL_ARTIFACT=<path to your linux/amd64 gc>
+#   GC_LOCAL_ARTIFACT_SHA256=$(shasum -a 256 <path> | awk '{print $1}')
+#   GC_LOCAL_ARTIFACT_PIN=<the commit field of `<path> version --json --long`>
+#
+# Setting the path alone is refused, not half-applied: the checksum and pin
+# would otherwise still be read from this file and would verify YOUR binary
+# against someone else's.
+#
+# With none of them set, `build` refuses rather than quietly shipping the
+# older published gc. That refusal is the intended default.
 # bd is deliberately NOT the published beads binary: beads_1.2.2_linux_amd64
 # carries google.golang.org/grpc v1.80.0 in its own build info (measured), which
 # is why upstream rebuilds release source with a patched grpc. The sha256 below
@@ -78,19 +92,19 @@ bd 1.1.0 sha256:a8b1d8dd85b2c008093615cb85937067a9597e760e8d39f93fe55f5c1cbb4d37
 # is the value that index published for the pinned version, recorded so the
 # build input is reproducible and auditable off-box.
 git 1:2.43.0-1ubuntu7.3 sha256:099bb129f543adc4c14203334b0fa0a909f8bf038c4d56bc9cc7c774ebf78f87 artifact=pool/main/g/git/git_2.43.0-1ubuntu7.3_amd64.deb url=https://archive.ubuntu.com/ubuntu/pool/main/g/git/git_2.43.0-1ubuntu7.3_amd64.deb layout=/usr/bin/git asserts=git --version -> git version 2.43.0 index=https://archive.ubuntu.com/ubuntu/dists/noble-updates/main/binary-amd64/Packages.gz
-# ICU is here because the ESTATE-BUILT gc needs it, not because this file
+# ICU is here because the LOCALLY BUILT gc needs it, not because this file
 # wants company: `ldd` on the digest-pinned base reports libicui18n.so.74 as
 # missing for the staged pin, so a build installs a gc that cannot load and
-# dies at its first command. The host hides this (rhuidean has ICU); only an
+# dies at its first command. A build host with ICU installed hides this; only an
 # image sees it. Pinned like the other apt lines and asserted at build time
 # by `ldd /usr/local/bin/gc` in the Dockerfile rather than remembered.
-libicu74 74.2-1ubuntu3.1 sha256:c9a70989678660eed9a1e904c74fa043da8bec8e2036856fc16e31ced79b04f8 artifact=pool/main/i/icu/libicu74_74.2-1ubuntu3.1_amd64.deb url=https://archive.ubuntu.com/ubuntu/pool/main/i/icu/libicu74_74.2-1ubuntu3.1_amd64.deb layout=/usr/lib/x86_64-linux-gnu/libicui18n.so.74 asserts=gc loads at all -- ldd /usr/local/bin/gc reports no "not found" index=https://archive.ubuntu.com/ubuntu/dists/noble-updates/main/binary-amd64/Packages.gz provenance=measured with ldd on the digest-pinned base (cr-dk9i2)
+libicu74 74.2-1ubuntu3.1 sha256:c9a70989678660eed9a1e904c74fa043da8bec8e2036856fc16e31ced79b04f8 artifact=pool/main/i/icu/libicu74_74.2-1ubuntu3.1_amd64.deb url=https://archive.ubuntu.com/ubuntu/pool/main/i/icu/libicu74_74.2-1ubuntu3.1_amd64.deb layout=/usr/lib/x86_64-linux-gnu/libicui18n.so.74 asserts=gc loads at all -- ldd /usr/local/bin/gc reports no "not found" index=https://archive.ubuntu.com/ubuntu/dists/noble-updates/main/binary-amd64/Packages.gz provenance=measured with ldd on the digest-pinned base
 tmux 3.4-1ubuntu0.1 sha256:2913e17aa61879d1f905aab6f374f153f1ece63aefba1b996e387325d1d5338d artifact=pool/main/t/tmux/tmux_3.4-1ubuntu0.1_amd64.deb url=https://archive.ubuntu.com/ubuntu/pool/main/t/tmux/tmux_3.4-1ubuntu0.1_amd64.deb layout=/usr/bin/tmux asserts=tmux -V -> tmux 3.4 index=https://archive.ubuntu.com/ubuntu/dists/noble-updates/main/binary-amd64/Packages.gz
 # Codex: the COMPLETE standalone package. The bare codex-<target>.tar.gz is the
-# D4 failure — it has no bin/codex-code-mode-host, no codex-resources/, no
+# measured failure — it has no bin/codex-code-mode-host, no codex-resources/, no
 # codex-path/, and the entrypoint then reports its execution host unavailable.
 codex 0.150.1 sha256:00aba704f029f6dc0d948be407a756e0c97cc840132fd691353b2c6b0a505b17 artifact=codex-package-x86_64-unknown-linux-musl.tar.gz url=https://github.com/openai/codex/releases/download/rust-v0.150.1/codex-package-x86_64-unknown-linux-musl.tar.gz layout=codex-package.json{layoutVersion=1,version=0.150.1,target=x86_64-unknown-linux-musl,variant=codex,entrypoint=bin/codex,resourcesDir=codex-resources,pathDir=codex-path} entrypoint_sha256=abf1bb1643a79f73aa78ee627e111e02d4f8c98f25813a0cf6ce277709664386 layout_root=/opt/codex/versions/0.150.1 path_dir=/opt/codex/bin/current asserts=env -i PATH=/opt/codex/bin/current:/usr/bin:/bin sh -c 'command -v codex; command -v codex-code-mode-host' provenance=https://github.com/openai/codex/releases/tag/rust-v0.150.1 codex-package_SHA256SUMS
 # sh/tar and gc's runtime hard deps are base apt content, asserted at build time
-# (not listed as components because the estate does not pin them individually):
+# (not listed as components because they are not pinned individually):
 # sh (dash), tar, flock (util-linux), lsof, jq, procps, tini, sudo, curl,
 # ca-certificates — the same list contrib/k8s/Dockerfile.base:109-123 installs.

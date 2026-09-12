@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - "fable-nomad/**"
   pull_request:
     branches:
       - main
@@ -27,23 +26,34 @@ permissions:
 # as of 2026-09-09. UPDATE THIS VALUE PER CUT to the gc the release is proven
 # against.
 #
-# The value is the upstream base of the estate's pin lineage (the
+# The value is the upstream base of the maintainer's private pin lineage (the
 # `6ba434271 (upstream base)` entry of the pin line in docs/PIN-DEPENDENCIES.md),
-# not the pin commit itself: the live pin is an EDGE-lineage commit (dc1a8851e,
-# ops/receipts/edge/pin-roll-20260907/swap-receipt-20260909T0541Z) that does not
-# exist on gastownhall/gascity, so `go install .../cmd/gc@<pin-sha>` cannot
-# resolve on any runner -- hosted or self-hosted. The consequence is stated
-# rather than papered over: this workflow is the deterministic upstream-base
-# gate, and the at-pin conformance evidence a release needs is the box-lane
-# Gate B run carrying /mnt/nomad/gc/bin/current (Mayor ruling cr-97x72). A green
-# run here is not at-pin evidence.
+# not the pin commit itself: the live pin is a private-lineage commit (dc1a8851e,
+# recorded in the maintainer's own pin-swap receipt) that does not exist on
+# gastownhall/gascity, so `go install .../cmd/gc@<pin-sha>` cannot resolve on any
+# runner -- hosted or self-hosted. The consequence is stated rather than papered
+# over: this workflow is the deterministic upstream-base gate, and the at-pin
+# conformance evidence a release needs is a run against the pinned gc inside a
+# real allocation. A green run here is not at-pin evidence.
 env:
   GC_REF: 6ba434271c5f76bc150f694ebeef9d713be16b3a
 
 jobs:
   receipt:
     name: Phase-1 conformance receipt (full offline ladder)
-    runs-on: ${{ github.event_name == 'push' && fromJSON('["self-hosted","linux","haus-gpu"]') || 'ubuntu-latest' }}
+    # Self-hosted labels come from a repository variable so this file names no
+    # private machine, and so a FORK works without editing CI. A fork has no
+    # CI_RUNNER_LABELS set, falls through to ubuntu-latest, and its first push
+    # gets a real run instead of a job queued forever against a runner that
+    # does not exist for it.
+    #
+    # ubuntu-latest is not a degraded path here: this job is the OFFLINE
+    # conformance ladder, and the pull_request leg has always run it on
+    # ubuntu-latest. Nothing in it needs the self-hosted host.
+    #
+    # To use your own runner: set the repository variable CI_RUNNER_LABELS to a
+    # JSON array, e.g. ["self-hosted","linux","my-label"].
+    runs-on: ${{ (github.event_name == 'push' && vars.CI_RUNNER_LABELS != '') && fromJSON(vars.CI_RUNNER_LABELS) || 'ubuntu-latest' }}
     timeout-minutes: 20
 
     steps:

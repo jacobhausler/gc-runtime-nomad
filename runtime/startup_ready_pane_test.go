@@ -10,7 +10,7 @@ import (
 
 // capturedStartupPane is the real thing: the Codex TUI repaint stream an
 // ordinary nomad-canary launch wrote to agent.stdout in alloc fada3496
-// (cr-gdeav.6.11 attempt 4, pack c989c48, provider prompt_mode="none",
+// (attempt 4, pack c989c48, provider prompt_mode="none",
 // ready_prompt_prefix="Ask Codex"). It is the only artifact that shows why the
 // startup nudge never fired: the ready row reads
 //

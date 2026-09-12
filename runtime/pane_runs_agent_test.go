@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// cr-8eagyh. A box whose pane holds a bare shell is not a launched agent, but it
+// A box whose pane holds a bare shell is not a launched agent, but it
 // is a live process — which is why every pid-based check downstream reported it
 // healthy while the lane claimed nothing for six minutes with a P0 routed to it.
 func TestPaneRunsAgent(t *testing.T) {
@@ -35,9 +35,6 @@ func TestPaneRunsAgent(t *testing.T) {
 // silent, so an operator's only symptom was a lane that served nothing.
 func TestBareShellRefusalNamesTheCause(t *testing.T) {
 	// Mirrors the message built in verifyPaneRunsAgent.
-	if !strings.Contains(bareShellRefusalHint(), "cr-8eagyh") {
-		t.Fatal("the refusal must point at the bead carrying the evidence")
-	}
 	for _, want := range []string{"started nothing", "rendered launch command"} {
 		if !strings.Contains(bareShellRefusalHint(), want) {
 			t.Fatalf("refusal hint missing %q — it must say what went wrong and what the box needs", want)

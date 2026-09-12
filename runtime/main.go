@@ -1,18 +1,17 @@
 // Command gc-runtime-nomad is a Runtime Provider Protocol (RPP) v0
 // executable that runs Gas City sessions as dispatched Nomad jobs. It
 // answers the `protocol` handshake, the pack-local `check` diagnostic, the
-// four lifecycle ops from NRT-P1-03
+// four lifecycle ops
 // (start, stop, is-running, list-running), the provision/launch split plus
-// warm relaunch from NRT-P1-08 (provision, exec, relaunch), and — from
-// fnrt-szx — the driving verbs (nudge, peek, interrupt, send-keys,
-// clear-scrollback) realized as tmux commands sent into the session's tmux
-// pane over the same exec mechanism, and — from NRT-P1-06 — workspace and
+// warm relaunch (provision, exec, relaunch), the driving verbs (nudge, peek,
+// interrupt, send-keys, clear-scrollback) realized as tmux commands sent into
+// the session's tmux pane over the same exec mechanism, and workspace and
 // secret staging: `start`/`provision` read an optional stageConfig (JSON) on
 // stdin and materialize its workspace files and secret env vars into the
 // alloc over tar-over-exec-stdin, the latter routed by the envArgvSafe
-// classification into $NOMAD_SECRETS_DIR rather than argv or the job spec
-// (04 §5, E1a §4.5). Everything runs over Nomad job dispatch/deregister/
-// blocking-reads and the alloc-exec WebSocket (04 §3/§4/§6/§7). Every other
+// classification into $NOMAD_SECRETS_DIR rather than argv or the job spec.
+// Everything runs over Nomad job dispatch/deregister/
+// blocking-reads and the alloc-exec WebSocket. Every other
 // op besides the pack-local `check` diagnostic exits 2, the RPP
 // forward-compatibility signal a caller treats as a no-op success.
 //
@@ -27,7 +26,7 @@
 //	2  unknown / unimplemented op (forward-compatible no-op for the caller)
 //
 // exec is the one exception: its own exit code IS the remote command's exit
-// code (04 §3 exec row, RPP-CONN-001), not this 0/1/2 convention — a
+// code, not this 0/1/2 convention — a
 // transport-level exec failure (can't reach the alloc at all) still exits 1.
 //
 // Configuration comes from the environment:
@@ -41,16 +40,16 @@
 //	GC_NOMAD_NAMESPACE    optional: Nomad namespace (default "default")
 //	GC_NOMAD_NODE_POOL    optional: Nomad node pool for the parent job (default "" — Nomad's own "default" pool)
 //	GC_NOMAD_PARENT_JOB   optional: the city's parameterized parent job ID (default "gc-sessions")
-//	GC_NOMAD_SIDECAR_DIR  required for lifecycle ops: directory for the sidecar session->job-ID bindings (04 §1)
-//	GC_NOMAD_EGRESS_DIR   optional: local directory for stop-path transcript/evidence egress (NRT-P1-07); unset disables egress
-//	GC_NOMAD_FORBID_REGISTER  optional: "true" forbids ever registering the parent job (04 §4 lab ACL model) — start/provision fail closed instead of attempting a register call that needs the submit-job capability; unset means the default (registration allowed), and a value that is not a boolean is a config error that stops the op rather than reading as "allowed"
-//	GC_NOMAD_LOG_SINK     optional: HTTP JSON-lines endpoint for the session task group's log-shipper task (fnrt-t4l.13); unset disables the task entirely — session logs are not shipped
+//	GC_NOMAD_SIDECAR_DIR  required for lifecycle ops: directory for the sidecar session->job-ID bindings
+//	GC_NOMAD_EGRESS_DIR   optional: local directory for stop-path transcript/evidence egress; unset disables egress
+//	GC_NOMAD_FORBID_REGISTER  optional: "true" forbids ever registering the parent job (the lab ACL model) — start/provision fail closed instead of attempting a register call that needs the submit-job capability; unset means the default (registration allowed), and a value that is not a boolean is a config error that stops the op rather than reading as "allowed"
+//	GC_NOMAD_LOG_SINK     optional: HTTP JSON-lines endpoint for the session task group's log-shipper task; unset disables the task entirely — session logs are not shipped
 //	GC_NOMAD_LOG_SINK_TOKEN_FILE  optional: in-box path the log-shipper task reads its Authorization bearer token's value from; unset means an unauthenticated sink
 //	GC_NOMAD_LOG_LABELS   optional: "k=v,k=v" labels merged onto every shipped log line alongside the fixed session_name/alloc_id/node/runtime=nomad set
 //	GC_NOMAD_LOG_SHIPPER_ARTIFACT  optional: URL or local path for the pinned Vector archive; unset uses the upstream release URL
-//	GC_NOMAD_ADOPT_MAX_AGE  optional: Go duration (e.g. "30m", "2h") capping how old a live-but-unlaunched session box may be before provision/start reap it (stop + tombstone) and dispatch a fresh one instead of adopting it; unset means the 30m default, an unparseable value is a config error (cr-gdeav.6.1)
-//	GC_NOMAD_AGENT_IMAGE  required: Docker image for the session agent task, normally produced by gc build-image; unset fails every lifecycle op closed at startup (cr-3vvnb5.2 deletes the legacy exec task and the GC_NOMAD_ARTIFACT_VOLUME host-volume shape that used to carry its toolchain). The prebaked image owns the agent toolchain: the launched pane runs gc's rendered launch command (cr-hcgaxt), there is no deployment-bootstrap seam left to consult (cr-3vvnb5.3), and an empty rendered command fails the launch closed, and staged runtime secrets go to the mount point the box reports for $NOMAD_SECRETS_DIR; because no bootstrap survives to do it, the pack then owns the agent home: CODEX_HOME is exported inside that mount, overriding the orchestrator value the provider env staged, the Codex provider config is rendered from the seat's staged environment (GC_CODEX_MODEL_PROVIDER / GC_CODEX_MODEL_PROVIDER_BASE_URL), and auth arrives from the staged CODEX_AUTH_JSON (codex_home.go, cr-usnvaw); the box owns its filesystem too, so PATH, HOME, TMP/TMPDIR/TEMP, the XDG_* family, GC_HOME and any staged value naming the orchestrator's own HOME or TMPDIR are stripped from env.sh and the launch `-e` pairs rather than shadowed (image_env.go, cr-jr2kw7)
-//	GC_NOMAD_DNS_SERVERS  optional: comma-separated resolver IP addresses the session group's bridge network writes into the alloc's /etc/resolv.conf (e.g. "192.168.0.202"); unset means Nomad declares no dns stanza and the alloc inherits the CLIENT HOST's resolv.conf — on a systemd-resolved host that is the unreachable 127.0.0.53 stub, so nothing in the box can resolve a name (cr-tzsxk.18)
+//	GC_NOMAD_ADOPT_MAX_AGE  optional: Go duration (e.g. "30m", "2h") capping how old a live-but-unlaunched session box may be before provision/start reap it (stop + tombstone) and dispatch a fresh one instead of adopting it; unset means the 30m default, an unparseable value is a config error
+//	GC_NOMAD_AGENT_IMAGE  required: Docker image for the session agent task, normally produced by gc build-image; unset fails every lifecycle op closed at startup (the legacy exec task, and the GC_NOMAD_ARTIFACT_VOLUME host-volume shape that used to carry its toolchain, have been deleted). The prebaked image owns the agent toolchain: the launched pane runs gc's rendered launch command, there is no deployment-bootstrap seam left to consult, and an empty rendered command fails the launch closed, and staged runtime secrets go to the mount point the box reports for $NOMAD_SECRETS_DIR; because no bootstrap survives to do it, the pack then owns the agent home: CODEX_HOME is exported inside that mount, overriding the orchestrator value the provider env staged, the Codex provider config is rendered from the seat's staged environment (GC_CODEX_MODEL_PROVIDER / GC_CODEX_MODEL_PROVIDER_BASE_URL), and auth arrives from the staged CODEX_AUTH_JSON (codex_home.go); the box owns its filesystem too, so PATH, HOME, TMP/TMPDIR/TEMP, the XDG_* family, GC_HOME and any staged value naming the orchestrator's own HOME or TMPDIR are stripped from env.sh and the launch `-e` pairs rather than shadowed (image_env.go)
+//	GC_NOMAD_DNS_SERVERS  optional: comma-separated resolver IP addresses the session group's bridge network writes into the alloc's /etc/resolv.conf (e.g. "192.168.0.202"); unset means Nomad declares no dns stanza and the alloc inherits the CLIENT HOST's resolv.conf — on a systemd-resolved host that is the unreachable 127.0.0.53 stub, so nothing in the box can resolve a name
 //	GC_NOMAD_NODE_CONSTRAINT  optional: Nomad-syntax node constraints appended to the parent job, e.g. "${node.unique.name} != prod-nomad"; several separated by ";" (Nomad list operands already use commas). Unset adds only the pack's own linux-kernel fatal rule
 package main
 
@@ -97,8 +96,8 @@ const (
 )
 
 // protocolHandshakeJSON is the response to the `protocol` op: the capability
-// set gc actually consumes — proc.provision and proc.exec, both implemented
-// (04 §3). Nothing else is declared, env.workspace included. gc does not
+// set gc actually consumes — proc.provision and proc.exec, both implemented.
+// Nothing else is declared, env.workspace included. gc does not
 // ignore that code the way it ignores an unknown token: the capability runner
 // probes every declared env.* entry (internal/runtime/runtimecapability/
 // probes.go probeWorkspace execs `cat .gc-cb-sentinel` inside the session),
@@ -169,7 +168,7 @@ func run(args []string, stdin io.Reader, stdout, stderr *os.File) int {
 			fmt.Fprintln(stderr, "warning: log-shipper artifact source will use network default (GC_NOMAD_LOG_SHIPPER_ARTIFACT unset)")
 		}
 		if os.Getenv(envAgentImage) == "" {
-			fmt.Fprintln(stderr, "warning: GC_NOMAD_AGENT_IMAGE unset — the session agent task is a Docker task and there is no other session shape, so every lifecycle op will fail closed (cr-3vvnb5.2)")
+			fmt.Fprintln(stderr, "warning: GC_NOMAD_AGENT_IMAGE unset — the session agent task is a Docker task and there is no other session shape, so every lifecycle op will fail closed")
 		}
 		if skipVerifyRequested() {
 			fmt.Fprintln(stderr, tlsVerificationDisabledWarning)
@@ -207,7 +206,7 @@ func run(args []string, stdin io.Reader, stdout, stderr *os.File) int {
 				"case and is refused, not warned.) See docs/PIN-DEPENDENCIES.md.")
 		}
 		if os.Getenv(envDNSServers) == "" {
-			fmt.Fprintln(stderr, "warning: session boxes will declare no dns stanza and inherit the client host's resolv.conf (GC_NOMAD_DNS_SERVERS unset) — on a systemd-resolved host that stub resolver is unreachable from a bridge alloc (cr-tzsxk.18)")
+			fmt.Fprintln(stderr, "warning: session boxes will declare no dns stanza and inherit the client host's resolv.conf (GC_NOMAD_DNS_SERVERS unset) — on a systemd-resolved host that stub resolver is unreachable from a bridge alloc")
 		}
 		return exitOK
 	}
@@ -273,8 +272,8 @@ func run(args []string, stdin io.Reader, stdout, stderr *os.File) int {
 		if !ok {
 			return exitError
 		}
-		// The wire start config rides on stdin (staging.go's stageConfig,
-		// NRT-P1-06) — empty stdin decodes to the zero value, so a caller
+		// The wire start config rides on stdin (staging.go's stageConfig)
+		// — empty stdin decodes to the zero value, so a caller
 		// that never sends one gets exactly the pre-staging behavior.
 		cfg, err := readStageConfig(stdin)
 		if err != nil {
@@ -372,8 +371,8 @@ func run(args []string, stdin io.Reader, stdout, stderr *os.File) int {
 			return exitError
 		}
 		// Unlike the other lifecycle ops, exec's own exit code IS the
-		// remote command's exit code (04 §3 exec row: "op exit = command
-		// exit", RPP-CONN-001) — not the 0/1/2 lifecycle-op convention.
+		// remote command's exit code ("op exit = command exit") — not the
+		// 0/1/2 lifecycle-op convention.
 		return exitCode
 
 	case "nudge":
@@ -487,14 +486,14 @@ func newLifecycle() (*lifecycle, error) {
 	if err != nil {
 		return nil, err
 	}
-	// The Docker task is the only session shape — cr-3vvnb5.2 removes the legacy
-	// exec task and the host-volume artifact delivery that fed it — so an image
+	// The Docker task is the only session shape — the legacy exec task and the
+	// host-volume artifact delivery that fed it are gone — so an image
 	// is required. Fail closed at the launcher, before any op can register a
 	// parent or dispatch a box, rather than land a session in a task with no
 	// toolchain to run an agent.
 	agentImage := os.Getenv(envAgentImage)
 	if agentImage == "" {
-		return nil, fmt.Errorf("%s is required: the session agent task is a docker task and there is no other session shape to fall back to (cr-3vvnb5.2)", envAgentImage)
+		return nil, fmt.Errorf("%s is required: the session agent task is a docker task and there is no other session shape to fall back to", envAgentImage)
 	}
 	return &lifecycle{
 		client:             c,

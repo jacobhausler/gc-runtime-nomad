@@ -37,15 +37,15 @@ const (
 )
 
 // errJobGone marks a 404 from the Nomad API against a job route — the
-// confirmed-absence signal (04 §2.1 rule 7): a DEFAULT-consistency 404 on a
+// confirmed-absence signal: a DEFAULT-consistency 404 on a
 // direct job GET, or (for deregister/dispatch) the job never having existed.
 var errJobGone = errors.New("nomad: job gone")
 
 // errJobForbidden marks a 403 from the Nomad API against a job route — the
-// lab ACL model's (04 §4) signal that the calling token lacks a capability
+// lab ACL model's signal that the calling token lacks a capability
 // it needs for the attempted call, most notably submit-job on a register
-// call from a token scoped to dispatch/read/deregister only
-// (NRT-P2-06.1). registerJob's caller uses this to turn a bare 403 into an
+// call from a token scoped to dispatch/read/deregister only.
+// registerJob's caller uses this to turn a bare 403 into an
 // error that names the missing capability instead of an opaque status code.
 var errJobForbidden = errors.New("nomad: forbidden")
 
@@ -327,8 +327,8 @@ func (c *client) registerJob(ctx context.Context, job nomadJob) error {
 // errJobGone's meaning elsewhere in this client; any other failure is
 // returned as an error since a lookup failure is not proof of absence. It
 // decodes NodePool and Meta: NodePool is the one parentJobSpec field beyond
-// namespace that varies at runtime (NRT-P2-05), and Meta carries
-// jobspecHashMetaKey (fnrt-t4l.9) — together the two signals
+// namespace that varies at runtime, and Meta carries
+// jobspecHashMetaKey — together the two signals
 // lifecycle.ensureParentRegistered needs to decide whether an
 // already-registered parent still matches this build's jobspec, not only its
 // node pool. A namespace-scoped GET against real Nomad already proves the
@@ -353,7 +353,7 @@ type dispatchResult struct {
 }
 
 // nsQuery returns the ?namespace= query value every non-default-namespace
-// route needs (NRT-P2-05: confirmed empirically against a real cluster —
+// route needs (confirmed empirically against a real cluster —
 // Nomad's dispatch/list/deregister/fs/exec routes resolve against namespace
 // "default" unless a query param names the target namespace; there is no
 // header fallback. fakenomad's single global job map never enforced
@@ -363,7 +363,7 @@ func (c *client) nsQuery() url.Values {
 }
 
 // dispatchChild dispatches a child of parentID through Nomad's native write
-// path. Meta remains non-secret attribution (04 §2.1: gc_session + a
+// path. Meta remains non-secret attribution (gc_session + a
 // per-dispatch nonce — never a capability); the same intent is also carried
 // in the native idempotency token so a retry after a lost response cannot
 // create a second child.
@@ -412,11 +412,11 @@ func dispatchIdempotencyToken(sessionName, nonce string) string {
 	return sessionName + ":" + nonce
 }
 
-// childJob is one entry of a children-of-parent jobs list (04 §2.1 rule
-// 2/3): the subset opListRunning and dispatch's positive-attribution
-// adoption (rule 6) need to decode identity and filter non-terminal
+// childJob is one entry of a children-of-parent jobs list: the subset
+// opListRunning and dispatch's positive-attribution
+// adoption need to decode identity and filter non-terminal
 // children — never the job ID itself, which is not invertible back to a
-// session name (e2a-job-id-charset-gap).
+// session name.
 type childJob struct {
 	ID        string
 	Namespace string
@@ -425,11 +425,11 @@ type childJob struct {
 }
 
 // listChildJobs lists every job dispatched from parentID via the Nomad jobs
-// endpoint with `meta=true` (e2a-amend-jobs-list-params), filtering
+// endpoint with `meta=true`, filtering
 // client-side on ParentID — real Nomad's jobs-list has no parent-filter
 // param of its own. This is the children-of-parent mechanism both
-// list-running's ListRunning(prefix) (04 §2.1 rule 2/3) and dispatch's
-// orphan-adoption lookup (rule 6) read: meta decode, never ID-string
+// list-running's ListRunning(prefix) and dispatch's
+// orphan-adoption lookup read: meta decode, never ID-string
 // parsing.
 func (c *client) listChildJobs(ctx context.Context, parentID string) ([]childJob, error) {
 	q := c.nsQuery()
@@ -469,7 +469,7 @@ type allocRecord struct {
 	// task still in "Task Setup" reads "pending"/"starting" here while
 	// ClientStatus already says the alloc is live -- which is the only signal
 	// that separates "the box is placed" from "the task we are about to exec
-	// into is up" (ops.go awaitExecAllocReady, cr-u9vul4). nil means this read
+	// into is up" (ops.go awaitExecAllocReady). nil means this read
 	// carried no task states at all (a stub read), which is NOT an answer.
 	TaskStates map[string]allocTaskState
 }
@@ -488,7 +488,7 @@ type allocTaskState struct {
 	//   ... "Failed to pull `img`: ... repository does not exist"
 	//   ... "Policy allows no restarts"
 	// so LastEvent reports the restart policy and says nothing about the image.
-	// Measured live on T6 (cr-kkcvmd), 2026-09-11. Empty when no event in the
+	// Measured live on T6, 2026-09-11. Empty when no event in the
 	// list carries a failure detail.
 	FailureEvent string
 }
@@ -496,7 +496,7 @@ type allocTaskState struct {
 // listAllocsForJob reads the allocations placed for jobID. If wait > 0 and
 // sinceIndex > 0, it performs a blocking read (index/wait query params) that
 // resolves as soon as the server's index advances past sinceIndex, or wait
-// elapses — the "confirm terminal" mechanism 04 §4/§6 call for around stop
+// elapses — the "confirm terminal" mechanism called for around stop
 // and duplicate-start detection.
 func (c *client) listAllocsForJob(ctx context.Context, jobID string, sinceIndex uint64, wait time.Duration) ([]allocRecord, uint64, error) {
 	ctx, cancel := clientContext(ctx, blockingTimeout(wait))
@@ -583,7 +583,7 @@ func latestTaskEvent(events []*nomadapi.TaskEvent) string {
 // last event outright. Nomad appends terminal bookkeeping ("Policy allows no
 // restarts", "Task Setup") AFTER the real cause, so the newest event is usually
 // the least informative one in the list — which is exactly how a missing image
-// came out as EOF with no image name anywhere (T6, cr-kkcvmd).
+// came out as EOF with no image name anywhere (T6).
 //
 // Only events carrying a real error field qualify: DriverError, DownloadError,
 // SetupError and KillReason. A DisplayMessage alone does not, because every
@@ -619,7 +619,7 @@ func firstNonEmpty(values ...string) string {
 
 // deregisterJob deregisters jobID and returns the response index (0 if the
 // job was already gone). purge=false matches the stop-without-purge
-// ordering invariant (04 §3 stop row, R1c-05); a 404 (already gone) is
+// ordering invariant; a 404 (already gone) is
 // folded to success so stop stays idempotent.
 func (c *client) deregisterJob(ctx context.Context, jobID string, purge bool) (uint64, error) {
 	parts := []string{"v1", "job", jobID}
@@ -704,7 +704,7 @@ func clientContext(ctx context.Context, timeout time.Duration) (context.Context,
 
 // execFrame decodes the three alloc-exec WebSocket frame shapes this client
 // reads: a stdout data chunk, a stderr data chunk, and the terminal
-// exited/exit_code frame (e2a-exec-protocol). stderr is collected only for
+// exited/exit_code frame. stderr is collected only for
 // callers that asked for it (execAllocObserved); the plain stream callers keep
 // stdout-only semantics so nothing that matches on command output — peek's
 // pane capture above all — starts seeing box diagnostics spliced into it.
@@ -722,7 +722,7 @@ type execFrame struct {
 }
 
 // execAlloc runs command inside task of allocID over the Nomad alloc-exec
-// WebSocket (GET /v1/client/allocation/:alloc_id/exec, e2a-exec-protocol)
+// WebSocket (GET /v1/client/allocation/:alloc_id/exec)
 // and returns the remote command's exit code plus its collected stdout. No
 // stdin is sent — every caller (launch/relaunch's tmux command, driving-verb
 // probes) needs none — so the stdin channel is closed immediately, which is
@@ -733,14 +733,14 @@ func (c *client) execAlloc(ctx context.Context, allocID, task string, command []
 }
 
 // execStdinChunkSize bounds each stdin data frame so a large workspace/
-// secrets tar (NRT-P1-06) is streamed rather than built as one oversized
+// secrets tar is streamed rather than built as one oversized
 // WebSocket frame.
 const execStdinChunkSize = 32 * 1024
 
 // execAllocStdin is execAlloc's stdin-carrying twin: it writes stdin (if
 // any) as one or more base64 data frames before the stdin-close frame that
 // makes both fakenomad and real Nomad actually run the command — the
-// tar-over-exec-stdin channel NRT-P1-06's workspace/secrets staging rides.
+// tar-over-exec-stdin channel the workspace/secrets staging rides.
 func (c *client) execAllocStdin(ctx context.Context, allocID, task string, command []string, stdin []byte) (int, []byte, error) {
 	exitCode, stdout, _, err := c.execAllocObserved(ctx, allocID, task, command, stdin)
 	return exitCode, stdout, err
@@ -748,7 +748,7 @@ func (c *client) execAllocStdin(ctx context.Context, allocID, task string, comma
 
 // execAllocObserved is execAllocStdin's twin for the callers that have to know
 // WHY the box said no: it returns the command's stderr alongside its stdout.
-// The launch handshake is the reason this exists (cr-86ytiq) — gc's exec
+// The launch handshake is the reason this exists — gc's exec
 // transport reports only "tmux exited N", so a pane that dies before the
 // bootstrap runs is otherwise unobservable from the controller side, and the
 // box's own diagnostic was being dropped here at the frame codec.
@@ -1002,7 +1002,7 @@ func (c *client) doIndexed(ctx context.Context, timeout time.Duration, method st
 
 // urlFor joins parts onto the API base path. It assigns to u.Path (the
 // decoded form) rather than pre-escaping each part: dispatched child job
-// IDs legitimately contain a literal "/" (e2a-child-job-naming, mirrored in
+// IDs legitimately contain a literal "/" (mirrored in
 // fakenomad's own routing comment), and url.URL.String() escapes u.Path
 // correctly on its own — escaping parts individually first would encode
 // that literal "/" to "%2F" and then double-escape it when the URL is

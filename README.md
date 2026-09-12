@@ -7,20 +7,17 @@
 A Gas City **runtime pack**: it ships a runtime *executable*, not a service.
 The executable `gc-runtime-nomad` speaks the Runtime Provider Protocol
 (RPP v0). It answers the `protocol` handshake, the four session lifecycle
-ops `start`/`stop`/`is-running`/`list-running` from `NRT-P1-03`, and — as of
-`NRT-P1-08` — the provision/launch split and warm relaunch:
-`provision`/`exec`/`relaunch`. Everything is implemented over Nomad job
-dispatch/deregister/blocking reads against a parameterized parent job plus
-the alloc-exec WebSocket, per
-`research/outputs/04-proposed-architecture.md` §3/§4/§6/§7. As of
-`NRT-P1-07`, `stop` also egresses each session's transcript/evidence files
-via the Nomad client fs API before deregister, when egress is configured.
-As of `NRT-P1-05`, `exec` plus the driving verbs (`nudge`, `peek`,
+ops `start`/`stop`/`is-running`/`list-running`, plus the provision/launch split
+and warm relaunch: `provision`/`exec`/`relaunch`. Everything is implemented over
+Nomad job dispatch/deregister/blocking reads against a parameterized parent job
+plus the alloc-exec WebSocket. `stop` also egresses each session's
+transcript/evidence files via the Nomad client fs API before deregister, when
+egress is configured. `exec` plus the driving verbs (`nudge`, `peek`,
 `interrupt`, `send-keys`, `clear-scrollback`) are realized as tmux commands
-over the same exec mechanism. As of `NRT-P1-06`, `start`/`provision` accept
-an optional workspace/secrets staging config on stdin (04 §5), materialized
-into the alloc over tar-over-exec-stdin. As of `fnrt-t4l.13`, setting
-`GC_NOMAD_LOG_SINK` adds a second `log-shipper` task (a pinned+checksummed
+over the same exec mechanism. `start`/`provision` accept an optional
+workspace/secrets staging config on stdin, materialized into the alloc over
+tar-over-exec-stdin. Setting `GC_NOMAD_LOG_SINK` adds a second `log-shipper`
+task (a pinned+checksummed
 `vector` binary) to the session task group, tailing the agent's session
 JSONL and captured stdout to that HTTP JSON-lines sink and exposing
 vector's own metrics via `prometheus_exporter` on a group-local port —
@@ -28,10 +25,10 @@ unset, this task is never added at all.
 
 ## Before you install
 
-> **Status: not installable outside its home estate yet.** Read this before
-> anything else.
+> **Status: not installable outside the maintainer's own deployment yet.** Read
+> this before anything else.
 >
-> This pack requires a `gc` built from a private EDGE lineage. The pin it
+> This pack requires a `gc` built from a private development lineage. The pin it
 > needs is **not a commit that exists on `gastownhall/gascity`**, so the
 > `go install ...@<pin>` in the install section below **cannot resolve for
 > you**. This repository's own CI says so in as many words
@@ -78,11 +75,11 @@ runtime-nomad/
 │   ├── main.go     # RPP op dispatch + env config
 │   ├── client.go   # Nomad API client (register/dispatch/deregister/blocking reads/alloc-exec WS)
 │   ├── exec_ws.go  # client-side RFC 6455 frame codec for the alloc-exec WebSocket
-│   ├── jobspec.go  # parent job spec builder (04 §4 job-template invariants) + optional log-shipper task (fnrt-t4l.13)
-│   ├── sidecar.go  # session -> child-job-ID binding store + launched marker (04 §1 sidecar state dir)
-│   ├── staging.go  # wire start config, envArgvSafe classification, tar-over-exec-stdin builder (NRT-P1-06)
-│   └── ops.go      # start/stop/is-running/list-running/provision/exec/relaunch/stage, stop-path fs egress (NRT-P1-07)
-└── drills/         # nested Go module: L4 reconciler-sim harness (NRT-P2-06a, 08 §1.1) — see drills/README.md
+│   ├── jobspec.go  # parent job spec builder (job-template invariants) + optional log-shipper task
+│   ├── sidecar.go  # session -> child-job-ID binding store + launched marker (sidecar state dir)
+│   ├── staging.go  # wire start config, envArgvSafe classification, tar-over-exec-stdin builder
+│   └── ops.go      # start/stop/is-running/list-running/provision/exec/relaunch/stage, stop-path fs egress
+└── drills/         # nested Go module: L4 reconciler-sim harness — see drills/README.md
 ```
 
 ## Use
@@ -119,7 +116,7 @@ layers:
 | Layer | Delivery contract |
 |---|---|
 | Workspace/secrets | `stageConfig.Env` is staged through the pack's tar-over-exec-stdin channel into `$NOMAD_SECRETS_DIR`, including the sourceable `env.sh` file. This is the pack's own transport, not an RPP claim: the pack declares no `env.workspace` capability, because the start wire does not materialize `work_dir` inside the alloc and gc probes every declared `env.*` code. |
-| Toolchain | The Docker image named by the **required** `GC_NOMAD_AGENT_IMAGE` carries the session toolchain; the binaries it must provide are one canonical list in one place, [`COMPATIBILITY.md`](COMPATIBILITY.md) → "The agent image" (this row deliberately does not copy it — the last copy here named a specific agent CLI, which contradicts the runtime/provider independence stated above, and omitted three binaries the runtime actually execs). The agent task declares no host volume, so nothing is delivered from the client host. `GC_NOMAD_AGENT_IMAGE` unset fails every lifecycle op closed — cr-3vvnb5.2 removes the legacy `exec` task and the `GC_NOMAD_ARTIFACT_VOLUME` `/mnt/nomad` mount that used to feed it. |
+| Toolchain | The Docker image named by the **required** `GC_NOMAD_AGENT_IMAGE` carries the session toolchain; the binaries it must provide are one canonical list in one place, [`COMPATIBILITY.md`](COMPATIBILITY.md) → "The agent image" (this row deliberately does not copy it — the last copy here named a specific agent CLI, which contradicts the runtime/provider independence stated above, and omitted three binaries the runtime actually execs). The agent task declares no host volume, so nothing is delivered from the client host. `GC_NOMAD_AGENT_IMAGE` unset fails every lifecycle op closed — 1.0.7 removed the legacy `exec` task and the `GC_NOMAD_ARTIFACT_VOLUME` host-volume mount that used to feed it. |
 | Identity/config | The city target arrives through the secrets environment channel as **exactly one** of a complete remote context (`GC_HOME` + `GC_CITY_CONTEXT`) or `GC_CITY_URL`; both at once is the fail-closed case, not a redundancy - see Install part 1 step 7. Session identity values are added by the lifecycle. |
 
 The Cloudflare pack's bundle is the environment boundary for pack-provided
@@ -141,7 +138,7 @@ shipped; disabling shipping is therefore explicit and visible.
 ## Install
 
 Read the status banner at the top of this file first: step 1 below cannot be
-completed from outside the pack's home estate today.
+completed outside the maintainer's own deployment today.
 
 Everything here is provider-agnostic. The runtime and the agent **provider**
 are separate abstractions: this pack schedules a box and feeds it; it does not
@@ -175,7 +172,7 @@ Provider-agnostic: what any deployment of this pack needs.
    `gc` does, but the `gc` that goes *inside* the agent image must be a
    linux/amd64 build (COMPATIBILITY.md, "The agent image").
    `install.sh` is that Go run plus a self-check: the launcher deploy it used
-   to carry existed to serve the host-toolchain pane and is gone (cr-3vvnb5.4).
+   to carry existed to serve the host-toolchain pane and is gone.
    It fails, with the exact `export PATH=...` line for your machine, when the
    binary lands somewhere `gc` cannot resolve it by bare name — then verifies
    the RPP handshake and runs `check`, so an incompatible `gc` is reported at
@@ -218,7 +215,7 @@ Provider-agnostic: what any deployment of this pack needs.
    | `GC_NOMAD_NODE_POOL` | no | Parent job's node pool (empty = Nomad's own default pool) |
    | `GC_NOMAD_NODE_CONSTRAINT` | no | `;`-separated Nomad-syntax constraints appended *after* the pack's linux-kernel fatal rule, e.g. `${node.unique.name} != prod-nomad` |
    | `GC_NOMAD_DNS_SERVERS` | no | Resolver addresses the session group's bridge network writes into the alloc's `/etc/resolv.conf` — see step 9 |
-   | `GC_NOMAD_AGENT_IMAGE` | **yes** | Docker image carrying the session agent and its toolchain (see the image-content note below). Unset fails every lifecycle op closed at startup: the Docker task is the only session shape (cr-3vvnb5.2) |
+   | `GC_NOMAD_AGENT_IMAGE` | **yes** | Docker image carrying the session agent and its toolchain (see the image-content note below). Unset fails every lifecycle op closed at startup: the Docker task is the only session shape |
    | `GC_NOMAD_EXEC_TASK` | no | Task name alloc-exec targets, when it is not the pack's session task |
    | `GC_NOMAD_EXTRA_SECRET_KEYS` | no | Comma-separated names to bridge from the supervisor's own process env into `$NOMAD_SECRETS_DIR` — the value-blind channel for a secret `gc`'s provider env map cannot interpolate. Naming a key is what stages it; an unnamed key is never staged, and an extra key is always routed to the secrets dir, never to the launch argv. The names themselves belong to the deployment (part 2 works one Codex name through it) |
    | `GC_NOMAD_EGRESS_DIR` | no | Stop-path transcript/evidence directory; unset disables egress |
@@ -238,8 +235,8 @@ Provider-agnostic: what any deployment of this pack needs.
    Image *content* is not this pack's contract. `gc build-image` can produce such
    an image, but at the pinned gc its own contract is K8s-shaped
    (`cmd/gc/cmd_build_image.go:34-41` - `[session.k8s]`, Pods, K8s Secret) and
-   names no Nomad at all; the prebake and release work (`cr-u7b0s.45`,
-   `cr-u7b0s.50`) owns what goes into the image this key points at.
+   names no Nomad at all; the pack's own prebake and release work (see
+   `toolchain/`) owns what goes into the image this key points at.
 
    The identity/config side of the allocation is *not* configured here:
    `GC_CITY_URL`, `GC_CITY_NAME`, and whatever transport credentials the
@@ -250,7 +247,7 @@ Provider-agnostic: what any deployment of this pack needs.
    exactly once.** An allocation cannot reach the supervisor's loopback
    listeners, so a remote session needs either a complete **remote context**
    (`GC_HOME` + `GC_CITY_CONTEXT`, staged by the pack as `gc-home/contexts.toml`
-   — an mTLS context on this estate) or `GC_CITY_URL`. Both at once is a
+   — an mTLS context in the maintainer's own deployment) or `GC_CITY_URL`. Both at once is a
    failure, not a redundancy: when the provider env carries a complete remote
    context, the pack stages `gc-home/contexts.toml`, exports `GC_HOME` +
    `GC_CITY_CONTEXT`, and then **drops `GC_CITY_URL` from `env.sh`** — a target
@@ -289,7 +286,7 @@ The rule, in the abstract: **the box must provide the seat's provider command on
 `PATH` exactly as `gc` renders it.** The command line the provider config
 produces for a session has to resolve and run inside the allocation, unchanged,
 with whatever siblings that command assumes present alongside it. The runtime never downloads or installs a provider, and the pane it launches
-runs gc's rendered launch command and nothing else (cr-3vvnb5). If a provider
+runs gc's rendered launch command and nothing else. If a provider
 needs a file, a binary, or a credential, that is the deployment staging it
 (the prebaked image, the value-blind secret channel). A seat that comes up but
 cannot run a tool is a toolchain-staging defect wearing a runtime costume.
@@ -321,8 +318,8 @@ artifact, its sha256, and the layout it asserts — a missing sha is the symptom
 that the layout was never checked. Its credential rides the generic channel from
 part 1 step 8 under whatever name the deployment chose (here `CODEX_AUTH_JSON`),
 staged value-blind into `$NOMAD_SECRETS_DIR`, and the pack installs it into the
-box's own `$CODEX_HOME` from that staged environment (`codex_home.go`,
-cr-usnvaw) — image mode owns the agent home, so no launcher step does.
+box's own `$CODEX_HOME` from that staged environment (`codex_home.go`) — image
+mode owns the agent home, so no launcher step does.
 
 **The pinned build input is `toolchain/TOOLCHAIN.lock`, and it is the pointer
 this section's own rule demands.** The rule above is that a toolchain staging
@@ -366,8 +363,8 @@ Three things that will bite you:
 
 - **`--city` must be a bounded city root**, not a working checkout.
   `gc build-image` copies the whole directory and excludes only secrets, so
-  pointing it at a live estate root ships that estate into an image. The
-  script refuses it.
+  pointing it at a live working checkout ships that whole checkout into an
+  image. The script refuses it.
 - **`--published` builds against the published upstream `gc` release.** That
   is the portable path, and today it produces an image whose in-box `gc`
   cannot run this pack — see the status banner at the top of this file. This
@@ -386,8 +383,8 @@ a set of values to copy.
 
 Prebaking the toolchain into the box image is the intended 1.0.x shape —
 `gc build-image` is the prebake verb gc ships - its contract at the pin is
-K8s-shaped, see the `GC_NOMAD_AGENT_IMAGE` row in step 6 - and epic `cr-u7b0s` is
-that work; manual staging as above is what runs today.
+K8s-shaped, see the `GC_NOMAD_AGENT_IMAGE` row in step 6 - and the `toolchain/`
+directory is that work; manual staging as above is what runs today.
 
 ### Deployment values live outside this pack
 
@@ -419,8 +416,9 @@ Its checkable claims are guarded by tests (`runtime/skill_doc_test.go`): the
 fatal placement rules it names are read off the live jobspec, and the probe and
 entry point off the runtime. A skill is documentation that gets *followed*
 rather than read, so a line that has quietly become false is worse than one
-that is missing — a line in this pack's estate-side sibling was falsified by a
-change in this very repo and went unnoticed until it was graded by hand.
+that is missing — a line in this pack's deployment-side sibling skill was
+falsified by a change in this very repo and went unnoticed until it was graded
+by hand.
 
 ## Conformance
 
@@ -431,7 +429,7 @@ GC_BIN=$(command -v gc) ./conformance.sh
 `conformance.sh` builds the executable and an in-memory fake Nomad API
 server (`fakenomad`), then runs `gc runtime check` and `gc runtime
 conformance` through the full RPP lifecycle round-trip — no live Nomad
-cluster or network required. This is the pack's CI gate (NRT-P1-04); `gc`
+cluster or network required. This is the pack's CI gate; `gc`
 itself is a tool dependency installed with a pinned
 `go install github.com/gastownhall/gascity/cmd/gc@<pin>`, never imported, so
 the pack keeps zero gascity Go dependencies. Optional-op requirements
@@ -451,10 +449,9 @@ env probe (`TestM3StagingReceiptWorkspaceProbe`), L0-L2
 (`go vet`/`go test` across the `runtime` and `fakenomad` modules), and
 secrets-grep (`TestM3StagingReceiptNoCanaryLeak`, zero planted-canary hits)
 — then writes the per-item pass/fail result, linked to the commit it ran
-at, to `CONFORMANCE-RECEIPT.md` (NRT-P1-90; 08 §1 pack-tier conformance
-standard). Exits non-zero if any ladder item is red. Fixing a red ladder
-step is out of scope for the receipt itself — bounce back to the owning
-bead.
+at, to `CONFORMANCE-RECEIPT.md`. Exits non-zero if any ladder item is red.
+Fixing a red ladder step is out of scope for the receipt itself — bounce it
+back to whoever owns the failing rung.
 
 ## RPP operations
 
@@ -462,14 +459,14 @@ bead.
 |----|-------|
 | `check` | Pack-local diagnostic. Emits warnings when the optional log sink is unset, and when the required `GC_NOMAD_AGENT_IMAGE` is unset; does not require Nomad configuration. |
 | `protocol` | `{"version":0,"capabilities":["proc.provision","proc.exec"]}` |
-| `provision` | Registers the parent job (idempotent upsert) if needed, then dispatches a tmux-only child for the session — no agent launched, sidecar launched marker stays unset. Idempotent over the box it already made: a session whose bound child is still live but never launched is ADOPTED (no second child dispatched, staging re-run), so a controller re-driving `provision` after an attempt whose staging or launch never confirmed can finish the job instead of collecting "already exists" forever (fnrt-t4l.46). A session whose child is live AND launched is a genuine duplicate and is still rejected with an "already exists" error (04 §6 wire-contract constant). Reads an optional staging config (JSON) on stdin and materializes it (see `start`'s staging row) before returning. |
-| `start` | `provision` + launch: dispatches, stages an optional workspace/secrets config read as JSON from stdin (`staging.go`'s `stageConfig`, NRT-P1-06 — workspace files land under `WorkDir` and env entries land as individual files plus a sourceable `env.sh` under `$NOMAD_SECRETS_DIR`, both via tar-over-exec-stdin, 04 §5), then sources that script and execs the launch command (`tmux new-session -d -s main`, plus `-e KEY=VALUE` for any `envArgvSafe`-classified env entries) into the alloc, then sets the launched marker. Empty/absent stdin is a no-op config — pre-staging callers are unaffected. A session left live-but-unlaunched by an earlier attempt (a `provision`, or a `start` whose launch never confirmed) is resumed into rather than re-dispatched; only a live, already-launched session is rejected, with the same "already exists" error as `provision`. |
-| `exec` | Runs a command inside the session's current alloc over the Nomad alloc-exec WebSocket and streams its stdout; **the op's own exit code is the remote command's exit code** (04 §3 exec row, RPP-CONN-001) — not the 0/1/2 lifecycle-op convention. Works regardless of the launched marker — a provisioned-but-not-launched box already answers exec (RPP-PROVISION-001). |
-| `relaunch` | Re-execs the launch command into the SAME alloc — no fresh dispatch, no fresh env — then sets the launched marker (04 §7 warm relaunch, launch-only fingerprint drift). Fails if the session has no live alloc to relaunch into. |
-| `nudge` / `peek` / `interrupt` / `send-keys` / `clear-scrollback` | The driving verbs (NRT-P1-05), realized as tmux commands sent into the session's tmux pane over the same exec mechanism. `nudge`/`interrupt` are best-effort — a not-found session answers success rather than an error, per the RPP's best-effort convention. |
-| `stop` | Best-effort `tmux kill-session` for the agent's session before anything else (NRT-P2-06.1) — the task's own exit is independent of this (its supervisor script traps and exits on Nomad's own SIGTERM), but tmux's server is a detached daemon nothing else reaps. When log shipping is enabled, requests and waits for the `log-shipper` graceful flush. If `GC_NOMAD_EGRESS_DIR` is set, then copies the session's transcript/evidence files (via the Nomad client fs API) into it, retrying up to 3 times before giving up and marking the tombstone `evidence_lost` rather than wedging (R2b-04); a flush failure also records `evidence_lost`, while a successful egress receipts completion in the sidecar instead. The order is agent stop → shipper flush → egress → deregister. Then deregisters the session's child job without purge, confirms terminal via a blocking read, and tombstones the sidecar binding. Idempotent — a session with no binding is a no-op success, and a stop that fails after egress but before deregister does not re-attempt egress on retry. |
-| `is-running` | Prints `true`/`false`. False whenever the launched marker is unset, even if the alloc is running (RPP-PROVISION-001: "provisioned, agent never launched" reads as not-running). Once launched, it also execs an in-box liveness probe into the alloc (`tmux has-session -t main`, plus `kill -0 <pid>` on the pane pid `start`/`relaunch` captured) — a box whose alloc stays non-terminal but whose agent died inside it (08 §3 in-box agent kill row) answers `false`, not `true`; ClientStatus alone can never see that gap. The honesty split (04 §6) still governs every transport fault along the way — a lookup error listing allocs, or a transport error execing the probe itself — which answers last-known-good (`true`) rather than `false`; only a definitive, non-transport probe result (the tmux session/pid genuinely gone) reads as agent-dead. |
-| `list-running [prefix]` | Prints one running session name per line — launched sessions only. Enumerates the children-of-parent jobs list (`GET /v1/jobs?meta=true`, 04 §2.1 rule 2/3) rather than trusting the sidecar as the existence source, decodes each non-terminal child's `gc_session` Meta key, and — when a prefix argument is given — filters the decoded names to it (`ListRunning(prefix)`, E2a amendment A-1). The sidecar is still consulted for the launched marker, which the children list alone cannot answer. Exits 1 on any lookup error rather than returning a partial list. |
+| `provision` | Registers the parent job (idempotent upsert) if needed, then dispatches a tmux-only child for the session — no agent launched, sidecar launched marker stays unset. Idempotent over the box it already made: a session whose bound child is still live but never launched is ADOPTED (no second child dispatched, staging re-run), so a controller re-driving `provision` after an attempt whose staging or launch never confirmed can finish the job instead of collecting "already exists" forever. A session whose child is live AND launched is a genuine duplicate and is still rejected with an "already exists" error (the wire-contract constant). Reads an optional staging config (JSON) on stdin and materializes it (see `start`'s staging row) before returning. |
+| `start` | `provision` + launch: dispatches, stages an optional workspace/secrets config read as JSON from stdin (`staging.go`'s `stageConfig` — workspace files land under `WorkDir` and env entries land as individual files plus a sourceable `env.sh` under `$NOMAD_SECRETS_DIR`, both via tar-over-exec-stdin), then sources that script and execs the launch command (`tmux new-session -d -s main`, plus `-e KEY=VALUE` for any `envArgvSafe`-classified env entries) into the alloc, then sets the launched marker. Empty/absent stdin is a no-op config — pre-staging callers are unaffected. A session left live-but-unlaunched by an earlier attempt (a `provision`, or a `start` whose launch never confirmed) is resumed into rather than re-dispatched; only a live, already-launched session is rejected, with the same "already exists" error as `provision`. |
+| `exec` | Runs a command inside the session's current alloc over the Nomad alloc-exec WebSocket and streams its stdout; **the op's own exit code is the remote command's exit code** (RPP-CONN-001) — not the 0/1/2 lifecycle-op convention. Works regardless of the launched marker — a provisioned-but-not-launched box already answers exec (RPP-PROVISION-001). |
+| `relaunch` | Re-execs the launch command into the SAME alloc — no fresh dispatch, no fresh env — then sets the launched marker (warm relaunch, launch-only fingerprint drift). Fails if the session has no live alloc to relaunch into. |
+| `nudge` / `peek` / `interrupt` / `send-keys` / `clear-scrollback` | The driving verbs, realized as tmux commands sent into the session's tmux pane over the same exec mechanism. `nudge`/`interrupt` are best-effort — a not-found session answers success rather than an error, per the RPP's best-effort convention. |
+| `stop` | Best-effort `tmux kill-session` for the agent's session before anything else — the task's own exit is independent of this (its supervisor script traps and exits on Nomad's own SIGTERM), but tmux's server is a detached daemon nothing else reaps. When log shipping is enabled, requests and waits for the `log-shipper` graceful flush. If `GC_NOMAD_EGRESS_DIR` is set, then copies the session's transcript/evidence files (via the Nomad client fs API) into it, retrying up to 3 times before giving up and marking the tombstone `evidence_lost` rather than wedging; a flush failure also records `evidence_lost`, while a successful egress receipts completion in the sidecar instead. The order is agent stop → shipper flush → egress → deregister. Then deregisters the session's child job without purge, confirms terminal via a blocking read, and tombstones the sidecar binding. Idempotent — a session with no binding is a no-op success, and a stop that fails after egress but before deregister does not re-attempt egress on retry. |
+| `is-running` | Prints `true`/`false`. False whenever the launched marker is unset, even if the alloc is running (RPP-PROVISION-001: "provisioned, agent never launched" reads as not-running). Once launched, it also execs an in-box liveness probe into the alloc (`tmux has-session -t main`, plus `kill -0 <pid>` on the pane pid `start`/`relaunch` captured) — a box whose alloc stays non-terminal but whose agent died inside it (the in-box agent-kill case) answers `false`, not `true`; ClientStatus alone can never see that gap. The honesty split still governs every transport fault along the way — a lookup error listing allocs, or a transport error execing the probe itself — which answers last-known-good (`true`) rather than `false`; only a definitive, non-transport probe result (the tmux session/pid genuinely gone) reads as agent-dead. |
+| `list-running [prefix]` | Prints one running session name per line — launched sessions only. Enumerates the children-of-parent jobs list (`GET /v1/jobs?meta=true`) rather than trusting the sidecar as the existence source, decodes each non-terminal child's `gc_session` Meta key, and — when a prefix argument is given — filters the decoded names to it (`ListRunning(prefix)`). The sidecar is still consulted for the launched marker, which the children list alone cannot answer. Exits 1 on any lookup error rather than returning a partial list. |
 
 Every other operation besides the pack-local `check` diagnostic exits 2 — the
 RPP forward-compatibility signal the caller treats as a no-op success.
@@ -499,14 +496,14 @@ token cannot fix the drift in place.
 
 ## Out of scope
 
-- Retention policy for egressed transcript/evidence files (owner decision,
-  `NRT-P1-07`) — no directory listing/discovery either, just the two
+- Retention policy for egressed transcript/evidence files (an owner
+  decision) — no directory listing/discovery either, just the two
   well-known files (`ops.go`'s `egressFiles`). (The older version of this
   bullet also scoped out any egress sink beyond a local directory; that is
-  overruled as of `fnrt-t4l.13`'s `GC_NOMAD_LOG_SINK` HTTP sink — see
-  above. `NRT-P1-07`'s own stop-path file egress is still local-directory
-  only; it is a distinct mechanism from the log-shipper's live streaming.)
-- Remote artifact blocks and the env.ledger tunnel (`NRT-P1-06`) — staging
+  overruled by the `GC_NOMAD_LOG_SINK` HTTP sink — see above. The stop-path
+  file egress is still local-directory only; it is a distinct mechanism from
+  the log-shipper's live streaming.)
+- Remote artifact blocks and the env.ledger tunnel — staging
   only materializes what a caller sends inline on stdin. The tmux pane's
   initial command is gc's own rendered launch command (plus `-e` flags) run
   after sourcing the staged environment, and an empty rendered command fails
@@ -514,21 +511,21 @@ token cannot fix the drift in place.
   bootstrap seam that used to sit in front of it — a script the pane execs,
   carrying a PATH prepend, an agent HOME pointed inside `$NOMAD_SECRETS_DIR`
   and a staged-auth install — no longer exists: the prebaked image owns the
-  agent toolchain and the pack stays agent-agnostic (cr-3vvnb5).
+  agent toolchain and the pack stays agent-agnostic.
   The session task's own command (`jobspec.go`'s
-  `sessionSupervisorScript`, NRT-P2-06.1) is a real long-lived
+  `sessionSupervisorScript`) is a real long-lived
   trap-and-loop that keeps the alloc alive until stop — no longer the
   `/bin/true` placeholder that used to exit immediately on a real client —
   but it carries no agent itself; the agent is still launched afterward as
   a separate detached tmux-client command over alloc-exec.
-- `PackOverlayDirs`/`OverlayDir` merge semantics (04 §5's overlay-precedence
+- `PackOverlayDirs`/`OverlayDir` merge semantics (the overlay-precedence
   rules) — `stageConfig.Files` is this pack's own flat CopyFiles-analog
   channel; provider-side overlay resolution is not reimplemented.
 - The fuller sidecar record (dispatch-attempt counter, disputed-children
   ledger, staleness datum) — this pack's sidecar binding is scoped to
   exactly what start/stop/is-running/list-running/provision/exec/relaunch
   need. The single-flight lock concurrent same-name `start`/`provision`
-  needs (R2b-03) is a per-session `flock` on a file in the sidecar
+  needs is a per-session `flock` on a file in the sidecar
   directory rather than a sidecar-record field — it has to survive across
   provider processes, since `gc` execs this binary fresh per op (a race is
   between two OS processes, never two goroutines in one).

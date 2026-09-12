@@ -8,7 +8,7 @@ import (
 )
 
 // TestExtraSecretPEMKeyGetsPointerNotContentInEnvScript is the RED/GREEN
-// pair for cr-gdeav.6.15's staging half: attempt 8 (pack 81c159d) proved the
+// pair for the staging half: attempt 8 (pack 81c159d) proved the
 // prime typing fix live, but the box had no path to the city — no mTLS
 // identity staged at all. gc's remote client reads CA/client cert/client key
 // as FILE PATHS from GC_CITY_CA/GC_CITY_CLIENT_CERT/GC_CITY_CLIENT_KEY
@@ -54,7 +54,7 @@ func TestExtraSecretPEMKeyGetsPointerNotContentInEnvScript(t *testing.T) {
 }
 
 // TestRemoteContextStagedWhenCityNameAndURLPresent is the RED/GREEN pair for
-// cr-gdeav.6.15's context half: with GC_CITY_NAME and GC_CITY_URL on the
+// the context half: with GC_CITY_NAME and GC_CITY_URL on the
 // wire (city.toml provider env, same channel GC_CITY_URL already rides) and
 // the three mTLS *_PEM keys bridged in, the pack stages a GC_HOME whose
 // contexts.toml gc's OWN resolver reads with no flags at all

@@ -10,11 +10,10 @@ import (
 	"time"
 )
 
-// TestPrimeScriptSubmitsLikeGcsNudgeSession is the RED/GREEN pair for
-// cr-gdeav.6.14. Attempt 7 (pack bfe4378) typed the nudge as a literal paste
+// TestPrimeScriptSubmitsLikeGcsNudgeSession is the RED/GREEN pair for a
+// measured crash. Attempt 7 (pack bfe4378) typed the nudge as a literal paste
 // immediately followed by a LONE Enter the instant the ready prefix matched.
-// Reproduced live against alloc 12d0aa58 (ops/receipts/nrt-d3/
-// 2026-09-07-g3j-nudge.md §11): typed that way at the same ~200ms mark
+// Reproduced live against alloc 12d0aa58: typed that way at the same ~200ms mark
 // (inside Codex's own startup terminal-query/discard phase), the message
 // either sat drafted-but-unsubmitted or crashed Codex outright
 // ("Error: timed out discarding buffered terminal input", exit 1). gc's own
@@ -84,8 +83,8 @@ func TestPrimeScriptSubmitsLikeGcsNudgeSession(t *testing.T) {
 	}
 }
 
-// TestPrimeStatusHonorsUnconfirmedSubmit pins syncPromptedMarker's other half
-// of cr-gdeav.6.14: a detached window that pasted and submitted but never
+// TestPrimeStatusHonorsUnconfirmedSubmit pins syncPromptedMarker's other
+// half: a detached window that pasted and submitted but never
 // observed the busy indicator writes prompted_at (the keystrokes did reach
 // tmux, gc's own "handed to tmux" best-effort contract) alongside
 // status=submit_unconfirmed, and that status word - not a hardcoded
@@ -179,16 +178,17 @@ func runPaneReady(t *testing.T, fn, prefix string, fixture []byte) bool {
 }
 
 // TestPrimeReadinessRejectsLoadingFrameAcceptsLoadedFrame is the RED/GREEN
-// pair for cr-gdeav.6.16. Attempt 9 (pack db669c7) crashed again: agent.exit
-// exit=1, stderr "Error: timed out discarding buffered terminal input",
-// gc-prime/status=submit_unconfirmed, prompted_at 4s after start. Captured
-// agent.stdout (fetched live from alloc 076519d8 before it was GC'd,
-// testdata/codex-loading-not-ready.raw, trimmed to the first TUI frame) shows
-// WHY: Codex paints "› Ask Codex to do anything" in the SAME first frame as
-// "model:     loading" / "directory: loading" - the ready prefix is present
-// from the very first frame, well before the agent has actually finished
-// initializing, so a prefix-only match (every prior attempt's rule) fires
-// immediately and types into Codex's startup terminal-query/discard window.
+// pair for a third crash. Attempt 9 (pack db669c7) crashed again:
+// agent.exit exit=1, stderr "Error: timed out discarding buffered terminal
+// input", gc-prime/status=submit_unconfirmed, prompted_at 4s after start.
+// Captured agent.stdout (fetched live from alloc 076519d8 before it was
+// GC'd, testdata/codex-loading-not-ready.raw, trimmed to the first TUI
+// frame) shows WHY: Codex paints "› Ask Codex to do anything" in the SAME
+// first frame as "model: loading" / "directory: loading" - the ready prefix
+// is present from the very first frame, well before the agent has actually
+// finished initializing, so a prefix-only match (every prior attempt's
+// rule) fires immediately and types into Codex's startup
+// terminal-query/discard window.
 //
 // pane_ready() must reject that frame (prefix present, but "loading" is
 // still on screen) and accept testdata/codex-loaded-ready.raw's frame - the
@@ -204,7 +204,7 @@ func runPaneReady(t *testing.T, fn, prefix string, fixture []byte) bool {
 func TestPrimeReadinessRejectsLoadingFrameAcceptsLoadedFrame(t *testing.T) {
 	fn, ok := extractPaneReadyFunc(primeScript)
 	if !ok {
-		t.Fatal("primeScript has no pane_ready() function to extract - cr-gdeav.6.16's readiness predicate must be its own named, testable unit")
+		t.Fatal("primeScript has no pane_ready() function to extract - the readiness predicate must be its own named, testable unit")
 	}
 
 	loading, err := os.ReadFile("testdata/codex-loading-not-ready.raw")
@@ -225,8 +225,8 @@ func TestPrimeReadinessRejectsLoadingFrameAcceptsLoadedFrame(t *testing.T) {
 	}
 }
 
-// TestPrimeScriptHonorsReadyDelayAsPostReadySettle pins cr-gdeav.6.16's
-// second half: ready_delay_ms.txt (staged from cfg.ReadyDelayMs, defaulting
+// TestPrimeScriptHonorsReadyDelayAsPostReadySettle pins that readiness
+// rule's second half: ready_delay_ms.txt (staged from cfg.ReadyDelayMs, defaulting
 // to primeDefaultReadyDelayMs when the wire sends none or zero) is read and
 // applied as a settle AFTER the stability-gated readiness above, not as a
 // pre-readiness fallback the way gc's own ReadyDelayMs is used locally
@@ -259,8 +259,8 @@ func TestPrimeScriptHonorsReadyDelayAsPostReadySettle(t *testing.T) {
 // paste path, reading the staged file and deleting the buffer as it pastes.
 const primePasteCommand = "tmux paste-buffer -p -d -t main -b gc-prime-nudge"
 
-// TestPrimeScriptCarriesNudgeOffTheArgumentList is the RED/GREEN pair for
-// cr-liv6ac. The worker-local charter renders a 20,857-byte startup prompt, and
+// TestPrimeScriptCarriesNudgeOffTheArgumentList is the RED/GREEN pair for a
+// measured delivery failure. The worker-local charter renders a 20,857-byte startup prompt, and
 // tmux 3.7b refuses any single argument above ~16 KiB: `send-keys -l -- <text>`
 // died with "command too long" (rc=1) at prime.go:181, so the seat was left at
 // "Ask Codex to do anything", owned no issues, and every observer - including
@@ -338,7 +338,7 @@ func allIndexes(haystack, needle string) []int {
 }
 
 // TestTmuxArgumentCapMakesFilePasteTheOnlyNudgeDelivery encodes the bisect that
-// diagnosed cr-liv6ac, against a real tmux rather than as a comment: the
+// diagnosed it, against a real tmux rather than as a comment: the
 // literal-argument form lands a 16,000-byte nudge and is REFUSED at charter
 // size, while the load-buffer/paste-buffer pair the pack now ships delivers the
 // whole 20,858-byte payload and leaves no buffer behind.
@@ -416,7 +416,7 @@ func TestTmuxArgumentCapMakesFilePasteTheOnlyNudgeDelivery(t *testing.T) {
 		t.Fatalf("a 16000-byte send-keys argument should land on any tmux: %v (%s)", err, out)
 	}
 	if out, err := tmux("send-keys", "-t", "gc-nudge-cap", "-l", "--", nudge); err != nil {
-		t.Logf("this tmux refuses a %d-byte send-keys argument (%s) - the cr-liv6ac shape", len(nudge), strings.TrimSpace(out))
+		t.Logf("this tmux refuses a %d-byte send-keys argument (%s) - the measured shape", len(nudge), strings.TrimSpace(out))
 		if probe, rerr := os.ReadFile(capOut); rerr == nil && strings.Contains(string(probe), "TAILMARKER") {
 			t.Fatal("the refused send-keys still delivered its tail")
 		}

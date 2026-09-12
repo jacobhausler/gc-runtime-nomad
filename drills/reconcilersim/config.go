@@ -8,7 +8,7 @@ import "os"
 // straight through to the pack CLI subprocess unchanged (rewriting only
 // ADDR when TLS fronting is in play, see Driver). The GC_NOMAD_TLS_* trio
 // and GC_RUNTIME_NOMAD_BIN are new: the pack's own env contract deliberately
-// excludes TLS config (NRT-P1-04/NRT-P2-05), and the pack never needs to
+// excludes TLS config, and the pack never needs to
 // name its own binary path to itself.
 const (
 	EnvAddr       = "GC_NOMAD_ADDR"
@@ -19,8 +19,8 @@ const (
 	EnvTLSCert    = "GC_NOMAD_TLS_CERT"
 	EnvTLSKey     = "GC_NOMAD_TLS_KEY"
 	EnvRuntimeBin = "GC_RUNTIME_NOMAD_BIN"
-	// EnvAgentImage is the pack's required agent image. v1.0.7 (cr-3vvnb5.2)
-	// made it required and deleted the fallback session shape, so every
+	// EnvAgentImage is the pack's required agent image. v1.0.7 made it
+	// required and deleted the fallback session shape, so every
 	// lifecycle op now fails closed without it — including every drill. The
 	// harness supplies defaultAgentImg when the operator has not, because
 	// these scenarios run against the in-memory fake, which models no driver

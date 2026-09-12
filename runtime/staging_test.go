@@ -20,18 +20,18 @@ import (
 )
 
 // TestM3StagingReceiptWorkspaceProbe is the first half of the M3 staging
-// receipt (fnrt-a8h acceptance, R2c-07): env.workspace probe pass. It
+// receipt: env.workspace probe pass. It
 // starts a session with a stageConfig carrying two workspace files (one
 // nested), then probes the alloc over exec to confirm both actually landed
 // under WorkDir with their real content — proof the tar-over-exec-stdin
-// channel (04 §5) genuinely materializes the workspace, not a canned reply.
+// channel genuinely materializes the workspace, not a canned reply.
 //
 // The fixture is real files on THIS host and a `copy_files` entry naming
 // their directory, because that is the wire gc actually sends: gc's
 // copyEntry (internal/runtime/exec/json.go:17-20) names orchestrator-side
-// paths, never inline bodies (cr-u7b0s.40). The bodies are read here and
-// archived onto the pack's one file transport, so the probe below is
-// unchanged — same paths, same expected content.
+// paths, never inline bodies. The bodies are read here and archived onto
+// the pack's one file transport, so the probe below is unchanged — same
+// paths, same expected content.
 func TestM3StagingReceiptWorkspaceProbe(t *testing.T) {
 	l, _ := newTestLifecycle(t)
 	ctx := context.Background()
@@ -267,12 +267,11 @@ func TestParseExtraSecretKeys(t *testing.T) {
 }
 
 // TestExtraSecretKeysStagedFromProcessEnv is the GREEN half of
-// GC_NOMAD_EXTRA_SECRET_KEYS (cr-u4plc.2): a key named in that list and
-// present in this process's own env (standing in for the supervisor's
-// ~/.gc/secrets.env passthrough, which gc's own city.toml provider env map
-// has no way to interpolate) lands in NOMAD_SECRETS_DIR exactly like an
-// explicit cfg.Env secret would, even though the caller's stageConfig never
-// mentioned it.
+// GC_NOMAD_EXTRA_SECRET_KEYS: a key named in that list and present in this
+// process's own env (standing in for the supervisor's ~/.gc/secrets.env
+// passthrough, which gc's own city.toml provider env map has no way to
+// interpolate) lands in NOMAD_SECRETS_DIR exactly like an explicit cfg.Env
+// secret would, even though the caller's stageConfig never mentioned it.
 func TestExtraSecretKeysStagedFromProcessEnv(t *testing.T) {
 	const secretValue = "codex-auth-json-bytes-do-not-leak"
 	t.Setenv("CODEX_AUTH_JSON", secretValue)
@@ -477,9 +476,8 @@ func TestExtraSecretKeysNoCanaryLeak(t *testing.T) {
 
 // TestM3StagingReceiptNoCanaryLeak is the second half of the M3 staging
 // receipt: zero planted-canary hits across job specs, request logs, stderr,
-// and sidecar files (R2c-07's single-receipt claim; the rollback trigger is
-// 05 §6/R3c-06 — "secrets found in job spec, argv, logs, or provider error
-// text"). It plants a canary value as a non-argvSafe env var (so it must
+// and sidecar files; the rollback trigger is "secrets found in job spec,
+// argv, logs, or provider error text". It plants a canary value as a non-argvSafe env var (so it must
 // route to the secrets dir, never argv/job-spec/sidecar), stages it, and
 // then scans every channel the acceptance criteria name.
 func TestM3StagingReceiptNoCanaryLeak(t *testing.T) {
@@ -506,7 +504,7 @@ func TestM3StagingReceiptNoCanaryLeak(t *testing.T) {
 	cfg := stageConfig{
 		WorkDir: "workspace",
 		// The Docker task runs the command gc rendered, so the wire has to carry
-		// one now that the placeholder pane is deleted (cr-3vvnb5.2).
+		// one now that the placeholder pane is deleted.
 		Command: "/bin/sh",
 		Env: map[string]string{
 			"GC_SESSION":     "safe-value-not-a-secret",
@@ -528,14 +526,14 @@ func TestM3StagingReceiptNoCanaryLeak(t *testing.T) {
 		t.Fatalf("staged secret did not land in NOMAD_SECRETS_DIR: %s", out)
 	}
 
-	// Channel 1: job specs / request logs — every Nomad API request this
-	// pack issued (job register carrying parentJobSpec, dispatch carrying
-	// Meta, allocation/job reads). The alloc-exec WebSocket the secret
-	// bytes actually traverse to reach the secrets dir does NOT go through
-	// this HTTP transport (dialExecWS hijacks a raw TCP connection), so a
-	// clean scan here specifically proves secrets never entered the
-	// job-spec/API-request surface — the R9 residual (05 §7) is the WS
-	// delivery channel itself, not this one.
+	// Channel 1: job specs / request logs — every Nomad API request this pack
+	// issued (job register carrying parentJobSpec, dispatch carrying Meta,
+	// allocation/job reads). The alloc-exec WebSocket the secret bytes
+	// actually traverse to reach the secrets dir does NOT go through this HTTP
+	// transport (dialExecWS hijacks a raw TCP connection), so a clean scan
+	// here specifically proves secrets never entered the job-spec/API-request
+	// surface — the R9 residual is the WS delivery channel itself, not this
+	// one.
 	if dump := rec.dump(); strings.Contains(dump, canary) {
 		t.Fatalf("canary leaked into a Nomad API request (job spec/dispatch payload):\n%s", dump)
 	}
@@ -610,7 +608,7 @@ func TestM3StagingReceiptNoCanaryLeak(t *testing.T) {
 
 // TestBuildLaunchCommandClassifiesEnv is a focused unit check on
 // envArgvSafe's consumer: an argvSafe key rides the launch command's argv,
-// anything else (credential-shaped, per E1a §4.5) never does — deterministic
+// anything else (credential-shaped) never does — deterministic
 // and independent of exec/tmux, unlike the end-to-end canary receipt above.
 func TestBuildLaunchCommandClassifiesEnv(t *testing.T) {
 	cmd := buildLaunchCommandForPane(map[string]string{
@@ -722,11 +720,11 @@ func TestBuildLaunchCommandSourcesStagedEnvironment(t *testing.T) {
 	}
 }
 
-// TestLaunchCommandPaneSourcesStagedEnv is the RED half of cr-gdeav.6.8: tmux
+// TestLaunchCommandPaneSourcesStagedEnv is the RED half of a measured
+// defect: tmux
 // gives a pane the SERVER's environment and never the CLIENT's, so sourcing
 // the staged env.sh in the tmux client (launchEnvScript) delivers nothing to
-// the agent — measured on tmux 3.7b for both verbs gc uses
-// (ops/receipts/nrt-d3/2026-09-06-g3-attempt2-forensics.md §(2)). The staged
+// the agent — measured on tmux 3.7b for both verbs gc uses. The staged
 // environment must therefore be sourced inside the PANE, on both the
 // new-session and the respawn-pane form, or a session launched over gc's
 // separable transport starts an agent with no GC_CITY_URL, no session
@@ -785,7 +783,7 @@ func (r *requestRecorder) dump() string {
 	return strings.Join(r.logs, "\n---\n")
 }
 
-// TestLaunchCommandPaneCdToStagedWorkDir is deliverable 3 of cr-gdeav.6.10:
+// TestLaunchCommandPaneCdToStagedWorkDir pins the pane's working directory:
 // attempt 3's agent ran in "/" because nothing ever cd'd the pane, and gc's
 // cfg.WorkDir is a supervisor-host path that usually does not exist inside the
 // alloc. The pane must therefore try the staged work dir first and fall back to

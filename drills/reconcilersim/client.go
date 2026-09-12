@@ -1,6 +1,5 @@
-// Package reconcilersim is the L4 drill harness (NRT-P2-06a, 08 §1.1
-// fixture): "the L4 harness = pack CLI + scripted reconciler-sim driver,
-// standing in for GC until L5". It drives the already-shipped
+// Package reconcilersim is the L4 drill harness: "the L4 harness = pack
+// CLI + scripted reconciler-sim driver, standing in for GC until L5". It drives the already-shipped
 // gc-runtime-nomad binary as a subprocess for every lifecycle op — exactly
 // how the real GC execs it — and separately reads the Nomad API directly
 // (this file) for the observations no RPP op exposes: raw allocation
@@ -11,10 +10,10 @@
 //
 // Offline-testable against fakenomad (driver_test.go); in L4 mode this
 // package's client talks TLS directly to the real T1 lab cluster using the
-// NRT-P2-02 mTLS baseline (client cert/key + CA, GC_NOMAD_TLS_* env,
-// config.go) — a capability deliberately NOT added to the production
-// ../runtime/client.go (NRT-P1-04/NRT-P2-05: that binary's HTTP client
-// stays zero-TLS-config by design). The pack CLI subprocess itself still
+// mTLS baseline (client cert/key + CA, GC_NOMAD_TLS_* env, config.go) — a
+// capability deliberately NOT added to the production
+// ../runtime/client.go (that binary's HTTP client stays zero-TLS-config by
+// design). The pack CLI subprocess itself still
 // has no TLS support, so L4 mode fronts it with a local mTLS-terminating
 // reverse proxy (tlsproxy.go) instead of reaching into the pack.
 package reconcilersim
@@ -47,7 +46,7 @@ type Client struct {
 	http      *http.Client
 }
 
-// TLSConfig names the three NRT-P2-02 mTLS materials (CA cert, client cert,
+// TLSConfig names the three mTLS materials (CA cert, client cert,
 // client key — all file paths) a real T1 lab connection needs. The zero
 // value means "no TLS" (fakenomad's plain-HTTP L1/L2 fixture).
 type TLSConfig struct {
@@ -94,7 +93,7 @@ func NewClient(addr, token, namespace string, tlsCfg TLSConfig) (*Client, error)
 }
 
 // tlsTransport builds an http.Transport presenting the client cert/key and
-// trusting only the given CA — the NRT-P2-02 baseline's mTLS shape
+// trusting only the given CA — the baseline's mTLS shape
 // (verify_server_hostname + verify_https_client both true).
 func tlsTransport(cfg TLSConfig) (*http.Transport, error) {
 	if cfg.CACertPath == "" || cfg.CertPath == "" || cfg.KeyPath == "" {
@@ -136,7 +135,7 @@ func (c *Client) nsQuery() url.Values {
 // AllocRecord is the subset of a Nomad allocation classification needs:
 // status pair plus the response index it was observed at, so a caller can
 // order two reads without wall-clock timing (matches ../runtime/client.go's
-// index-based consistency model, e2a-blocking-queries).
+// index-based consistency model).
 type AllocRecord struct {
 	ID            string
 	ClientStatus  string
@@ -145,8 +144,8 @@ type AllocRecord struct {
 }
 
 // ChildJob is one child-of-parent job, decoded the same way
-// ../runtime/client.go's listChildJobs does (04 §2.1 rule 2/3: enumerate
-// children, don't trust the sidecar as the existence source).
+// ../runtime/client.go's listChildJobs does (enumerate children, don't
+// trust the sidecar as the existence source).
 type ChildJob struct {
 	ID       string
 	Status   string

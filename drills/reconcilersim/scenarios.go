@@ -11,14 +11,14 @@ import (
 // flips false. No fault is injected — it exists to prove the harness's own
 // plumbing (pack CLI subprocess, optional mTLS front proxy, observer
 // client) actually reaches the target end to end, offline against
-// fakenomad or live against the L4 lab. It is also the worked example the
-// 08 §1.1 per-drill beads (fnrt-o37.3 .. fnrt-o37.14) are expected to
-// follow when scripting their own scenario: a short []Step slice built the
-// same way, run through RunScript.
+// fakenomad or live against the L4 lab. It is also the worked example
+// every other drill is expected to follow when scripting its own
+// scenario: a short []Step slice built the same way, run through
+// RunScript.
 func LifecycleRoundtripSteps(session, parentJob string) []Step {
 	// The dispatched child job ID is real Nomad's own generated ID (e.g.
 	// "<parent>/dispatch-<ts>-<rand>") — never derivable from the session
-	// name (e2a-job-id-charset-gap, ../runtime/client.go's childJob
+	// name (see ../runtime/client.go's childJob
 	// comment) — so this looks it up by its gc_session Meta key, exactly
 	// how the pack's own list-running op resolves identity.
 	childJobIDFor := func(ctx context.Context, d *Driver) (string, error) {

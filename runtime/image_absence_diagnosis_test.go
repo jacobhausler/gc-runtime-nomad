@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-// T6 (cr-kkcvmd). Measured live 2026-09-11 with GC_NOMAD_AGENT_IMAGE pointed at a
-// tag that exists nowhere: Nomad reported
+// T6. Measured live 2026-09-11 with GC_NOMAD_AGENT_IMAGE pointed at a tag
+// that exists nowhere: Nomad reported
 //
 //	Failed to pull `gc-agent:...`: Error response from daemon: pull access denied
 //	for gc-agent, repository does not exist

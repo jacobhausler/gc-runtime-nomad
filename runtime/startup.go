@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// Startup prompt delivery for a separable RPP session (cr-gdeav.6.10).
+// Startup prompt delivery for a separable RPP session.
 //
 // gc routes a rendered startup prompt three ways (cmd/gc/prompt_delivery.go:35-57):
 // argv suffix (`prompt_mode=arg`, the default), argv suffix + flag
@@ -22,8 +22,7 @@ import (
 // internal/runtime/acp/acp.go:366-367). docs/reference/exec-session-provider.md:194-197
 // puts that duty on the adapter ("handle this in `start` … or leave it to the
 // separate `nudge` operation"). Nothing here did either, so an ordinary
-// nomad-canary launched a live Codex that sat at its prompt forever
-// (cr-gdeav.6.9 receipt §1).
+// nomad-canary launched a live Codex that sat at its prompt forever.
 //
 // The native gc mechanism is therefore already sufficient — `prompt_mode =
 // "none"` plus `ready_prompt_prefix` on the provider, both of which ride the
@@ -58,7 +57,7 @@ const (
 	promptStatusNudgeFailed = "nudge_failed"
 
 	// promptStatusSubmitUnconfirmed marks a detached prime window (prime.go)
-	// that pasted the nudge and sent its submit sequence (cr-gdeav.6.14) but
+	// that pasted the nudge and sent its submit sequence but
 	// never observed the agent's busy indicator within the confirm budget.
 	// gc's own local nudge path treats this identically — a stderr warning,
 	// not a start failure (cmd/gc's ErrNudgeSubmitUnconfirmed handling) —
@@ -323,8 +322,8 @@ func stripPromptBoxBorder(s string) string {
 // runs) is already the rendered screen: plain text, one row per line, and this
 // function degenerates to a trim. The raw agent stream the bootstrap captures
 // to agent.stdout is the TUI's repaint bytes instead - escape-heavy, and laid
-// out by cursor-positioning sequences rather than newlines (the cr-gdeav.6.11
-// attempt-4 capture holds a whole 30-row screen in 9 newline-separated
+// out by cursor-positioning sequences rather than newlines (one captured
+// attempt-4 screen holds a whole 30-row screen in 9 newline-separated
 // chunks). Matching gc's rule against raw chunks would decide readiness on
 // whatever byte happened to be first.
 //

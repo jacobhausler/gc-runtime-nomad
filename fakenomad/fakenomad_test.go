@@ -285,9 +285,9 @@ func TestDeregisterWithoutPurge(t *testing.T) {
 }
 
 // TestTaskLifetimeReflectsRealProcess drives fakenomad's task-lifetime
-// modeling (NRT-P2-06.1): a dispatched job's task Config command runs as a
-// real subprocess, and the alloc's ClientStatus tracks it — "running" while
-// it is alive, terminal once it exits. This is what makes the /bin/true
+// modeling: a dispatched job's task Config command runs as a real
+// subprocess, and the alloc's ClientStatus tracks it — "running" while it
+// is alive, terminal once it exits. This is what makes the /bin/true
 // placeholder bug (a task command that exits immediately, driving the alloc
 // terminal before launch's alloc-exec call could ever reach it) visible to
 // this offline suite at all: a job registered with no task Config (every
@@ -367,7 +367,7 @@ func TestTaskLifetimeReflectsRealProcess(t *testing.T) {
 	}
 }
 
-// TestSideTaskCrashLeavesAllocRunning drives fnrt-t4l.13's N-task group
+// TestSideTaskCrashLeavesAllocRunning drives the N-task group
 // modeling and its failure-injection scope line directly: a second
 // (non-main) task in the group — standing in for the log-shipper sidecar —
 // fails, and the alloc's ClientStatus must stay "running" the whole time the
@@ -732,11 +732,10 @@ func TestClientFSCat(t *testing.T) {
 }
 
 // TestListJobsChildrenOfParent drives the `GET /v1/jobs` children-of-parent
-// enumeration a list-running cluster-recovery path reads (04 §2.1 rule
-// 2/3): Meta is present only with `?meta=true`, ParentID identifies the
-// dispatching parent, and Status reflects whether the child's allocation is
-// still non-terminal ("running") or driven terminal by a non-purge
-// deregister ("dead").
+// enumeration a list-running cluster-recovery path reads: Meta is present
+// only with `?meta=true`, ParentID identifies the dispatching parent, and
+// Status reflects whether the child's allocation is still non-terminal
+// ("running") or driven terminal by a non-purge deregister ("dead").
 func TestListJobsChildrenOfParent(t *testing.T) {
 	srv := NewServer()
 	defer srv.Close()
@@ -818,8 +817,8 @@ func TestListJobsChildrenOfParent(t *testing.T) {
 	}
 }
 
-// TestRegisterJobCarriesNamespaceAndNodePool is a regression test for
-// NRT-P2-05 drift row 3: a registered job's Namespace and NodePool must
+// TestRegisterJobCarriesNamespaceAndNodePool is a regression test for a
+// drift the fake once had: a registered job's Namespace and NodePool must
 // round-trip through both a direct job read and the dispatched-child record
 // a parameterized parent hands off, since a caller that never sets NodePool
 // must default to "" (Nomad's own "default" pool) rather than dropping it

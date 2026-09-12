@@ -1,16 +1,17 @@
 package main
 
-// Contract tests for the docker-driver (prebaked gc build-image) session shape:
-// the launch weld and the runtime-secret mount contract (cr-hcgaxt).
+// Contract tests for the docker-driver (prebaked gc build-image) session
+// shape: the launch weld and the runtime-secret mount contract.
 //
 // There is one session shape and one pane body: the docker task's pane runs
-// gc's OWN rendered command (F1 shipped the gc half; this is the pack half).
-// The pack's deployment-bootstrap seam is deleted (cr-3vvnb5.3), so there is no
-// second launch surface to drift into one another, and a box with no rendered
-// command fails closed instead of reporting a launch that starts no agent.
-// Runtime secrets are file-delivered into the box's own $NOMAD_SECRETS_DIR in
-// both shapes; the image shape resolves that path from the box rather than
-// assuming the exec driver's constant also names a container mount.
+// gc's OWN rendered command (F1 shipped the gc half; this is the pack
+// half). The pack's deployment-bootstrap seam is deleted, so there is no
+// second launch surface to drift into one another, and a box with no
+// rendered command fails closed instead of reporting a launch that starts
+// no agent. Runtime secrets are file-delivered into the box's own
+// $NOMAD_SECRETS_DIR in both shapes; the image shape resolves that path
+// from the box rather than assuming the exec driver's constant also names a
+// container mount.
 
 import (
 	"context"

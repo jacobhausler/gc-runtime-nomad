@@ -1,9 +1,6 @@
 ---
 kind: front-door
 version: 1.0
-ratified-by: pending
-ratified-date: pending
-ledger-bead-id: to-be-assigned
 owner-unit: runtime-nomad
 ---
 
@@ -13,7 +10,7 @@ owner-unit: runtime-nomad
 
 - `runtime-nomad` is a Gas City runtime pack: it ships the `gc-runtime-nomad` executable (not a service) and speaks Runtime Provider Protocol v0 (RPP v0) against a Nomad cluster.
 - Registry name: `jacobhausler/runtime-nomad` (the `runtime-nomad/` pack in the `jacobhausler/gascity-packs` fork of `gastownhall/gascity-packs`).
-- Co-maintainers: Jacob Hausler (fork owner) and Fable (Westlands executive).
+- Co-maintainers: Jacob Hausler (fork owner) and atbrace.
 - Scope: one session = one child job under a single parameterized parent job; lifecycle `provision`/launch/`exec`/`stop` plus `is-running`/`list-running`, all over the Nomad API.
 
 - Compatibility and supported matrix: `COMPATIBILITY.md` (gc lineage, Nomad, client arch/OS, agent image contract, build toolchain, known limitations). Like the config table, it lives in one place and is not copied here.

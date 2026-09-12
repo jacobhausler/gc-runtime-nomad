@@ -5,7 +5,7 @@ import "time"
 // DeathClass is the verdict a drill assigns after killing something and
 // re-observing: whether the alloc (the "box") itself went non-running, or
 // only the agent process inside it died while the alloc stayed running.
-// This is the 08 §1.1 "in-box agent kill" vs "box kill" distinction — the
+// This is the "in-box agent kill" vs "box kill" distinction — the
 // harness's job is telling the two apart from observations alone, the same
 // way a reconciler would have to.
 type DeathClass int
@@ -18,7 +18,7 @@ const (
 	DeathUnknown DeathClass = iota
 	// DeathAgent is an in-box agent kill: the alloc's ClientStatus stayed
 	// "running" (the box/tmux-server/task-main survived) while the RPP
-	// is-running probe reports false — 04 §3's provision-row distinction
+	// is-running probe reports false — the provision-row distinction
 	// between "alloc alive" and "agent alive".
 	DeathAgent
 	// DeathBox is a box kill: the alloc's ClientStatus itself went
@@ -39,7 +39,7 @@ func (d DeathClass) String() string {
 }
 
 // runningAllocStatuses are Nomad ClientStatus values that count as the
-// alloc/box still being alive, per 04 §4's fencing rules ("pending" covers
+// alloc/box still being alive, per the fencing rules ("pending" covers
 // the placement window before the first status lands).
 var runningAllocStatuses = map[string]bool{
 	"pending": true,
@@ -69,7 +69,7 @@ func ClassifyDeath(before, after AllocRecord, isRunningAfter bool) DeathClass {
 	return DeathUnknown
 }
 
-// HonestyVerdict is the result of checking the 04 §6 observation-honesty
+// HonestyVerdict is the result of checking the observation-honesty
 // split during a fault window: is-running/list-running must never flip to
 // a false "not running"/empty answer on mere API unavailability — they
 // answer last-known-good instead (NRT-OBS-001..004).
@@ -112,7 +112,7 @@ func StalenessAge(lastGoodObservation, now time.Time) time.Duration {
 // CountReplacementAllocs returns how many allocations beyond the first ever
 // existed for a job — the density/box-kill/client-agent-kill/drain drills'
 // "zero replacement allocs" pass criterion (Nomad self-healing must stay
-// fenced off, 04 §4) is CountReplacementAllocs(allocs) == 0. allocs should
+// fenced off) is CountReplacementAllocs(allocs) == 0. allocs should
 // be every allocation ListAllocsForJob ever returned for the job, not just
 // the current snapshot.
 func CountReplacementAllocs(allocs []AllocRecord) int {
@@ -123,7 +123,7 @@ func CountReplacementAllocs(allocs []AllocRecord) int {
 }
 
 // EgressOrdering is the GC-vs-egress race drill's pass criterion: the
-// stop-path transcript/evidence copy (04 §3 stop row) must complete before
+// stop-path transcript/evidence copy (the stop row) must complete before
 // the job is confirmed deregistered — never the other way around, and never
 // silently skipped (an evidence_lost tombstone marker is an accepted
 // outcome; silent loss is not).
@@ -137,7 +137,7 @@ type EgressOrdering struct {
 // Ordered reports whether the observed ordering satisfies the drill: either
 // egress completed strictly before deregister was observed, or the
 // evidence_lost marker was written (the priced, non-silent fallback path,
-// R1c-05). Anything else — deregister observed with egress neither
+// the ordering rule). Anything else — deregister observed with egress neither
 // completed nor marked lost — is a silent-loss failure.
 func (o EgressOrdering) Ordered() bool {
 	if o.EvidenceLostMarked {

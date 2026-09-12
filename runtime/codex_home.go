@@ -1,27 +1,26 @@
 package main
 
-// Image-mode Codex home (cr-usnvaw).
+// Image-mode Codex home.
 //
 // Why this file exists. A box launched from GC_NOMAD_AGENT_IMAGE takes its
 // agent toolchain from the image, and there is no deployment-bootstrap seam
 // left to consult: the pack's former GC_NOMAD_AGENT_LAUNCH_SCRIPT is deleted
-// (cr-3vvnb5.3) because the image owns the toolchain and the session shape
+// because the image owns the toolchain and the session shape
 // mounts no artifact volume for a bootstrap to live on (main.go's
-// envAgentImage contract, welded in cr-hcgaxt). The exec shape that bootstrap
+// envAgentImage contract). The exec shape that bootstrap
 // served got its agent HOME, provider config and auth file from exactly it
 // (ops/nomad/agent-launch.sh: export CODEX_HOME="$NOMAD_SECRETS_DIR/codex-home",
 // install auth.json, write config.toml). The native image shape had no
-// equivalent, so the box inherited the orchestrator's CODEX_HOME — the city
-// pins it to a Mac path in its provider env (city.toml:82) — and Codex died at
+// equivalent, so the box inherited the orchestrator's CODEX_HOME — a city
+// pins it to a host path in its provider env — and Codex died at
 // launch: "Error finding codex home: CODEX_HOME points to
-// /Users/home/.codex, but that path does not exist". The pane's command died,
-// its tmux server exited with it, and gc reported only "tmux exited 1" (proof
-// runs 5-7, ops/receipts/nrt-d3/2026-09-10-disposable-proof-5-7-image-mode.md).
+// <the orchestrator's home>, but that path does not exist". The pane's command
+// died, its tmux server exited with it, and gc reported only "tmux exited 1".
 //
 // What it does, and why this shape. stage() already owns the only channel that
 // reaches the box: the staged secret files plus the sourceable env.sh that
 // paneStagedEnvPrelude sources before the agent runs. So the Codex home is
-// staged the same way the gc remote-context bridge (cr-gdeav.6.15) stages its
+// staged the same way the gc remote-context bridge stages its
 // GC_HOME: render the file under $NOMAD_SECRETS_DIR, then export the variable
 // that names it dynamically, so the box's own Nomad-provided mount point is
 // what lands in the environment. CODEX_HOME is exported after every staged
@@ -32,8 +31,8 @@ package main
 //
 //   - GC_NOMAD_AGENT_LAUNCH_SCRIPT: the pack's former seam, and the code that
 //     used to carry this recipe. It was already ignored once GC_NOMAD_AGENT_IMAGE
-//     was set — there is no bootstrap volume in the image shape — and
-//     cr-3vvnb5.3 deletes it.
+//     was set — there is no bootstrap volume in the image shape — and it has
+//     since been deleted.
 //   - gc build-image baking a Codex home into the image: gc's toolchain, not
 //     this pack, and the owner ruled this item pack-only ("no launcher, no
 //     per-seat writer").

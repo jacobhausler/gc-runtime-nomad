@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build gc-runtime-nomad and its in-memory fake Nomad API server, then run
 # the Gas City RPP conformance suite against the binary with no live Nomad
-# cluster or network. This is the pack's CI gate (NRT-P1-04): a green run
+# cluster or network. This is the pack's CI gate: a green run
 # proves the pack-shipped runtime satisfies the Runtime Provider Protocol
 # independently of the gascity codebase.
 #
@@ -35,7 +35,7 @@ fi
 # reaches the caller is the pack's informational "Meta binding recovery not
 # used" decision log (runtime/ops.go liveChild -> logDecision) -- a line that
 # also prints in a GREEN run and reads like a binding-recovery bug when it is
-# not one. cr-fslju: that is exactly how a missing tmux was misdiagnosed as
+# not one. That is exactly how a missing tmux was misdiagnosed as
 # Remediate H failing on Linux while the identical ladder passed on Darwin.
 if ! command -v tmux >/dev/null 2>&1; then
   echo "conformance: tmux is required (the pack's start runs 'tmux new-session -d -s main' in the box); install it, e.g. apt-get install -y tmux" >&2
@@ -76,6 +76,19 @@ export GC_NOMAD_ADDR="$url"
 export GC_NOMAD_TOKEN=""
 export GC_NOMAD_NAMESPACE="default"
 export GC_NOMAD_SIDECAR_DIR="$sidecar_dir"
+# The agent image is REQUIRED by start: the session task is a docker task and
+# there is no other session shape to fall back to. Nothing here pulls it — the
+# fake Nomad API records the jobspec and never contacts a registry — so a
+# placeholder is the honest value for an offline protocol ladder, and naming it
+# is what lets this suite run on a clean machine with nothing configured.
+#
+# Its absence was the pack's one "known failure", and it was invisible for a
+# different reason worth recording: the capability-gate opt-out warning printed
+# to stderr first, and the harness reports the FIRST stderr line as the reason
+# start failed. So the ladder blamed the opt-out — a line that also prints on a
+# green run — while the real cause sat underneath it. Nobody should be told
+# which failures are expected; this one was not expected, it was mislabelled.
+export GC_NOMAD_AGENT_IMAGE="${GC_NOMAD_AGENT_IMAGE:-gc-runtime-nomad-conformance-placeholder:0}"
 
 "$bindir/gc-runtime-nomad" check
 
@@ -85,32 +98,44 @@ echo "conformance: gc runtime check"
 echo "conformance: gc runtime conformance"
 "$gc_bin" runtime conformance "$bindir/gc-runtime-nomad"
 
-# Provision/start retry idempotency (fnrt-t4l.46) — driven through the
+# Provision/start retry idempotency — driven through the
 # binary's own wire, not the Go ops layer, because the failure this rung
 # guards was a controller re-driving the CLI verb every tick: a provision
 # whose launch was never confirmed left a live, unlaunched box, and every
 # subsequent provision was rejected with "already exists" (61 of them in
-# DF-03) instead of finishing the job. Provision must adopt the box it
+# the incident that prompted this rung) instead of finishing the job.
+# Provision must adopt the box it
 # already made, start must resume into it, and neither may mint a second
 # child.
-echo "conformance: provision/start retry idempotency (fnrt-t4l.46)"
+echo "conformance: provision/start retry idempotency"
 retry_session="gc-rpp-retry-$$"
+# start needs gc's rendered launch command on the wire. This rung drives the
+# CLI directly rather than through gc's conformance harness, so nothing
+# supplies one — and in image mode the pack refuses rather than substituting a
+# bootstrap, which is correct: a prebaked image owns its own toolchain and the
+# pack has no business inventing an argv for it.
+#
+# The rung predates image mode and fed /dev/null, so it exercised the legacy
+# exec shape. Feeding a minimal payload is what keeps it testing retry
+# idempotency instead of testing the absence of a launch command.
+retry_wire='{"command":"sleep 300"}'
+
 "$bindir/gc-runtime-nomad" provision "$retry_session" </dev/null
 "$bindir/gc-runtime-nomad" provision "$retry_session" </dev/null
 if [ "$("$bindir/gc-runtime-nomad" is-running "$retry_session")" != "false" ]; then
   echo "conformance: re-provision must not launch the agent" >&2
   exit 1
 fi
-"$bindir/gc-runtime-nomad" start "$retry_session" </dev/null
+printf '%s' "$retry_wire" | "$bindir/gc-runtime-nomad" start "$retry_session"
 if [ "$("$bindir/gc-runtime-nomad" is-running "$retry_session")" != "true" ]; then
   echo "conformance: start after provision must resume into the provisioned box" >&2
   exit 1
 fi
 # A launched session is a genuine duplicate, not a retry: both verbs must
-# still reject it with the 04 §6 wire-contract phrase gc reads as
+# still reject it with the wire-contract phrase gc reads as
 # ErrSessionExists.
 for verb in start provision; do
-  if err="$("$bindir/gc-runtime-nomad" "$verb" "$retry_session" </dev/null 2>&1)"; then
+  if err="$(printf '%s' "$retry_wire" | "$bindir/gc-runtime-nomad" "$verb" "$retry_session" 2>&1)"; then
     echo "conformance: $verb on a launched session succeeded; want an already-exists rejection" >&2
     exit 1
   fi
@@ -122,5 +147,5 @@ done
 "$bindir/gc-runtime-nomad" stop "$retry_session"
 # Machine-readable rung result. This is the LAST line the ladder writes, and
 # receipt.sh derives the retry_idempotency row from it: the rung runs after gc
-# has printed both summaries, so the summaries cannot report it (cr-u7b0s.48).
+# has printed both summaries, so the summaries cannot report it.
 echo "retry idempotency: 1 passed, 0 failed, 0 skipped"

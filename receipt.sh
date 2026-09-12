@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# Assemble the phase-1 conformance receipt (NRT-P1-90): runs the full
+# Assemble the phase-1 conformance receipt: runs the full
 # offline ladder in one hermetic pass — no live Nomad cluster or network
 # required — and writes a pass/fail-by-item result to
 # CONFORMANCE-RECEIPT.md, linked to the commit AND the gc pin that ran it.
 #
-# Ladder items (08 §1 pack-tier conformance standard):
+# Ladder items:
 #   check              gc runtime check       (RPP handshake + lifecycle ops)
 #   golden suite       gc runtime conformance  (RPP-* golden requirements)
-#   retry idempotency  provision/start re-drive rung (fnrt-t4l.46)
+#   retry idempotency  provision/start re-drive rung
 #   env probes         TestM3StagingReceiptWorkspaceProbe (env.workspace)
 #   L0-L2              go vet + go test, runtime and fakenomad modules
 #   secrets-grep       TestM3StagingReceiptNoCanaryLeak (zero planted-canary hits)
 #   provenance         the gc identity the rows were produced by
 #
-# THE RECEIPT FAILS CLOSED (cr-u7b0s.48). Every rung's own exit status gates
+# THE RECEIPT FAILS CLOSED. Every rung's own exit status gates
 # this script's exit status, including conformance.sh's: the ladder's last rung
 # runs *after* gc has printed both greppable summaries, so deriving rows from
 # the summaries alone let a red rung leave a green receipt on disk. The rows
@@ -21,7 +21,7 @@
 #
 # Machine-readable mode: `./receipt.sh --json-stdout` writes the result as one
 # JSON object on stdout and puts every human line on stderr, so a seat driving
-# this through ops/bin/nomad-run — which has no artifact-return flag, only a
+# this through a remote-build wrapper — one with no artifact-return flag, only a
 # captured task stream — can capture the receipt and commit it as
 # CONFORMANCE-RECEIPT.json. Field contract: pack_commit (40-hex), gc_commit,
 # gc_sha256 (64-hex), and one {passed,failed,skipped,status} row per ladder
@@ -302,7 +302,7 @@ done
 
 out="$here/CONFORMANCE-RECEIPT.md"
 {
-  echo "# Phase-1 conformance receipt (NRT-P1-90)"
+  echo "# Phase-1 conformance receipt"
   echo
   echo "Commit: \`$commit\`"
   echo "gc: \`${gc_path:-unresolved}\` — commit \`${gc_commit:-unknown}\`, version \`${gc_version:-unknown}\`, sha256 \`${gc_sha256:-unknown}\`"

@@ -10,25 +10,25 @@ import (
 )
 
 // imageModeProviderEnv is the provider environment as the estate stages it
-// today (city.toml's provider env plus the harness scratch dirs it runs under):
-// a seat description wrapped in the orchestrator's own filesystem. Proof run 11
-// measured this exact shape inside a live box - the box's exec session had the
-// image's PATH with /opt/codex/bin/current/codex present, and after the pane
-// sourced env.sh, `command -v codex` was MISSING (cr-jr2kw7).
+// today (city.toml's provider env plus the harness scratch dirs it runs
+// under): a seat description wrapped in the orchestrator's own filesystem.
+// Proof run 11 measured this exact shape inside a live box - the box's exec
+// session had the image's PATH with /opt/codex/bin/current/codex present,
+// and after the pane sourced env.sh, `command -v codex` was MISSING.
 func imageModeProviderEnv() map[string]string {
 	return map[string]string{
-		pathEnvName:       "/private/tmp/gctc-42/toolchain:/Users/home/scratch/p62/bin:/Users/home/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-		homeEnvName:       "/Users/home",
+		pathEnvName:       "/private/tmp/gctc-42/toolchain:/home/orch/scratch/p62/bin:/home/orch/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+		homeEnvName:       "/home/orch",
 		tmpEnvName:        "/tmp",
 		tempEnvName:       "/tmp",
 		tmpdirEnvName:     "/var/folders/zz/zyxvpxvq6722/T/",
-		"XDG_CONFIG_HOME": "/Users/home/.config",
-		"XDG_CACHE_HOME":  "/Users/home/.cache",
-		gcHomeEnvName:     "/Users/home/.gc",
-		codexHomeEnvName:  "/Users/home/.codex",
+		"XDG_CONFIG_HOME": "/home/orch/.config",
+		"XDG_CACHE_HOME":  "/home/orch/.cache",
+		gcHomeEnvName:     "/home/orch/.gc",
+		codexHomeEnvName:  "/home/orch/.codex",
 		// A seat value that names the orchestrator's HOME without naming the
 		// key: the class rule, not a key list, is what has to catch this.
-		"GC_WRAPPED_BIN": "/Users/home/scratch/p62/bin/codex",
+		"GC_WRAPPED_BIN": "/home/orch/scratch/p62/bin/codex",
 		// What the seat actually needs: no paths at all.
 		"GC_SESSION":              "image-lane",
 		"TERM":                    "xterm-256color",
@@ -41,9 +41,9 @@ func imageModeProviderEnv() map[string]string {
 	}
 }
 
-// TestImageModeEnvScriptDropsOrchestratorFilesystem is the RED/GREEN pair for
-// cr-jr2kw7: an image-mode box must source an env.sh that leaves its own
-// filesystem alone. RED as measured live (env.sh:76 exported the orchestrator's
+// TestImageModeEnvScriptDropsOrchestratorFilesystem is the RED/GREEN pair
+// for a measured defect: an image-mode box must source an env.sh that
+// leaves its own filesystem alone. RED as measured live (env.sh:76 exported the orchestrator's
 // PATH, so the pane could not find codex, died, and took its tmux server with
 // it); GREEN here is that the sourced PATH is still the box's and its shell is
 // still reachable, while the seat's non-path values crossed unchanged.
@@ -61,7 +61,7 @@ func TestImageModeEnvScriptDropsOrchestratorFilesystem(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read env.sh: %v", err)
 	}
-	for _, leak := range []string{"/Users/home", "/private/tmp/gctc", "/var/folders", "/opt/homebrew"} {
+	for _, leak := range []string{"/home/orch", "/private/tmp/gctc", "/var/folders", "/opt/homebrew"} {
 		if strings.Contains(envSh, leak) {
 			t.Fatalf("env.sh carries the orchestrator path %q: %s", leak, envSh)
 		}
@@ -84,7 +84,7 @@ func TestImageModeEnvScriptDropsOrchestratorFilesystem(t *testing.T) {
 			t.Fatalf("env.sh dropped a seat value the pane needs (%s): %s", want, envSh)
 		}
 	}
-	// The strip must not disturb the home cr-usnvaw stages in the same file.
+	// The strip must not disturb the codex home staged in the same file.
 	if want := `export CODEX_HOME="$NOMAD_SECRETS_DIR/` + codexHomeDir + `"`; !strings.Contains(envSh, want) {
 		t.Fatalf("env.sh missing the in-box CODEX_HOME export %q: %s", want, envSh)
 	}
@@ -129,7 +129,7 @@ func TestLegacyExecModeLeavesOrchestratorFilesystemInEnvScript(t *testing.T) {
 	if !strings.Contains(envSh, "export "+pathEnvName+"='/private/tmp/gctc-42/toolchain:") {
 		t.Fatalf("legacy env.sh no longer passes the deployment's PATH through unchanged: %s", envSh)
 	}
-	if !strings.Contains(envSh, "export "+homeEnvName+"='/Users/home'") {
+	if !strings.Contains(envSh, "export "+homeEnvName+"='/home/orch'") {
 		t.Fatalf("legacy env.sh no longer passes the deployment's HOME through unchanged: %s", envSh)
 	}
 }
@@ -137,7 +137,7 @@ func TestLegacyExecModeLeavesOrchestratorFilesystemInEnvScript(t *testing.T) {
 // TestImageModeLaunchDoesNotSeedTmuxWithTheOrchestratorFilesystem covers the
 // second door: tmux `new-session -e` seeds the SERVER environment every pane
 // inherits, so a clean env.sh alone would not save the toolchain. Identity and
-// terminal keys keep riding argv exactly as before (E1a §4.5 allow-list).
+// terminal keys keep riding argv exactly as before (the argv allow-list).
 func TestImageModeLaunchDoesNotSeedTmuxWithTheOrchestratorFilesystem(t *testing.T) {
 	env := imageModeProviderEnv()
 	joined := strings.Join(buildLaunchCommandForPane(boxFilesystemEnvInput(env), "/work", "codex"), " ")
@@ -157,14 +157,14 @@ func TestImageModeLaunchDoesNotSeedTmuxWithTheOrchestratorFilesystem(t *testing.
 func TestBoxFilesystemEnvInputStripsTheClassNotTheSeat(t *testing.T) {
 	got := boxFilesystemEnvInput(map[string]string{
 		pathEnvName:              "/opt/homebrew/bin:/usr/bin",
-		homeEnvName:              "/Users/home",
+		homeEnvName:              "/home/orch",
 		tmpdirEnvName:            "/tmp/orchestrator-t",
-		"XDG_STATE_HOME":         "/Users/home/.local/state",
-		gcHomeEnvName:            "/Users/home/.gc",
-		codexHomeEnvName:         "/Users/home/.codex",
-		"GC_WRAPPED_BIN":         "/Users/home/.codex/bin/codex",
-		"GC_BOX_TOOL":            "/Users/homeless/tools/codex",
-		"GC_BOX_SHORT":           "/Users/homeless",
+		"XDG_STATE_HOME":         "/home/orch/.local/state",
+		gcHomeEnvName:            "/home/orch/.gc",
+		codexHomeEnvName:         "/home/orch/.codex",
+		"GC_WRAPPED_BIN":         "/home/orch/.codex/bin/codex",
+		"GC_BOX_TOOL":            "/home/orchless/tools/codex",
+		"GC_BOX_SHORT":           "/home/orchless",
 		"GC_TOOL_INSIDE_TMPROOT": "/tmp/orchestrator-t/toolchain/bin",
 		"GC_TMP_SIBLING":         "/tmp/orchestrator-toolchain",
 		"GC_MODEL":               "qwen38-next",
@@ -183,12 +183,13 @@ func TestBoxFilesystemEnvInputStripsTheClassNotTheSeat(t *testing.T) {
 	}
 }
 
-// TestImageModePaneKeepsTheImageToolchain is the in-box proof of both doors: it
-// starts a real image-mode pane whose staged env carries an orchestrator PATH
-// that names a directory the box does not have, and asks the PANE what its PATH
-// became and whether it can still resolve a shell. Pre-fix the answer was the
-// Mac's PATH and no shell at all - the shape proof run 11 hit when codex could
-// not be found and the pane died with its tmux server (cr-jr2kw7).
+// TestImageModePaneKeepsTheImageToolchain is the in-box proof of both
+// doors: it starts a real image-mode pane whose staged env carries an
+// orchestrator PATH that names a directory the box does not have, and asks
+// the PANE what its PATH became and whether it can still resolve a shell.
+// Pre-fix the answer was the Mac's PATH and no shell at all - the shape
+// proof run 11 hit when codex could not be found and the pane died with its
+// tmux server.
 func TestImageModePaneKeepsTheImageToolchain(t *testing.T) {
 	requireTmuxForDriverTest(t)
 
@@ -226,11 +227,11 @@ func TestImageModePaneKeepsTheImageToolchain(t *testing.T) {
 		t.Fatalf("read the pane PATH: %v", err)
 	}
 	// Assert on the injected markers, not on a home-directory substring. The
-	// original guard here was `strings.Contains(panePath, "/Users/home")`,
-	// which is the orchestrator's path ONLY on a machine whose home happens to
-	// be /Users/home — and on that machine the host's own /Users/home/.local/bin
-	// matched it, so this test failed for the developer's $HOME rather than for
-	// any inherited orchestrator PATH. Measured 2026-09-12: the injected
+	// original guard here was a `strings.Contains` on the orchestrator's home
+	// directory, which is the orchestrator's path ONLY on a machine whose home
+	// happens to be that value — and on such a machine the host's own
+	// home-prefixed bin entries matched it, so this test failed for the
+	// developer's $HOME rather than for any inherited orchestrator PATH. Measured 2026-09-12: the injected
 	// markers were correctly absent while the bare substring matched.
 	for _, marker := range []string{foreignBin, foreignSecond} {
 		if strings.Contains(string(panePath), marker) {
@@ -266,7 +267,7 @@ func TestOrchestratorTmuxSocketDirDoesNotCrossIntoTheBox(t *testing.T) {
 	// The exact shape that defeats the value rule: a Mac TMPDIR, and a
 	// TMUX_TMPDIR that is not underneath it.
 	env := map[string]string{
-		"HOME":        "/Users/home",
+		"HOME":        "/home/orch",
 		"TMPDIR":      "/var/folders/2t/abc/T/",
 		"TMUX_TMPDIR": "/tmp",
 		"GC_MODEL":    "qwen38-next",

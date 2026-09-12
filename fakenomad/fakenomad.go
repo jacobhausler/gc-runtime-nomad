@@ -8,15 +8,13 @@
 // contract without a live Nomad cluster. It implements exactly the endpoint
 // families the provider calls: jobs, jobs-list, dispatch, deregister,
 // job-read, allocations, alloc-exec-WS, client-fs-cat, system — and fault
-// hooks (FailNext) for scripted failure injection (L2 in the test
-// pyramid), plus a request Trace() for asserting call order. Job
-// deregister (NRT-P1-03) was added once the lifecycle ops needed it;
-// client-fs-cat (NRT-P1-07) was added for the stop-path transcript/
-// evidence egress read; jobs-list (NRT-P1-08b) was added for list-running's
-// children-of-parent enumeration and is reused by NRT-P1-09's
-// positive-attribution adoption (04 §2.1 rule 6); register/dispatch/
-// job-read/allocations/alloc-exec-WS/system are the original NRT-P1-02
-// scope.
+// hooks (FailNext) for scripted failure injection (L2 in the test pyramid),
+// plus a request Trace() for asserting call order. Job deregister was added
+// once the lifecycle ops needed it; client-fs-cat was added for the
+// stop-path transcript/evidence egress read; jobs-list was added for
+// list-running's children-of-parent enumeration and is reused by the
+// positive-attribution adoption path; register/dispatch/
+// job-read/allocations/alloc-exec-WS/system are the original scope.
 //
 // Out of scope (by design): fidelity beyond the endpoints a provider calls,
 // and real WS TLS.
@@ -50,10 +48,10 @@ const (
 	maxWait     = 10 * time.Second
 )
 
-// basePort anchors this fake's dynamic-port assignment (fnrt-t4l.24):
-// each label declared in a job's Networks[0].DynamicPorts gets
-// basePort+portSeq on every dispatch, standing in for the real port number
-// a live Nomad client would bind and inject as NOMAD_PORT_<Label>.
+// basePort anchors this fake's dynamic-port assignment: each label declared
+// in a job's Networks[0].DynamicPorts gets basePort+portSeq on every
+// dispatch, standing in for the real port number a live Nomad client would
+// bind and inject as NOMAD_PORT_<Label>.
 const basePort = 21000
 
 // Job is the fake's minimal record of a registered or dispatched job.
@@ -66,45 +64,44 @@ type Job struct {
 	Meta        map[string]string
 	ModifyIndex uint64
 
-	// Tasks is the first task group's own tasks, each an exec-driver
-	// command (Config's "command"/"args" pair, task-lifetime modeling for
-	// NRT-P2-06.1/fnrt-t4l.13) — empty for a job registered with no task
-	// Config, which keeps every pre-existing caller that registers a bare
-	// `{"ID": ...}` job unaffected. A dispatched child inherits its
-	// parent's Tasks (dispatch requests never carry their own TaskGroups).
-	// Tasks[0] is this fake's modeled "main"/leader task: it alone drives
-	// the alloc's ClientStatus (startAllTasks), mirroring real Nomad's own
-	// per-task-state aggregation — an alloc stays "running" as long as ANY
-	// task is still running, so a non-main task (e.g. a log-shipper
-	// sidecar) crashing must never flip ClientStatus away from "running".
+	// Tasks is the first task group's own tasks, each an exec-driver command
+	// (Config's "command"/"args" pair, task-lifetime modeling) — empty for
+	// a job registered with no task Config, which keeps every pre-existing
+	// caller that registers a bare `{"ID": ...}` job unaffected. A dispatched
+	// child inherits its parent's Tasks (dispatch requests never carry their
+	// own TaskGroups). Tasks[0] is this fake's modeled "main"/leader task: it
+	// alone drives the alloc's ClientStatus (startAllTasks), mirroring real
+	// Nomad's own per-task-state aggregation — an alloc stays "running" as
+	// long as ANY task is still running, so a non-main task (e.g. a
+	// log-shipper sidecar) crashing must never flip ClientStatus away from
+	// "running".
 	Tasks []TaskSpec
 
 	// PortLabels are the group's Networks[0].DynamicPorts labels (e.g.
-	// "metrics" for the log-shipper's prometheus_exporter sink,
-	// fnrt-t4l.13) — real Nomad assigns each one a real port number per
-	// allocation and injects it into every task's environment as
-	// NOMAD_PORT_<Label>. A dispatched child inherits its parent's
-	// PortLabels (dispatch requests never carry their own Networks).
+	// "metrics" for the log-shipper's prometheus_exporter sink) — real Nomad
+	// assigns each one a real port number per allocation and injects it into
+	// every task's environment as NOMAD_PORT_<Label>. A dispatched child
+	// inherits its parent's PortLabels (dispatch requests never carry their
+	// own Networks).
 	PortLabels []string
 }
 
 // TaskSpec is one task within a dispatched job's single task group — the
-// subset fakenomad needs to run each task as a real subprocess
-// (fnrt-t4l.13 N-task group modeling) and render its template stanzas
-// (fnrt-t4l.24).
+// subset fakenomad needs to run each task as a real subprocess (N-task group
+// modeling) and render its template stanzas.
 type TaskSpec struct {
 	Name    string
 	Command []string
 	// Env is the task's own Env block — part of the env a template stanza
-	// renders against (fnrt-t4l.24), alongside NOMAD_PORT_<Label> and
+	// renders against, alongside NOMAD_PORT_<Label> and
 	// NOMAD_ALLOC_DIR/NOMAD_TASK_DIR.
 	Env map[string]string
 	// Templates are the task's Nomad template stanzas (EmbeddedTmpl+
 	// DestPath), rendered into the alloc's scratch dir before the task's
-	// command starts (fnrt-t4l.24 — a live-Nomad proof showed a job spec
-	// that relies on Nomad's own `{{ env "NOMAD_PORT_metrics" }}`
-	// interpolation needs that rendering pass actually exercised, not just
-	// escaped/string-matched by a test-local simulator).
+	// command starts (a live-Nomad proof showed a job spec that relies on
+	// Nomad's own `{{ env "NOMAD_PORT_metrics" }}` interpolation needs that
+	// rendering pass actually exercised, not just escaped/string-matched by a
+	// test-local simulator).
 	Templates []TemplateSpec
 }
 
@@ -127,22 +124,21 @@ type Allocation struct {
 	ClientStatus  string
 	ModifyIndex   uint64
 
-	// Ports is this allocation's own dynamic-port assignment, label ->
-	// port number (fnrt-t4l.24) — the real per-allocation value every
-	// task's NOMAD_PORT_<Label> env var (and any template stanza's
-	// `env "NOMAD_PORT_<Label>"` call) resolves to.
+	// Ports is this allocation's own dynamic-port assignment, label -> port
+	// number — the real per-allocation value every task's NOMAD_PORT_<Label>
+	// env var (and any template stanza's `env "NOMAD_PORT_<Label>"` call)
+	// resolves to.
 	Ports map[string]int
 
 	// TaskStates is the fake's per-task record, task name -> "running" /
-	// "complete" / "failed" (fnrt-t4l.24). The main task's entry tracks its
-	// real live state exactly like ClientStatus (startMainTask). A
-	// non-main task's entry is set once, to "running", the moment its
-	// command starts and is never updated again — mirroring this fake's
-	// existing choice (startSideTask) that a side task's own crash or exit
-	// is invisible to the alloc's aggregate state; a caller asking whether
-	// that task ever reached running gets a stable answer instead of one
-	// that can flip out from under it depending on how fast the task's own
-	// process happens to exit.
+	// "complete" / "failed". The main task's entry tracks its real live state
+	// exactly like ClientStatus (startMainTask). A non-main task's entry is
+	// set once, to "running", the moment its command starts and is never
+	// updated again — mirroring this fake's existing choice (startSideTask)
+	// that a side task's own crash or exit is invisible to the alloc's
+	// aggregate state; a caller asking whether that task ever reached running
+	// gets a stable answer instead of one that can flip out from under it
+	// depending on how fast the task's own process happens to exit.
 	TaskStates map[string]string
 }
 
@@ -174,12 +170,12 @@ type fault struct {
 }
 
 // taskProc is the fake's live handle on one of a dispatched job's own
-// task-command subprocesses (task-lifetime modeling, NRT-P2-06.1) — as
-// opposed to a caller's alloc-exec commands, which run and complete
-// synchronously via runCommand. done closes once the background Wait()
-// goroutine has resolved (the alloc's ClientStatus for the main task, or
-// just the process's own exit for a side task — see startAllTasks), so
-// Close can bound how long it waits on a killed process before giving up.
+// task-command subprocesses (task-lifetime modeling) — as opposed to a
+// caller's alloc-exec commands, which run and complete synchronously via
+// runCommand. done closes once the background Wait() goroutine has resolved
+// (the alloc's ClientStatus for the main task, or just the process's own
+// exit for a side task — see startAllTasks), so Close can bound how long it
+// waits on a killed process before giving up.
 type taskProc struct {
 	cmd  *exec.Cmd
 	done chan struct{}
@@ -208,7 +204,7 @@ type Server struct {
 	allocListErr  bool
 	noPlaceAllocs bool
 	dispSeq       uint64
-	portSeq       uint64 // dynamic-port assignment counter (fnrt-t4l.24)
+	portSeq       uint64 // dynamic-port assignment counter
 	trace         []string
 
 	execRoot string // parent of every per-alloc exec scratch dir
@@ -296,11 +292,11 @@ func (s *Server) Close() {
 	s.mu.Unlock()
 
 	s.httpSrv.Close()
-	// Kill every still-live task-command subprocess (task-lifetime
-	// modeling, NRT-P2-06.1) before the tmux-kill-server sweep below: a
-	// session supervisor script polls on a 5s interval, far longer than a
-	// caller should ever wait on Close, so this reaps it directly instead
-	// of waiting for it to notice its tmux server died.
+	// Kill every still-live task-command subprocess (task-lifetime modeling)
+	// before the tmux-kill-server sweep below: a session supervisor script
+	// polls on a 5s interval, far longer than a caller should ever wait on
+	// Close, so this reaps it directly instead of waiting for it to notice its
+	// tmux server died.
 	for _, p := range procs {
 		if p.cmd.Process != nil {
 			_ = p.cmd.Process.Kill()
@@ -381,14 +377,14 @@ func (s *Server) ResetExecNext(count int) {
 	s.mu.Unlock()
 }
 
-// HangupExecNext makes the next count alloc-exec WebSocket calls reset their
-// TCP stream immediately after the handshake — before consuming any stdin
-// frame — so the caller is still writing when the stream dies. This models
-// the mid-stdin half-close observed on the lab (fnrt-t4l.18), where the
-// mTLS bridge's upgrade tunnel collapsed while a staging tar was being
-// written and the runtime saw "writing exec stdin-close frame: broken pipe".
-// It is the write-side twin of ResetExecNext, which only breaks the stream
-// once the client has finished writing.
+// HangupExecNext makes the next count alloc-exec WebSocket calls reset
+// their TCP stream immediately after the handshake — before consuming any
+// stdin frame — so the caller is still writing when the stream dies. This
+// models the mid-stdin half-close observed on the lab, where the mTLS
+// bridge's upgrade tunnel collapsed while a staging tar was being written
+// and the runtime saw "writing exec stdin-close frame: broken pipe". It is
+// the write-side twin of ResetExecNext, which only breaks the stream once
+// the client has finished writing.
 func (s *Server) HangupExecNext(count int) {
 	if count <= 0 {
 		return
@@ -483,13 +479,13 @@ func (s *Server) SetAllocStatus(allocID, clientStatus string) bool {
 	return true
 }
 
-// SetAllocFile seeds one path in allocID's fake filesystem (leaving the other
-// files that allocation already serves alone) so catAllocFile answers it. It
-// exists so a test can drive the stop-path egress against an allocation that
-// contains exactly the files it means to test — e.g. the agent-capture trio
-// (cr-gdeav.6.5), which only exists once the deployment bootstrap's capture
-// block has run in the allocation — instead of only the pair every allocation
-// gets by default.
+// SetAllocFile seeds one path in allocID's fake filesystem (leaving the
+// other files that allocation already serves alone) so catAllocFile answers
+// it. It exists so a test can drive the stop-path egress against an
+// allocation that contains exactly the files it means to test — e.g. the
+// agent-capture trio, which only exists once the deployment bootstrap's
+// capture block has run in the allocation — instead of only the pair every
+// allocation gets by default.
 func (s *Server) SetAllocFile(allocID, path, content string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -593,7 +589,7 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	parts := splitPath(r.URL.Path)
 
 	// Job routes need special handling: dispatched child job IDs contain a
-	// literal "/" (e.g. "parent/dispatch-<ts>-<hash>", per e2a-child-job-naming),
+	// literal "/" (e.g. "parent/dispatch-<ts>-<hash>"),
 	// so the ID cannot be assumed to be exactly one path segment. Peel off a
 	// recognized trailing verb (dispatch, allocations) if present; otherwise
 	// every remaining segment belongs to the ID.
@@ -709,14 +705,14 @@ func (s *Server) registerJob(w http.ResponseWriter, r *http.Request, pathID stri
 }
 
 // jobListEntry is one row of the `GET /v1/jobs` response: the subset of a
-// Nomad job summary a children-of-parent list needs (04 §2.1 rule 2/3/6).
-// Meta is included only when the request carries `?meta=true` (real Nomad
-// omits it from the list endpoint by default to save bandwidth — both the
-// children-of-parent recovery path and dispatch's orphan-adoption lookup
-// rely on that param, e2a-amend-jobs-list-params) and Status reflects
-// whether the job currently has any non-terminal allocation ("running") or
-// not ("dead"), the job-level non-terminal signal `list-running`'s and
-// dispatch's children-of-parent enumeration filter on.
+// Nomad job summary a children-of-parent list needs. Meta is included only
+// when the request carries `?meta=true` (real Nomad omits it from the list
+// endpoint by default to save bandwidth — both the children-of-parent
+// recovery path and dispatch's orphan-adoption lookup rely on that
+// param) and Status reflects whether the job currently
+// has any non-terminal allocation ("running") or not ("dead"), the
+// job-level non-terminal signal `list-running`'s and dispatch's
+// children-of-parent enumeration filter on.
 type jobListEntry struct {
 	ID        string
 	ParentID  string
@@ -728,9 +724,9 @@ type jobListEntry struct {
 
 // listJobs answers `GET /v1/jobs` (optionally `?meta=true`) — the
 // children-of-parent enumeration both a list-running cluster-recovery path
-// and dispatch's positive-attribution adoption (04 §2.1 rule 2/3/6) read:
-// every job filters client-side on ParentID, since this fake mirrors real
-// Nomad's jobs-list endpoint, which has no parent filter param of its own.
+// and dispatch's positive-attribution adoption read: every job filters
+// client-side on ParentID, since this fake mirrors real Nomad's jobs-list
+// endpoint, which has no parent filter param of its own.
 func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
 	includeMeta := r.URL.Query().Get("meta") == "true"
 
@@ -791,11 +787,11 @@ func (s *Server) dispatchJob(w http.ResponseWriter, r *http.Request, parentID st
 	tasks := parent.Tasks
 	s.jobs[childID] = &Job{ID: childID, Namespace: parent.Namespace, NodePool: parent.NodePool, ParentID: parentID, Dispatched: true, Meta: req.Meta, Tasks: tasks, PortLabels: parent.PortLabels, ModifyIndex: idx}
 
-	// Assign this allocation its own dynamic ports (fnrt-t4l.24) — real
-	// Nomad picks a real port per allocation and injects it into every
-	// task's environment as NOMAD_PORT_<Label>, which is exactly what a
-	// template stanza's `env "NOMAD_PORT_<Label>"` call resolves against
-	// (startAllTasks, renderTemplates).
+	// Assign this allocation its own dynamic ports — real Nomad picks a real
+	// port per allocation and injects it into every task's environment as
+	// NOMAD_PORT_<Label>, which is exactly what a template stanza's `env
+	// "NOMAD_PORT_<Label>"` call resolves against (startAllTasks,
+	// renderTemplates).
 	ports := make(map[string]int, len(parent.PortLabels))
 	portEnv := make(map[string]string, len(parent.PortLabels))
 	for _, label := range parent.PortLabels {
@@ -829,26 +825,25 @@ func (s *Server) dispatchJob(w http.ResponseWriter, r *http.Request, parentID st
 	s.mu.Unlock()
 
 	// NOMAD_ALLOC_ID and NOMAD_META_<KEY> are real Nomad runtime env vars
-	// injected into every task alongside the dynamic ports above — a
-	// template stanza's `env "NOMAD_ALLOC_ID"` or `env "NOMAD_META_GC_SESSION"`
-	// call resolves against these the same way `env "NOMAD_PORT_<Label>"`
-	// resolves against portEnv (fnrt-3bvg, sibling of the t4l.24 port fix).
+	// injected into every task alongside the dynamic ports above — a template
+	// stanza's `env "NOMAD_ALLOC_ID"` or `env "NOMAD_META_GC_SESSION"` call
+	// resolves against these the same way `env "NOMAD_PORT_<Label>"` resolves
+	// against portEnv.
 	portEnv["NOMAD_ALLOC_ID"] = allocID
 	for k, v := range req.Meta {
 		portEnv["NOMAD_META_"+strings.ToUpper(k)] = v
 	}
 
-	// Actually run each task's own command as a real subprocess so the
-	// alloc's ClientStatus reflects its real lifetime (task-lifetime
-	// modeling, NRT-P2-06.1/fnrt-t4l.13) — a job registered with no task
-	// Config (every pre-existing bare `{"ID": ...}` caller) leaves tasks
-	// empty and this is a no-op, keeping ClientStatus "pending" exactly as
-	// before. The main task (tasks[0]) starts synchronously so the
-	// dispatch response never races ahead of it: by the time this call
-	// returns, it has either started (ClientStatus "running") or failed to
-	// start (ClientStatus "failed"). Every other task starts in the
-	// background — see startAllTasks. Each task's template stanzas (if any)
-	// render before its command starts (fnrt-t4l.24).
+	// Actually run each task's own command as a real subprocess so the alloc's
+	// ClientStatus reflects its real lifetime (task-lifetime modeling) — a job
+	// registered with no task Config (every pre-existing bare `{"ID": ...}`
+	// caller) leaves tasks empty and this is a no-op, keeping ClientStatus
+	// "pending" exactly as before. The main task (tasks[0]) starts
+	// synchronously so the dispatch response never races ahead of it: by the
+	// time this call returns, it has either started (ClientStatus "running")
+	// or failed to start (ClientStatus "failed"). Every other task starts in
+	// the background — see startAllTasks. Each task's template stanzas (if
+	// any) render before its command starts.
 	s.startAllTasks(allocID, tasks, portEnv)
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -1006,7 +1001,7 @@ func (s *Server) readAlloc(w http.ResponseWriter, r *http.Request, id string) {
 
 // deregisterJob answers DELETE /v1/job/:id (Nomad's job-deregister family).
 // Without ?purge=true the job record stays (a subsequent GET still returns
-// 200 — matching real Nomad's stop-without-purge contract, e2a-stop-vs-purge)
+// 200 — matching real Nomad's stop-without-purge contract)
 // but every non-terminal allocation for it is driven to a terminal state, so
 // a caller's confirm-terminal blocking read resolves. With ?purge=true the
 // job is removed outright, so a subsequent GET 404s (confirmed absence).
@@ -1040,11 +1035,11 @@ func (s *Server) deregisterJob(w http.ResponseWriter, r *http.Request, id string
 	}
 	s.mu.Unlock()
 
-	// Kill every force-completed alloc's real task-command subprocesses —
-	// ALL of them, not just the main task (task-lifetime modeling,
-	// NRT-P2-06.1/fnrt-t4l.13) — mirrors real Nomad killing every task on
-	// deregister. The background Wait() goroutines (startAllTasks) see the
-	// alloc already terminal and leave ClientStatus alone.
+	// Kill every force-completed alloc's real task-command subprocesses — ALL
+	// of them, not just the main task (task-lifetime modeling) — mirrors real
+	// Nomad killing every task on deregister. The background Wait() goroutines
+	// (startAllTasks) see the alloc already terminal and leave ClientStatus
+	// alone.
 	for _, cmd := range toKill {
 		if cmd.Process != nil {
 			_ = cmd.Process.Kill()
@@ -1107,8 +1102,8 @@ func (s *Server) allocScratchDir(allocID string) string {
 }
 
 // allocSecretsDir lazily creates and returns allocID's own secrets
-// directory (NRT-P1-06 data contract: exec-stdin delivery into the task's
-// secrets dir, never job env/meta/argv — E1a §4.5). Real Nomad exposes this
+// directory (the data contract is exec-stdin delivery into the task's
+// secrets dir, never job env/meta/argv). Real Nomad exposes this
 // as NOMAD_SECRETS_DIR pointing at a tmpfs unreadable via the client fs API;
 // this fake settles for an isolated on-disk directory under the alloc's own
 // scratch dir, which is enough to prove the provider writes secret files to
@@ -1120,22 +1115,22 @@ func (s *Server) allocSecretsDir(allocID string) string {
 }
 
 // runCommand actually executes command as a real subprocess and returns its
-// exit code plus combined stdout+stderr (e2a-exec-protocol: the fake proves
-// wire-level exit-code/output fidelity, not a canned reply). Each alloc gets
-// its own TMUX_TMPDIR (and CWD) via allocScratchDir, so a launch command
-// like `tmux new-session -d -s main` — the in-box tmux session name is a
-// fixed wire-contract constant, not something this fake can rename — never
-// collides across allocs sharing this one test machine's default tmux
+// exit code plus combined stdout+stderr (the fake proves
+// wire-level exit-code/output fidelity, not a canned reply). Each alloc
+// gets its own TMUX_TMPDIR (and CWD) via allocScratchDir, so a launch
+// command like `tmux new-session -d -s main` — the in-box tmux session name
+// is a fixed wire-contract constant, not something this fake can rename —
+// never collides across allocs sharing this one test machine's default tmux
 // server. An empty command (no caller sends one; kept for robustness)
-// preserves the pre-NRT-P1-05 scripted reply. stdin is wired to the real
-// subprocess (NRT-P1-06): staging's tar-over-exec-stdin workspace/secrets
-// payloads need a genuine pipe, not a canned reply, for the M3 receipt's
-// env.workspace probe to mean anything.
-// runCommand executes the exec command the client asked for and returns its
-// exit code with stdout and stderr kept SEPARATELY, the way a real Nomad
-// alloc-exec stream carries them in distinct frames (cr-86ytiq: folding them
-// into one buffer hid the fact that the pack's client never read stderr at
-// all, so a launch that died in the box reported no reason).
+// preserves the older scripted reply. stdin is wired to the real
+// subprocess: staging's tar-over-exec-stdin workspace/secrets payloads need
+// a genuine pipe, not a canned reply, for the M3 receipt's env.workspace
+// probe to mean anything. runCommand executes the exec command the client
+// asked for and returns its exit code with stdout and stderr kept
+// SEPARATELY, the way a real Nomad alloc-exec stream carries them in
+// distinct frames (folding them into one buffer hid the fact that the
+// pack's client never read stderr at all, so a launch that died in the box
+// reported no reason).
 func (s *Server) runCommand(allocID string, command []string, stdin []byte) (int, []byte, []byte) {
 	if len(command) == 0 {
 		return 0, []byte("ok\n"), nil
@@ -1167,9 +1162,9 @@ func (s *Server) runCommand(allocID string, command []string, stdin []byte) (int
 // taskCommand extracts the exec-driver "command"/"args" pair from a Nomad
 // task Config block (map[string]any, matching the wire JSON shape a real
 // job register body carries) — the subset this fake needs to actually run a
-// dispatched job's task as a real subprocess (task-lifetime modeling,
-// NRT-P2-06.1). Returns nil for a Config with no (or non-string) "command",
-// which callers treat as "no task to run" rather than an error.
+// dispatched job's task as a real subprocess (task-lifetime modeling).
+// Returns nil for a Config with no (or non-string) "command", which callers
+// treat as "no task to run" rather than an error.
 func taskCommand(cfg map[string]any) []string {
 	command, _ := cfg["command"].(string)
 	if command == "" {
@@ -1186,8 +1181,8 @@ func taskCommand(cfg map[string]any) []string {
 	return out
 }
 
-// startAllTasks runs every one of tasks as a real subprocess (fnrt-t4l.13
-// N-task group modeling). tasks[0] is this fake's modeled "main"/leader
+// startAllTasks runs every one of tasks as a real subprocess (N-task group
+// modeling). tasks[0] is this fake's modeled "main"/leader
 // task and alone drives allocID's ClientStatus (startMainTask); every other
 // task runs independently via startSideTask, whose own lifetime — start
 // failure, crash, or clean exit — never touches ClientStatus, mirroring
@@ -1199,7 +1194,7 @@ func taskCommand(cfg map[string]any) []string {
 // NOMAD_PORT_<Label> assignments (dispatchJob), which — together with each
 // task's own Env and the alloc's NOMAD_ALLOC_DIR/NOMAD_TASK_DIR — is what
 // that task's template stanzas (if any) render against before its command
-// starts (fnrt-t4l.24).
+// starts.
 func (s *Server) startAllTasks(allocID string, tasks []TaskSpec, portEnv map[string]string) {
 	for i, t := range tasks {
 		if len(t.Command) == 0 {
@@ -1216,15 +1211,15 @@ func (s *Server) startAllTasks(allocID string, tasks []TaskSpec, portEnv map[str
 // renderTemplates writes each of specs' EmbeddedTmpl through Go's
 // text/template package — the same "{{ }}" delimiter syntax and `env`
 // function Nomad's own template stanza exposes — into DestPath under dir,
-// backed by env (fnrt-t4l.24: a live-Nomad proof showed a job spec that
-// relies on Nomad's own `{{ env "NOMAD_PORT_metrics" }}` interpolation
-// needs that rendering pass actually exercised, not just escaped/
-// string-matched by a test-local simulator). Every EmbeddedTmpl this pack's
-// production job specs build only ever uses Nomad's own "{{ }}" syntax for
-// real Nomad interpolation; any "${...}" placeholders they also carry are a
-// distinct substitution a task's own process resolves itself at runtime, so
-// Go's text/template — which only ever recognizes its own "{{ }}"
-// delimiters — correctly leaves them untouched.
+// backed by env (a live-Nomad proof showed a job spec that relies on
+// Nomad's own `{{ env "NOMAD_PORT_metrics" }}` interpolation needs that
+// rendering pass actually exercised, not just escaped/ string-matched by a
+// test-local simulator). Every EmbeddedTmpl this pack's production job
+// specs build only ever uses Nomad's own "{{ }}" syntax for real Nomad
+// interpolation; any "${...}" placeholders they also carry are a distinct
+// substitution a task's own process resolves itself at runtime, so Go's
+// text/template — which only ever recognizes its own "{{ }}" delimiters —
+// correctly leaves them untouched.
 func renderTemplates(dir string, specs []TemplateSpec, env map[string]string) error {
 	for _, spec := range specs {
 		tmpl, err := template.New(spec.DestPath).Funcs(template.FuncMap{
@@ -1248,8 +1243,8 @@ func renderTemplates(dir string, specs []TemplateSpec, env map[string]string) er
 	return nil
 }
 
-// taskTemplateEnv builds the env a task's template stanzas render against
-// (fnrt-t4l.24): the task's own Env block, the allocation's dynamic ports as
+// taskTemplateEnv builds the env a task's template stanzas render against:
+// the task's own Env block, the allocation's dynamic ports as
 // NOMAD_PORT_<Label> (real Nomad's own env-injection contract), and
 // NOMAD_ALLOC_DIR/NOMAD_TASK_DIR pointing at the alloc's shared scratch dir
 // — this fake keeps every task's directory the same rather than modeling
@@ -1271,17 +1266,17 @@ func taskTemplateEnv(dir string, taskEnv, portEnv map[string]string) map[string]
 
 // startMainTask renders task's template stanzas (if any) and then runs its
 // command as a real subprocess standing in for Nomad's exec driver actually
-// running a dispatched job's main task (task-lifetime modeling,
-// NRT-P2-06.1) and drives allocID's ClientStatus accordingly: "running"
-// once it starts, "failed" if a template fails to render or the command
-// never starts, and "complete"/"failed" once it exits — the model a
-// fixed-status alloc cannot express, and the one NRT-P2-06.1 needs to catch
-// a task command (like the placeholder /bin/true this pack used to
-// dispatch) that exits before launch's alloc-exec call can ever reach the
-// box. Both the render and the start are synchronous (the caller —
-// dispatchJob, via startAllTasks — blocks on them) so the dispatch response
-// is never observed before the alloc's ClientStatus reflects whether the
-// task actually started; only the exit wait runs in the background.
+// running a dispatched job's main task (task-lifetime modeling) and drives
+// allocID's ClientStatus accordingly: "running" once it starts, "failed" if
+// a template fails to render or the command never starts, and
+// "complete"/"failed" once it exits — the model a fixed-status alloc cannot
+// express, and the one needed to catch a task command (like the
+// placeholder /bin/true this pack used to dispatch) that exits before
+// launch's alloc-exec call can ever reach the box. Both the render and the
+// start are synchronous (the caller — dispatchJob, via startAllTasks —
+// blocks on them) so the dispatch response is never observed before the
+// alloc's ClientStatus reflects whether the task actually started; only the
+// exit wait runs in the background.
 func (s *Server) startMainTask(allocID string, task TaskSpec, portEnv map[string]string) {
 	dir := s.allocScratchDir(allocID)
 
@@ -1351,10 +1346,10 @@ func (s *Server) startMainTask(allocID string, task TaskSpec, portEnv map[string
 //	$ /bin/sleep infinity
 //	usage: sleep number[unit] [...]
 //
-// so the main task exited instantly, the allocation went terminal, and every
-// test that started a session failed with "has no non-terminal alloc: session
-// not found" — 40 of 61 failures on a clean tree, all from this one line, and
-// not one of them a defect in the pack. Measured 2026-09-12 (cr-zkfl4t).
+// so the main task exited instantly, the allocation went terminal, and
+// every test that started a session failed with "has no non-terminal alloc:
+// session not found" — 40 of 61 failures on a clean tree, all from this one
+// line, and not one of them a defect in the pack. Measured 2026-09-12.
 //
 // The duration is irrelevant to every caller: the process exists only to hold
 // the allocation open while a test drives it, so a long finite sleep is
@@ -1377,7 +1372,7 @@ func portableIdleCommand(command []string) []string {
 
 // startSideTask renders task's template stanzas (if any) and then runs its
 // command as a real subprocess standing in for a non-main task in the group
-// (e.g. fnrt-t4l.13's log-shipper) — best effort, and deliberately never
+// (e.g. a log-shipper) — best effort, and deliberately never
 // touches allocID's ClientStatus: a side task that fails to render, fails
 // to start, crashes, or exits is invisible to the alloc's aggregate state,
 // matching real Nomad (an alloc stays "running" as long as its main task
@@ -1385,9 +1380,9 @@ func portableIdleCommand(command []string) []string {
 // command starts, and — like ClientStatus — is never updated again by this
 // function: a caller asking whether this task ever reached running gets a
 // stable answer rather than one that can flip out from under it depending
-// on how fast the task's own process happens to exit (fnrt-t4l.24). A
-// render or start failure is recorded as "failed" and the command is never
-// started. A started task is still recorded in s.taskProcs so Close and
+// on how fast the task's own process happens to exit. A render or start
+// failure is recorded as "failed" and the command is never started. A
+// started task is still recorded in s.taskProcs so Close and
 // deregisterJob's kill sweep reap it like any other task subprocess.
 func (s *Server) startSideTask(allocID string, task TaskSpec, portEnv map[string]string) {
 	dir := s.allocScratchDir(allocID)
@@ -1429,8 +1424,8 @@ func setTaskStateLocked(a *Allocation, taskName, state string) {
 }
 
 // SetTaskState forces taskName's state on allocID and reports whether the
-// allocation existed. It is the test-side knob for the real-Nomad window cr-u9vul4
-// isolated: an allocation is already placed (its ClientStatus already says the
+// allocation existed. It is the test-side knob for the real-Nomad window this
+// isolates: an allocation is already placed (its ClientStatus already says the
 // box is up) while a task inside it is still in setup. Only the fake's main
 // task drives ClientStatus, so without this knob no test can hold a task down
 // while the alloc reads as live -- which is exactly the state a pack that
@@ -1460,7 +1455,7 @@ func (s *Server) setTaskState(allocID, taskName, state string) {
 }
 
 // AssignedPort returns the dynamic port fakenomad assigned to label on
-// allocID's own allocation (fnrt-t4l.24's NOMAD_PORT_<Label> env-injection
+// allocID's own allocation (the NOMAD_PORT_<Label> env-injection
 // contract), and whether that allocation/label combination exists — so a
 // test asserting a rendered template's port value has something real to
 // compare it against instead of a hardcoded constant.
@@ -1513,11 +1508,10 @@ func splitPath(p string) []string {
 // isolatedTmuxEnv builds the environment for a command that may invoke tmux
 // inside an alloc scratch dir. It strips any inherited TMUX so the tmux
 // client can never resolve the caller's ambient server (a gc worker runs
-// inside tmux; an inherited $TMUX made kill-server take down the whole
-// host server and every sibling worker), then pins the socket dir.
-// secretsDir, if non-empty, is also exported as NOMAD_SECRETS_DIR (NRT-P1-06)
-// so a command run inside this env sees the same variable the real Nomad
-// exec driver sets.
+// inside tmux; an inherited $TMUX made kill-server take down the whole host
+// server and every sibling worker), then pins the socket dir. secretsDir,
+// if non-empty, is also exported as NOMAD_SECRETS_DIR so a command run
+// inside this env sees the same variable the real Nomad exec driver sets.
 func isolatedTmuxEnv(dir, secretsDir string) []string {
 	env := make([]string, 0, len(os.Environ())+2)
 	for _, kv := range os.Environ() {

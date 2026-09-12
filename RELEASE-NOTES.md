@@ -3,7 +3,7 @@
 One shape, one rollback: the prebaked image is the session, and the
 deployment-owned bootstrap that used to be able to stand in front of it is gone.
 
-- **`GC_NOMAD_AGENT_LAUNCH_SCRIPT` removed in 1.0.7** (`cr-3vvnb5`). The pack no
+- **`GC_NOMAD_AGENT_LAUNCH_SCRIPT` removed in 1.0.7.** The pack no
   longer consults a deployment-owned launch script: the image's tmux pane runs
   gc's rendered launch command and nothing else, and an empty rendered command
   fails the launch closed. Gone with it — `buildLaunchCommand`'s legacy
@@ -13,7 +13,7 @@ deployment-owned bootstrap that used to be able to stand in front of it is gone.
   credited a launcher with the box's `PATH` and its agent home (the pack now
   writes that home inside the box, `codex_home.go`).
 - **Rollback is a previous IMAGE TAG.** `GC_NOMAD_AGENT_IMAGE` is required —
-  unsetting it fails every lifecycle op closed (`cr-3vvnb5.2`) — so the fallback
+  unsetting it fails every lifecycle op closed — so the fallback
   sentences in `toolchain/BUILD-RECEIPT.md` and `toolchain/TOOLCHAIN.lock` name
   a tag to point back at, not a shape to drop into.
 
@@ -26,39 +26,38 @@ deployment-owned bootstrap that used to be able to stand in front of it is gone.
 
 # v1.0.5
 
-Nine gate-0 remediation atoms from epic `cr-u7b0s` (D3/D4 Nomad dogfood
-review), cut on top of `v1.0.4`. One launch-path fix, two "use the native
-form" removals, the Docker agent-image seam, the session-toolchain pin, and
-a receipt path that fails closed.
+Nine gate-0 remediation items from the Nomad dogfood review, cut on top of
+`v1.0.4`. One launch-path fix, two "use the native form" removals, the Docker
+agent-image seam, the session-toolchain pin, and a receipt path that fails
+closed.
 
 ## What changed
 
-- **The launch payload survives the seam** (`d786990`, `31b2c4e`, `cr-u7b0s.39`/
-  `.40`). gc's start wire is consumed as gc writes it; the pack's private
-  start-payload encoding is gone, so a payload gc writes and the pack does not
-  know can no longer be silently dropped on the way into the box.
-- **`GC_NOMAD_AGENT_IMAGE` — the Docker agent image seam** (`a9eb2e3`,
-  `cr-u7b0s.41`). With it set, the allocation carries no toolchain host-volume
-  mount and the image owns the toolchain; unset, the legacy exec +
-  read-only artifact-volume shape is what runs. One variable, one shape.
+- **The launch payload survives the seam** (`d786990`, `31b2c4e`). gc's start
+  wire is consumed as gc writes it; the pack's private start-payload encoding is
+  gone, so a payload gc writes and the pack does not know can no longer be
+  silently dropped on the way into the box.
+- **`GC_NOMAD_AGENT_IMAGE` — the Docker agent image seam** (`a9eb2e3`). With it
+  set, the allocation carries no toolchain host-volume mount and the image owns
+  the toolchain; unset, the legacy exec + read-only artifact-volume shape is
+  what runs. One variable, one shape.
   **Superseded in 1.0.7**: the image is required and that legacy shape is
   deleted, so unset is a fail-closed config error and not a rollback (see the
   v1.0.7 entry above).
-- **Native Nomad query and dispatch APIs** (`0b76009`, `cr-u7b0s.42`) in place
-  of the hand-rolled HTTP calls, and **the RPP capability surface stays
-  native** — `GC_NOMAD_FORBID_REGISTER` now fails closed instead of advertising
-  ops the runtime will not perform (`441a36d`, `cr-u7b0s.43`).
+- **Native Nomad query and dispatch APIs** (`0b76009`) in place of the
+  hand-rolled HTTP calls, and **the RPP capability surface stays native** —
+  `GC_NOMAD_FORBID_REGISTER` now fails closed instead of advertising ops the
+  runtime will not perform (`441a36d`).
 - **`toolchain/` — the session toolchain as a checksum-pinned build input**
-  (`289f258`, `cr-u7b0s.45`): digest-pinned base, upstream-published sha256 per
-  component, `bd` rebuilt from checksum-pinned release source (the published
+  (`289f258`): digest-pinned base, upstream-published sha256 per component,
+  `bd` rebuilt from checksum-pinned release source (the published
   binary carries the grpc the release rebuild exists to escape), the **complete**
   Codex standalone package with its layout asserted, `check`/`verify`/`build`
   verbs and a rollback tag. It ships no delivery layer and publishes nothing.
-- **Runtime bindings are recovered from Nomad `Meta`** (`d2cc306`,
-  `cr-u7b0s.46`), so a session→alloc binding survives the sidecar it used to
-  depend on.
-- **The conformance receipt fails closed** (`fb15c4b`, `cr-u7b0s.48`).
-  `receipt.sh` no longer swallows the ladder's exit — the retry-idempotency
+- **Runtime bindings are recovered from Nomad `Meta`** (`d2cc306`), so a
+  session→alloc binding survives the sidecar it used to depend on.
+- **The conformance receipt fails closed** (`fb15c4b`). `receipt.sh` no longer
+  swallows the ladder's exit — the retry-idempotency
   rung runs *after* gc prints both greppable summaries, so green rows used to be
   publishable over a red ladder; that rung is now a first-class row, every row
   is attributed to the pack commit and the gc that ran it (`gc version --json` +
@@ -67,35 +66,35 @@ a receipt path that fails closed.
   emitting unattributed rows, and `--json-stdout` puts the result on stdout for
   a lane that has no artifact-return flag. `receipt-selftest.sh` is the
   distinguishing regression: green summaries, then exit 3.
-- **One canonical runtime-contract table** (`96b3ee4`, `cr-u7b0s.49`). The keys
-  are the contract; the filled-in values are the deployment's, and they moved
-  out of this pack to the estate's own admitted card. Nothing there is a default
-  to copy.
+- **One canonical runtime-contract table** (`96b3ee4`). The keys are the
+  contract; the filled-in values are the deployment's, and they moved out of
+  this pack into the deployment's own configuration record. Nothing there is a
+  default to copy.
 
 ## Coverage
 
 The pack's CI gate is the offline ladder — `GC_BIN=$(command -v gc)
 ./conformance.sh` on every push and PR (`.github/workflows/ci.yml`), and
 `GC_BIN=$(command -v gc) ./receipt.sh` for the per-item receipt this file links.
-`CONFORMANCE-RECEIPT.md` is **not** regenerated at this commit: since
-`cr-u7b0s.48` an at-pin receipt must name the gc that produced it, and no
-builder lane carries a Linux `gc` at the estate pin. Regenerating it from a stub
-or from a different gc identity is what the fail-closed rule forbids, so this
-release states the gap instead of papering over it. `receipt-selftest.sh` passed
-both directions on the builders lane (`RECEIPT-SELFTEST-OK`, `cr-u7b0s.48`).
+`CONFORMANCE-RECEIPT.md` is **not** regenerated at this commit: an at-pin
+receipt must name the gc that produced it, and no build lane carries a Linux
+`gc` at the maintainer's pin. Regenerating it from a stub or from a different gc
+identity is what the fail-closed rule forbids, so this release states the gap
+instead of papering over it. `receipt-selftest.sh` passed both directions on the
+build lane (`RECEIPT-SELFTEST-OK`).
 
 # v1.0.4
 
-Four fixes from the D3/D4 Nomad dogfood windows: a remote-context session in
-which every `gc` call failed, a Codex seat that silently ran Qwen, and bridge
-allocs with no resolvers (`cr-bo8en.12`, `cr-tzsxk.14.1`, `cr-tzsxk.18`).
+Four fixes from the Nomad dogfood windows: a remote-context session in
+which every `gc` call failed, a Codex seat that silently ran a different model,
+and bridge allocs with no resolvers.
 
 ## What broke
 
-D3 window 1 provisioned two worker-local seats on rhuidean, primed them, and
-watched them drain: `{"action":"drain","reason":"no_work"}` five times, while
-the city hook listed their steps as ready. Inside the box, every `gc` call
-exited 1 with
+The first dogfood window provisioned two worker-local seats on a cluster
+client, primed them, and watched them drain:
+`{"action":"drain","reason":"no_work"}` five times, while the city hook listed
+their steps as ready. Inside the box, every `gc` call exited 1 with
 
     conflicting targets: a remote city (GC_CITY_URL/GC_CITY_CONTEXT) cannot be
     combined with a local city env (GC_CITY/GC_CITY_PATH/GC_CITY_ROOT); unset one
@@ -103,24 +102,23 @@ exited 1 with
 The pack was forwarding the supervisor's own local city identity into a
 remote-context alloc, and the pin those windows ran on enforces that
 exclusivity where the earlier lineage tolerated it. The launch path was patched
-around it in place on the shared volume; these are the pack halves
-(`cr-bo8en.12`). Same window, second shape: with an mTLS context staged,
-`env.sh` exported BOTH `GC_CITY_URL` and `GC_CITY_CONTEXT`, so gc refused the
+around it in place on the shared volume; these are the pack halves. Same
+window, second shape: with an mTLS context staged, `env.sh` exported BOTH `GC_CITY_URL` and `GC_CITY_CONTEXT`, so gc refused the
 session for selecting two remote targets.
 
-D4 lane 3 broke twice more, in ways that read as provider failures and are not.
-A "Codex lane" ran Qwen, because gc renders a seat's model and reasoning effort
-as *command flags* on the argv the pack's launch seam replaces with the
-deployment-owned bootstrap — the flags never reached the box — and
-`GC_PROVIDER` carries only the provider *family*, so Qwen and Luna both read
-"codex" (`cr-tzsxk.14.1`). And the allocs had no resolvers: a bridge alloc with
-no `network.DNS` stanza inherits the *client host's* `/etc/resolv.conf`, which
+A later dogfood lane broke twice more, in ways that read as provider failures
+and are not. A "Codex lane" ran the wrong model, because gc renders a seat's
+model and reasoning effort as *command flags* on the argv the pack's launch seam
+replaces with the deployment-owned bootstrap — the flags never reached the box —
+and `GC_PROVIDER` carries only the provider *family*, so two different models
+behind that one family both read "codex". And the allocs had no resolvers: a
+bridge alloc with no `network.DNS` stanza inherits the *client host's* `/etc/resolv.conf`, which
 on a systemd-resolved host is the `127.0.0.53` stub, unreachable from the alloc
 netns — `getent hosts api.openai.com` empty, `curl` dead in ~1 ms, IP dials
 fine. The same window needed a placement fence (`${node.unique.name} !=
-prod-nomad`) after seats landed on a node the estate had retired from its relay
-firewall, which until now meant re-registering the parent job by hand — and the
-runtime's own next register dropped it (`cr-tzsxk.18`, lane-1 finding 1).
+prod-nomad`) after seats landed on a node the deployment had retired from its
+relay firewall, which until now meant re-registering the parent job by hand —
+and the runtime's own next register dropped it.
 
 ## What changed
 
@@ -144,11 +142,11 @@ runtime's own next register dropped it (`cr-tzsxk.18`, lane-1 finding 1).
   explicit provider env entry always beats a value recovered from the command,
   and a value containing anything outside `[A-Za-z0-9._:-]` is dropped rather
   than passed through. This is the pack half; the consumer is the
-  deployment-owned `ops/nomad/agent-launch.sh` (`55d9ef4`, `cr-tzsxk.14`) — a
-  Qwen seat's config stays byte-identical, a non-Qwen seat gets its model and
-  effort with no `model_provider` override, so default OpenAI auth comes from
-  the staged `auth.json`. A non-Qwen lane needs a launcher at or after that
-  commit.
+  deployment-owned agent-launch script (`55d9ef4`) — a seat on the deployment's
+  default model keeps a byte-identical config, a seat on any other model gets
+  its model and effort with no `model_provider` override, so default OpenAI auth
+  comes from the staged `auth.json`. A non-default lane needs a launcher at or
+  after that commit.
 - Two deployment knobs now render into the parent job the runtime registers
   itself: `GC_NOMAD_DNS_SERVERS` (comma-separated resolver addresses the session
   group's bridge network writes into the alloc's `/etc/resolv.conf`) and
@@ -163,18 +161,17 @@ runtime's own next register dropped it (`cr-tzsxk.18`, lane-1 finding 1).
   silently dropped line, and `gc runtime check` now warns when
   `GC_NOMAD_DNS_SERVERS` is unset. Placement lands before the jobspec hash is
   stamped, so a placement change is drift-visible to `ensureParentRegistered`
-  instead of being ignored on an already-registered parent (`fnrt-t4l.9`).
+  instead of being ignored on an already-registered parent.
   Values stay out of the pack (value-blind), like every other `GC_NOMAD_*` knob.
 
 Still open, and not this pack's: the `501` on `bd update --claim`/
 `bd heartbeat` and the `409` typed-close identity gap for remote work-class
-beads (`cr-gdeav.5.10` family — D4 lane 1 and its rerun both stopped there),
-the reconciler reusing session identity across a runtime re-provision so a seat
-sleeps until nudged (D3 finding #2, lane-1 finding 2), and the Codex standalone
-package layout that the Luna execution host needs (`cr-tzsxk.20` — an estate
-toolchain restage). Staging a seat credential needed no pack change: the
-existing `GC_NOMAD_EXTRA_SECRET_KEYS` bridge carried `CODEX_AUTH_JSON`
-(`cr-tzsxk.10`, `cr-tzsxk.11`).
+beads (one dogfood lane and its rerun both stopped there), the reconciler
+reusing session identity across a runtime re-provision so a seat sleeps until
+nudged, and the Codex standalone package layout the execution host needs (a
+deployment-side toolchain restage). Staging a seat credential needed no pack
+change: the existing `GC_NOMAD_EXTRA_SECRET_KEYS` bridge carried
+`CODEX_AUTH_JSON`.
 
 ## Coverage
 
@@ -194,34 +191,34 @@ that it reaches the staged `env.sh`); and the placement pair —
 warning pair, and the two `newLifecycle` tests that a configured value is read
 and a malformed one refuses to start.
 
-The proofs are lived, not simulated — see
-`ops/receipts/nrt-d3/2026-09-08-d3-window-1.md` and the three
-`2026-09-08-d4-lane*-*.md` receipts: window 2 PASS (two pool seats claimed,
-worked and typed-closed city beads through the mTLS relay on pin
-`e6c792597`), lane 2 PASS (a Nomad verifier closed a formula step and its
-source from the box on `1afd6736a`), lane 3 PASS on the runtime path with the
-seat's own TUI footer reading `gpt-5.6-luna xhigh` after the launcher/env
-pair landed. The estate-side twins are re-runnable:
-`ops/tests/agent-launch-provider-model-test.sh` for the launcher half and
-`ops/tests/session-dns-env-staging-test.sh` for the staged DNS keys.
+The proofs are lived, not simulated. They were run on 2026-09-08 and recorded
+in the maintainer's own receipt tree, which is not part of this repository:
+window 2 PASS (two pool seats claimed, worked and typed-closed city beads
+through the mTLS relay on pin `e6c792597`), lane 2 PASS (a Nomad verifier
+closed a formula step and its source from the box on `1afd6736a`), lane 3 PASS
+on the runtime path with the seat's own TUI footer reporting the model and
+reasoning effort the launcher/env pair was supposed to deliver. The
+deployment-side twins — one test for the launcher half, one for the staged DNS
+keys — are re-runnable there, and are not shipped here.
 
 `CONFORMANCE-RECEIPT.md` is regenerated by `./receipt.sh`, and this cut was not
-run through it: the script calls `go vet` / `go test` directly, which the estate
-runs only on the builders pool. The receipt therefore still stands at `4a08d08`
-and this section claims no fresh ladder run at the cut commit — the cut's proofs
-are the lived D3/D4 receipts named above, plus the `gc runtime` doctor check and
-one Nomad seat provision run against the installed binary.
+run through it: the script calls `go vet` / `go test` directly, which the
+maintainer runs only on a dedicated build pool. The receipt therefore still
+stands at `4a08d08` and this section claims no fresh ladder run at the cut
+commit — the cut's proofs are the lived dogfood receipts described above, plus
+the `gc runtime` doctor check and one Nomad seat provision run against the
+installed binary.
 
 # v1.0.3
 
-Provision idempotency and start-retry adoption (`fnrt-t4l.46`).
+Provision idempotency and start-retry adoption.
 
 ## What broke
 
 v1.0.2 taught `provision` to resume the box it had already dispatched, but
 only for a binding it had positively marked `stage_pending` — a provision
 that died mid-staging. That is one of two ways a live, unlaunched box gets
-left bound to a session. The other one is what the DF-03 canary hit: the
+left bound to a session. The other one is what a live canary hit: the
 provision half succeeded and finished staging, the launch was never
 confirmed, and gc re-drove the verb every tick. `stage_pending` was already
 cleared, so no resume applied, dispatch's already-exists guard rejected every
@@ -241,7 +238,7 @@ running healthily underneath. The lane could never converge.
   subsumes v1.0.2's narrower `stage_pending` resume, which is retired;
   the marker stays as the durable record of an unfinished staging half.
 - A live child that IS launched is a genuine duplicate, not a retry, and is
-  still rejected with the 04 §6 wire-contract `already exists` error gc reads
+  still rejected with the wire-contract `already exists` error gc reads
   as `ErrSessionExists`. The v1.0.2 contract test is rewritten onto that
   edge — the line this release moved.
 
@@ -264,11 +261,11 @@ filed — its code pointers need confirming against gascity `main` first.
 
 # v1.0.2
 
-Recovery fix for a provision wedge seen on a live cluster (`fnrt-t4l.18`).
+Recovery fix for a provision wedge seen on a live cluster.
 
 ## What broke
 
-A session's NRT-P1-06 staging (workspace/secrets materialized over
+A session's staging (workspace/secrets materialized over
 tar-over-exec-stdin) runs AFTER its child job has been dispatched. When the
 exec stream was torn down while the runtime was still WRITING that payload,
 two defects compounded:
@@ -291,7 +288,7 @@ two defects compounded:
   resumes staging into the box it already dispatched when — and only when —
   it finds its own binding in that state. A session whose staging completed
   is still a duplicate provision and is still rejected with `already exists`
-  (04 §6 / R1a-02 wire contract, pinned by test). Bindings written before
+  (the wire contract, pinned by test). Bindings written before
   this field existed have no marker and are never resumed.
 
 ## Coverage

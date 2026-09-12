@@ -36,8 +36,8 @@ func newTestLifecycle(t *testing.T) (*lifecycle, *fakenomad.Server) {
 	return &lifecycle{client: c, sidecar: sc, parentJobID: "gc-sessions"}, srv
 }
 
-// withPane fills in the pane body a start needs: cr-3vvnb5.3 deletes the
-// placeholder pane, so a start that carries no rendered command fails closed.
+// withPane fills in the pane body a start needs: the prebaked-image shape
+// deletes the placeholder pane, so a start that carries no rendered command fails closed.
 // Tests that assert that fail-closed door call opStartWithConfig directly.
 func withPane(cfg stageConfig) stageConfig {
 	if cfg.Command == "" {
@@ -47,7 +47,8 @@ func withPane(cfg stageConfig) stageConfig {
 }
 
 // testPaneCommand is the pane body an image-mode launch is handed: gc always
-// renders a launch command, and cr-3vvnb5.3 deletes the bare-tmux placeholder
+// renders a launch command, and the prebaked-image shape deletes the
+// bare-tmux placeholder
 // the pack used to fall back to when it was empty. It has to STAY up the way a
 // real agent does, because opIsRunning kill -0's the pane pid the launch
 // captured: a pane that exits at once reads as an agent that died.
@@ -157,10 +158,10 @@ func TestRetryAllocExecReadyRetriesConnectionReset(t *testing.T) {
 
 // TestLifecycleRoundTrip exercises the exact shape `gc runtime check`'s
 // required lifecycle round-trip drives: start observes running=true,
-// duplicate start is rejected with an "already exists" stderr phrase (04 §6
+// duplicate start is rejected with an "already exists" stderr phrase (a
 // wire-contract constant), stop is idempotent, and is-running flips to
 // false after stop.
-// TestLifecycleStartSucceedsWithLogShipperEnabled proves the fnrt-t4l.13
+// TestLifecycleStartSucceedsWithLogShipperEnabled proves the log-shipper
 // wiring end to end: a lifecycle configured with a non-empty logShipper
 // still starts and reports running normally, even though fakenomad's
 // sandbox has no real vector binary for the log-shipper task's artifact
@@ -172,7 +173,8 @@ func TestRetryAllocExecReadyRetriesConnectionReset(t *testing.T) {
 // session task unaffected" scope line exercised at the real ops layer
 // rather than fakenomad's synthetic unit test.
 // TestRetryAllocExecReadyRetriesWriteSideTeardown pins the classifications
-// added for fnrt-t4l.18: the exec stream can also die while the caller is
+// added for the write-side teardown: the exec stream can also die while the
+// caller is
 // WRITING (a staging tar's stdin frames), which surfaces as EPIPE rather
 // than as any of the read-side shapes — the exact error the lab reported,
 // "writing exec stdin-close frame: broken pipe". A short read partway
@@ -264,7 +266,7 @@ func TestLifecycleRoundTrip(t *testing.T) {
 	}
 
 	// Stop is idempotent: a second stop on an already-stopped session
-	// succeeds (E1a §6.1).
+	// succeeds.
 	if err := l.opStop(ctx, session); err != nil {
 		t.Fatalf("second stop (idempotency) = %v, want nil", err)
 	}
@@ -340,9 +342,9 @@ func TestOpListRunningEmpty(t *testing.T) {
 	}
 }
 
-// TestOpListRunningFiltersByPrefix confirms ListRunning(prefix) (04 §2.1
-// rule 3) filters the DECODED session names to the given prefix rather than
-// over-reporting every launched session regardless of what was asked for.
+// TestOpListRunningFiltersByPrefix confirms ListRunning(prefix) filters the
+// DECODED session names to the given prefix rather than over-reporting
+// every launched session regardless of what was asked for.
 func TestOpListRunningFiltersByPrefix(t *testing.T) {
 	l, _ := newTestLifecycle(t)
 	ctx := context.Background()
@@ -372,8 +374,8 @@ func TestOpListRunningFiltersByPrefix(t *testing.T) {
 	}
 }
 
-// TestOpListRunningUsesChildrenOfParentNotStaleSidecar confirms list-running
-// enumerates the children-of-parent jobs list (04 §2.1 rule 2/3) rather than
+// TestOpListRunningUsesChildrenOfParentNotStaleSidecar confirms
+// list-running enumerates the children-of-parent jobs list rather than
 // trusting the sidecar as the existence source: a binding whose child job
 // was deregistered out-of-band (never going through opStop, so the sidecar
 // binding itself is untouched) must NOT be reported as running — the
@@ -407,11 +409,10 @@ func TestOpListRunningUsesChildrenOfParentNotStaleSidecar(t *testing.T) {
 	}
 }
 
-// TestOpProvisionThenExecWithoutLaunch is the RPP-PROVISION-001 acceptance
-// check: after provision (no launch), is-running is false, list-running
+// TestOpProvisionThenExecWithoutLaunch is the provision acceptance check: after provision (no launch), is-running is false, list-running
 // omits the session, YET the box already answers exec — proving the
 // launched marker, not mere alloc existence, is what is-running keys off
-// (04 §6 decision table).
+// (the wire contract's decision table).
 func TestOpProvisionThenExecWithoutLaunch(t *testing.T) {
 	l, srv := newTestLifecycle(t)
 	ctx := context.Background()
@@ -443,9 +444,8 @@ func TestOpProvisionThenExecWithoutLaunch(t *testing.T) {
 		t.Fatalf("exec stdout = empty, want fakenomad's scripted reply")
 	}
 
-	// provision is idempotent (fnrt-t4l.46): a second provision on the same
-	// live, unlaunched box adopts it instead of erroring, and dispatches no
-	// second child.
+	// provision is idempotent: a second provision on the same live, unlaunched
+	// box adopts it instead of erroring, and dispatches no second child.
 	if err := l.opProvision(ctx, session); err != nil {
 		t.Fatalf("second provision on a live unlaunched box = %v, want nil (adopt)", err)
 	}
@@ -463,8 +463,8 @@ func TestOpProvisionThenExecWithoutLaunch(t *testing.T) {
 // marker, otherwise is-running reports runtime-missing and gc retires a live
 // allocation immediately.
 //
-// The pane body is gc's rendered command and nothing else: the pack's former
-// launch-script seam is deleted (cr-3vvnb5.3), so there is no pack-side pane
+// The pane body is gc's rendered command and nothing else: the pack's
+// former launch-script seam is deleted, so there is no pack-side pane
 // command left that could displace it.
 func TestOpExecConfirmsASeparableTransportLaunch(t *testing.T) {
 	l, _ := newTestLifecycle(t)
@@ -516,8 +516,8 @@ esac
 }
 
 // TestOpExecPrimesTransportLaunchAsynchronouslyViaDetachedWindow is the
-// RED/GREEN pair for cr-gdeav.6.13. Attempt 6 (pack 6d13b8f, which fixed
-// cr-gdeav.6.12 by calling startupPrime synchronously from
+// RED/GREEN pair for a production loop. Attempt 6 (pack 6d13b8f, which fixed
+// the prior defect by calling startupPrime synchronously from
 // markTransportLaunched) looped in production: supervisor.log showed
 // op=start cycling provider_error(~5s) -> stale_async_start(~30.5-30.7s),
 // with a FRESH dispatch every cycle, because the blocking readiness wait now
@@ -625,8 +625,7 @@ esac
 
 // TestOpExecPreservesTransportRespawnVerbAndRenderedCommand: the pack keeps
 // gc's transport verb and gc's rendered pane command on a respawn - the
-// launch-script seam that used to compete for that slot is deleted
-// (cr-3vvnb5.3).
+// launch-script seam that used to compete for that slot is deleted.
 func TestOpExecPreservesTransportRespawnVerbAndRenderedCommand(t *testing.T) {
 	l, _ := newTestLifecycle(t)
 	ctx := context.Background()
@@ -664,10 +663,10 @@ esac
 	}
 }
 
-// countDispatchCalls counts child-job dispatch requests for parentJobID in a
-// fakenomad trace — the assertion an adopt-instead-of-redispatch path needs:
-// exactly one child ever minted for a session, however many times its
-// provision/start is re-driven (04 §2.1 rule 4).
+// countDispatchCalls counts child-job dispatch requests for parentJobID in
+// a fakenomad trace — the assertion an adopt-instead-of-redispatch path
+// needs: exactly one child ever minted for a session, however many times
+// its provision/start is re-driven.
 func countDispatchCalls(trace []string, parentJobID string) int {
 	n := 0
 	for _, req := range trace {
@@ -679,10 +678,10 @@ func countDispatchCalls(trace []string, parentJobID string) int {
 }
 
 // TestOpProvisionOnLaunchedSessionIsRejected draws the other edge of
-// fnrt-t4l.46's idempotency: adoption covers a box this pack made but never
+// provision's idempotency: adoption covers a box this pack made but never
 // launched. A box with an agent already running in it is a genuine duplicate,
-// not a retry, so provision must still reject it with the 04 §6 wire-contract
-// phrase gc infers ErrSessionExists from (R1a-02).
+// not a retry, so provision must still reject it with the wire-contract
+// phrase gc infers ErrSessionExists from.
 func TestOpProvisionOnLaunchedSessionIsRejected(t *testing.T) {
 	l, _ := newTestLifecycle(t)
 	ctx := context.Background()
@@ -696,10 +695,10 @@ func TestOpProvisionOnLaunchedSessionIsRejected(t *testing.T) {
 	}
 }
 
-// TestProvisionReapsBoxOlderThanAdoptLimit is rule 1 of cr-gdeav.6.1:
+// TestProvisionReapsBoxOlderThanAdoptLimit is the first adoption rule:
 // provision must never adopt a provisioned box older than the adoption age
 // limit, and what it does instead is REAP (deregister + tombstone) and
-// dispatch fresh — executive ruling cr-mnl96 G2, option A. The fixture is the
+// dispatch fresh. The fixture is the
 // real DF-03 shape: a box dispatched 14h20m ago, still resident, still bound,
 // still unlaunched. Before the gate, provision re-staged yesterday's box and
 // minted nothing; the canary did exactly that at 2026-09-06T11:15Z.
@@ -717,7 +716,7 @@ func TestProvisionReapsBoxOlderThanAdoptLimit(t *testing.T) {
 	}
 
 	// Age the binding the way the canary aged: the box stays resident and the
-	// binding keeps the CreatedAt dispatch stamped at 04 §2.1 rule 1.
+	// binding keeps the CreatedAt stamped at dispatch.
 	aged := *first
 	aged.CreatedAt = time.Now().UTC().Add(-14*time.Hour - 20*time.Minute)
 	if err := l.sidecar.save(aged); err != nil {
@@ -768,7 +767,7 @@ func TestProvisionReapsBoxOlderThanAdoptLimit(t *testing.T) {
 }
 
 // TestAdoptionReapsBoxWhoseAgentCannotBeProbed is the bounded probe-reap rule
-// of the human ruling cr-gdeav.6.1-probe-absence-unknown: an adopt read that
+// for probe absence being unknown: an adopt read that
 // CANNOT CONFIRM the agent absent is a reap trigger, never a reuse permission.
 // The state is a young box (inside GC_NOMAD_ADOPT_MAX_AGE), launched=false,
 // whose alloc is resident while the in-box liveness probe cannot be delivered.
@@ -867,7 +866,7 @@ func TestAdoptionReapsBoxWhoseAgentCannotBeProbed(t *testing.T) {
 	}
 }
 
-// TestAdoptionRefusesBoxWhoseAgentIsRunning is rule 2 of cr-gdeav.6.1: before
+// TestAdoptionRefusesBoxWhoseAgentIsRunning is the second adoption rule: before
 // reusing a box, adoption has to verify the agent is ABSENT. The state that
 // makes this load-bearing is the crash window between a successful launch exec
 // and the confirmLaunched write — launched=false with a live agent inside.
@@ -976,8 +975,8 @@ func readReapTombstones(t *testing.T, l *lifecycle) []map[string]any {
 	return out
 }
 
-// TestOpStartAfterProvisionAdoptsTheProvisionedBox is the start-retry half of
-// fnrt-t4l.46: gc's controller provisions, then starts (or re-drives start
+// TestOpStartAfterProvisionAdoptsTheProvisionedBox is the start-retry half
+// of adoption: gc's controller provisions, then starts (or re-drives start
 // after a launch it never got to confirm). Start must resume into the box
 // provision already made — launching there, minting no second child — rather
 // than dispatching again or being rejected by the already-exists check.
@@ -1020,7 +1019,7 @@ func TestOpStartLaunchesOverExec(t *testing.T) {
 	}
 }
 
-// TestOpRelaunchReusesTheSameAlloc drives the warm-relaunch path (04 §7):
+// TestOpRelaunchReusesTheSameAlloc drives the warm-relaunch path:
 // provision, relaunch (no prior opStart), and confirm the child job ID is
 // unchanged — i.e. relaunch never re-dispatches — while is-running flips
 // true exactly like a full start would.
@@ -1030,8 +1029,8 @@ func TestOpRelaunchReusesTheSameAlloc(t *testing.T) {
 	const session = "sess-relaunch"
 
 	// A relaunch replays the rendered command the session was first launched
-	// with (cr-3vvnb5.3): the pack keeps no bootstrap of its own, so a relaunch
-	// of a never-launched box has nothing to exec and fails closed.
+	// with: the pack keeps no bootstrap of its own, so a relaunch of a
+	// never-launched box has nothing to exec and fails closed.
 	if err := l.opStartWithConfig(ctx, session, withPane(stageConfig{})); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -1040,7 +1039,7 @@ func TestOpRelaunchReusesTheSameAlloc(t *testing.T) {
 		t.Fatalf("sidecar.load before relaunch = (%v, %v, %v)", before, ok, err)
 	}
 
-	// Take the launched agent out from under the box first (the 08 §3
+	// Take the launched agent out from under the box first (the
 	// in-box-agent-kill shape faults_test.go models): relaunch replays the
 	// recorded command into the same pane name, so it is for a box whose agent
 	// is gone, not for one that is still running.
@@ -1073,7 +1072,7 @@ func TestOpRelaunchReusesTheSameAlloc(t *testing.T) {
 
 // TestOpRelaunchWithoutABoxFails confirms relaunch on a session with no
 // provisioned box (never started/provisioned) fails rather than silently
-// dispatching one — relaunch never re-dispatches (04 §7).
+// dispatching one — relaunch never re-dispatches.
 func TestOpRelaunchWithoutABoxFails(t *testing.T) {
 	l, _ := newTestLifecycle(t)
 	if err := l.opRelaunch(context.Background(), "never-provisioned"); err == nil {
@@ -1127,10 +1126,10 @@ func countRegisterCalls(trace []string) int {
 	return n
 }
 
-// TestOpStartSucceedsWhenParentExistsAndRegisterIsForbidden models the
-// NRT-P2-06.1 lab ACL scenario: a token that 403s on register but 200s on
-// dispatch (04 §4 — register is a one-time management-token setup step, not
-// a per-Start action). With the parent already registered and matching this
+// TestOpStartSucceedsWhenParentExistsAndRegisterIsForbidden models the lab
+// ACL scenario: a token that 403s on register but 200s on
+// dispatch (register is a one-time management-token setup step, not a
+// per-Start action). With the parent already registered and matching this
 // build's node pool, Start must succeed WITHOUT ever calling register.
 func TestOpStartSucceedsWhenParentExistsAndRegisterIsForbidden(t *testing.T) {
 	l, srv := newTestLifecycle(t)
@@ -1205,8 +1204,8 @@ func TestOpStartRegistersWhenNodePoolDrifted(t *testing.T) {
 }
 
 // TestOpStartDetectsJobspecDriftAndFailsClearlyWhenRegisterIsForbidden
-// confirms fnrt-t4l.9: a registered parent that matches this build's node
-// pool but carries a stale task (e.g. t4l.7's supervisor-script swap) must
+// confirms drift detection: a registered parent that matches this build's
+// node pool but carries a stale task (e.g. a supervisor-script swap) must
 // still be recognized as drifted via the jobspec-hash Meta fingerprint, not
 // silently treated as a match — and when the dispatch-only token then 403s
 // on the resulting register attempt, the error must name the parent as
@@ -1357,15 +1356,15 @@ printf '%s\n' "$!" >"$NOMAD_ALLOC_DIR/.gc-log-shipper.pid"
 	}
 }
 
-// TestOpStopEgressesBeforeDeregister drives the NRT-P1-07 acceptance: with
+// TestOpStopEgressesBeforeDeregister drives the egress acceptance: with
 // egress configured, stop reads every allocation's declared egress files via
 // the fs API, lands them under the sink directory, and the fake's request
 // trace shows the fs-cat read(s) completing strictly before the deregister
 // call.
 //
-// The agent-capture trio (cr-gdeav.6.5) is named in the assertions: agent.exit
-// plus the captured stdout/stderr must be in the sink, because after the
-// deregister there is no pane to peek, `nomad alloc logs` reads the task's own
+// The agent-capture trio is named in the assertions: agent.exit plus the
+// captured stdout/stderr must be in the sink, because after the deregister
+// there is no pane to peek, `nomad alloc logs` reads the task's own
 // (pause-shell) streams, and `gc session logs` cannot resolve an
 // `--ephemeral` codex session — the trio is unreachable everywhere else.
 //
@@ -1565,8 +1564,8 @@ func TestOpStopEgressSurvivesAbsentCaptureFiles(t *testing.T) {
 }
 
 // TestOpStopSkipsEgressWhenDisabled confirms a lifecycle with no egress
-// directory configured (the zero value, matching every pre-NRT-P1-07
-// deployment) never issues an fs-cat request on stop.
+// directory configured (the zero value, matching every deployment from
+// before egress existed) never issues an fs-cat request on stop.
 func TestOpStopSkipsEgressWhenDisabled(t *testing.T) {
 	l, srv := newTestLifecycle(t)
 	ctx := context.Background()
@@ -1623,7 +1622,7 @@ func TestOpStopRetryAfterDeregisterFaultSkipsReEgress(t *testing.T) {
 	}
 }
 
-// TestAwaitExecAllocReadyWaitsForTaskRunning is the cr-u9vul4 contract.
+// TestAwaitExecAllocReadyWaitsForTaskRunning is the task-readiness contract.
 // Nomad marks an allocation non-terminal the moment it is placed, so
 // currentAlloc answers for it while the agent task inside is still in
 // "Task Setup" — and an exec into that alloc gets its stream torn down
@@ -1787,7 +1786,7 @@ func TestExecStageWaitsForTaskRunningBeforeExecing(t *testing.T) {
 	}
 }
 
-// TestLaunchFailureCarriesBoxStderr closes the cr-86ytiq observability gap:
+// TestLaunchFailureCarriesBoxStderr closes an observability gap:
 // gc's exec transport renders any nonzero exec exit as "tmux exited N" and
 // discards the pack's own stdout/stderr, so the ONLY reason a pane died that
 // can survive to the controller is the box's diagnostic collected here. The

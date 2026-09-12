@@ -120,7 +120,7 @@ type OpResult struct {
 
 // StartPayload is the minimal `start` stdin the pack requires since v1.0.7.
 //
-// The prebaked-image shape (cr-3vvnb5) deleted the deployment-owned bootstrap
+// The prebaked-image shape deleted the deployment-owned bootstrap
 // the pack used to substitute when gc sent no rendered command, so a start
 // with an empty payload now fails closed with "GC_NOMAD_AGENT_IMAGE is set but
 // gc sent no rendered launch command". Every drill passed stdin=nil and so

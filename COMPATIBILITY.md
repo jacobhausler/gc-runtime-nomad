@@ -12,8 +12,8 @@ released upstream `gc`.
 
 ## Gas City (`gc`) — READ THIS FIRST
 
-**Required: a `gc` built from the Westlands EDGE lineage. No released
-upstream `gc` can run this pack.**
+**Required: a `gc` built from the maintainer's private development lineage.
+No released upstream `gc` can run this pack.**
 
 This is not a version floor that a newer release will eventually clear on
 its own. The pack rides a *city pin* carrying ~19 behaviour families.
@@ -230,7 +230,7 @@ over alloc-exec, so the image must provide:
 | `tmux` | the session is a tmux session; the runtime drives it directly |
 | `tar` | workspace and secret staging is a tar stream over exec-stdin, extracted in the box with `tar -x -f - -C <dir>` |
 | `ps` | the launch-time agent probe (`ps -eo comm`, falling back to `ps -o comm`) — see below |
-| `gc`, `bd` | the seat's own Gas City toolchain, from the same EDGE lineage as the host `gc` |
+| `gc`, `bd` | the seat's own Gas City toolchain, from the same private development lineage as the host `gc` |
 | your agent CLI | codex, claude, or whatever the provider resolves to |
 
 **The in-box `gc` must match the pin, not merely be recent.** Everything
@@ -325,7 +325,8 @@ discovered later.
    once at startup and baked into the *parent* job spec, which every
    dispatched child inherits. There is no per-lane, per-provider or
    per-agent override, so **a codex lane and a claude lane cannot
-   coexist on one deployment of this runtime.** Tracked as `cr-420zkj`.
+   coexist on one deployment of this runtime.** Tracked in the
+   maintainer's issue list; open.
 
 2. **amd64 only.** No arm64 path exists — the image build, the `gc`
    inside it, and the log-shipper binary are all x86_64. The placement
@@ -378,12 +379,12 @@ discovered later.
    city content is composed onto it by `gc build-image`, and the
    resulting tag is what you set as `GC_NOMAD_AGENT_IMAGE`. Nor does
    `build-image.sh` run anywhere but the host that stages the linux pin.
-   Tracked as `cr-2dh2w9`.
+   Tracked in the maintainer's issue list; open.
 
 5. **Credentials reach the agent's process environment.** See
    *Security posture* below — this is the item most likely to decide
    whether you can adopt, and it was undocumented until an outside
-   review found it. Tracked with the install work, `cr-pbqh1d`.
+   review found it. Tracked with the install work; open.
 
 ---
 

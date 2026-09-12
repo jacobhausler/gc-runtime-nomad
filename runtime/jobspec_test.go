@@ -13,9 +13,10 @@ import (
 
 // TestParentJobSpecLogShipperDisabledByDefault confirms an unset
 // GC_NOMAD_LOG_SINK (logShipperConfig{}) leaves the parent job spec exactly
-// as it was before fnrt-t4l.13 — a single "agent" task, no extra ports, no
+// as it was before the log shipper existed — a single "agent" task, no
+// extra ports, no
 // Leader flag — so every existing deployment's jobspec (and its
-// jobspecHash-based drift detection, fnrt-t4l.9) is unaffected.
+// jobspecHash-based drift detection) is unaffected.
 func TestParentJobSpecLogShipperDisabledByDefault(t *testing.T) {
 	spec := parentJobSpec("default", "", "gc-sessions", logShipperConfig{}, testAgentImage, placementConfig{})
 
@@ -118,8 +119,8 @@ func TestParentJobSpecDockerImageKeepsOptionalLogShipper(t *testing.T) {
 // session shape there is: pointing the pack at a different agent image must
 // land a different jobspec hash, so ensureParentRegistered sees the
 // already-registered parent as stale instead of letting boxes keep launching
-// from the old task (cr-3vvnb5.2 retires the no-image variant this row once
-// compared against).
+// from the old task (the prebaked-image change retired the no-image variant
+// this row once compared against).
 func TestJobspecHashChangesWhenAgentImageToggled(t *testing.T) {
 	off := parentJobSpec("default", "", "gc-sessions", logShipperConfig{}, testAgentImage, placementConfig{})
 	on := parentJobSpec("default", "", "gc-sessions", logShipperConfig{}, "gc-agent:other", placementConfig{})
@@ -128,8 +129,8 @@ func TestJobspecHashChangesWhenAgentImageToggled(t *testing.T) {
 	}
 }
 
-// TestParentJobSpecAddsLogShipperTask confirms the full shape fnrt-t4l.13
-// scopes: a second "log-shipper" task, driver exec, the agent task promoted
+// TestParentJobSpecAddsLogShipperTask confirms the full shape the log
+// shipper scopes: a second "log-shipper" task, driver exec, the agent task promoted
 // to Leader (kill_timeout ordering), a poststart+sidecar lifecycle, a
 // pinned+checksummed vector artifact, an embedded vector.toml template, the
 // three env-driven config values wired through, a group-local metrics port,
@@ -248,12 +249,12 @@ func TestVectorConfigEscapesVectorOwnPlaceholders(t *testing.T) {
 	}
 }
 
-// TestVectorConfigRoutesTaskAndAllocValuesThroughNomadTemplate is the
-// fnrt-3bvg regression: gc_log_sink's URI (and every other value Vector was
+// TestVectorConfigRoutesTaskAndAllocValuesThroughNomadTemplate is a
+// regression test: gc_log_sink's URI (and every other value Vector was
 // previously expected to resolve from its own process environment, other
 // than the two documented exceptions above) must be rendered by Nomad's own
-// template `env` function instead, matching fnrt-t4l.24's prom_exporter fix.
-// A live-Nomad proof (ops/receipts/nrt-t4l-20-lab-proof.md) showed Vector's
+// template `env` function instead, matching the prom_exporter fix.
+// A live-Nomad proof showed Vector's
 // own "${GC_LOG_SINK}" substitution does not reliably resolve inside the
 // exec-driver task's environment, producing an invalid-URI Exit 78 that
 // kills the whole session allocation.
@@ -290,8 +291,8 @@ func TestVectorConfigRoutesTaskAndAllocValuesThroughNomadTemplate(t *testing.T) 
 	}
 }
 
-// TestVectorConfigPromExporterAddressRendersThroughFakenomad is the
-// fnrt-t4l.24 regression, RUN-2: a hand-rolled nomadTemplatePass simulator
+// TestVectorConfigPromExporterAddressRendersThroughFakenomad is a
+// regression test: a hand-rolled nomadTemplatePass simulator
 // that string-matched "{{ env "NOMAD_PORT_metrics" }}" and substituted a
 // constant was rejected as insufficient evidence — it never exercised
 // fakenomad's own rendering of a Template stanza, so it could not tell a
@@ -362,8 +363,7 @@ func TestVectorConfigPromExporterAddressRendersThroughFakenomad(t *testing.T) {
 	}
 }
 
-// TestVectorConfigLogSinkURIRendersThroughFakenomad is the fnrt-3bvg
-// regression, mirroring TestVectorConfigPromExporterAddressRendersThroughFakenomad
+// TestVectorConfigLogSinkURIRendersThroughFakenomad mirrors TestVectorConfigPromExporterAddressRendersThroughFakenomad
 // for the sibling defect at gc_log_sink's URI: it drives the REAL
 // parentJobSpec through fakenomad's own Template-stanza rendering and reads
 // the rendered file back off disk, then asserts the sink URI is the real,
@@ -458,7 +458,7 @@ func TestVectorConfigDisablesFileCheckpoints(t *testing.T) {
 // ops/nomad/agent-launch.sh taps the agent's pane with `tmux pipe-pane -o
 // "cat >> '$LOGS/agent.stdout'"` (LOGS = ${NOMAD_ALLOC_DIR}/logs) and
 // runtime/ops.go's egressFiles copies alloc/logs/agent.stdout out verbatim.
-// It is UNSUFFIXED — the whole of cr-gdeav.6.5.5.
+// It is UNSUFFIXED — which is the whole of the defect below.
 const shippedAgentStdoutRel = "logs/agent.stdout"
 
 // includePatternList is the `"..."` entries of one bracketed include list.
@@ -501,8 +501,8 @@ func sourceIncludes(t *testing.T, rendered, source string) []string {
 	return patterns
 }
 
-// TestVectorSessionStdoutSourceMatchesShippedCapture is the cr-gdeav.6.5.5
-// regression: [sources.session_stdout] declared only
+// TestVectorSessionStdoutSourceMatchesShippedCapture is a regression test:
+// [sources.session_stdout] declared only
 // "{{ env "NOMAD_ALLOC_DIR" }}/logs/agent.stdout.*". Vector's glob treats that
 // "." as a literal and "*" as not crossing "/", so the pattern REQUIRES a
 // suffix and never matched the unsuffixed logs/agent.stdout the launcher
@@ -556,7 +556,7 @@ func TestVectorSessionStdoutSourceMatchesShippedCapture(t *testing.T) {
 	if stale, err := path.Match("logs/agent.stdout.*", shippedAgentStdoutRel); err != nil {
 		t.Fatalf("canary glob: %v", err)
 	} else if stale {
-		t.Fatalf("canary broken: the suffix-only pattern logs/agent.stdout.* matches %q — this test no longer proves the cr-gdeav.6.5.5 regression", shippedAgentStdoutRel)
+		t.Fatalf("canary broken: the suffix-only pattern logs/agent.stdout.* matches %q — this test no longer proves the regression", shippedAgentStdoutRel)
 	}
 }
 
@@ -606,8 +606,8 @@ func TestVectorConfigOmitsAuthBlockWithoutTokenFile(t *testing.T) {
 	}
 }
 
-// TestJobspecHashChangesWhenLogShipperToggled ties fnrt-t4l.13 into
-// fnrt-t4l.9's drift-detection mechanism: ensureParentRegistered decides
+// TestJobspecHashChangesWhenLogShipperToggled ties the log shipper into the
+// drift-detection mechanism: ensureParentRegistered decides
 // whether to re-register purely from jobspecHash, so toggling
 // GC_NOMAD_LOG_SINK on an already-registered parent must change the hash —
 // otherwise a deployment that turns the feature on would never see its
@@ -715,7 +715,7 @@ func quotedValuesInList(t *testing.T, block, key, what string) []string {
 	return out
 }
 
-// TestVectorSessionCaptureSources is cr-gdeav.6.5.8: runtime/ops.go's
+// TestVectorSessionCaptureSources: runtime/ops.go's
 // egressFiles names THREE agent-capture files inside the allocation's logs dir
 // — agent.stdout, agent.stderr, agent.exit — but vectorConfigTOML shipped file
 // patterns for stdout alone. The other two channels were written by
@@ -791,7 +791,7 @@ func TestVectorSessionCaptureSources(t *testing.T) {
 
 // TestParentJobSpecDeclaresNoDNSByDefault protects every deployment that never
 // sets GC_NOMAD_DNS_SERVERS: the session group must render exactly the network
-// stanza it rendered before cr-tzsxk.18 — no DNS key at all — so that deploy-
+// stanza it rendered before DNS was configurable — no DNS key at all — so that deploy-
 // ment's jobspecHash (and therefore ensureParentRegistered's drift decision) is
 // unchanged by this pack's upgrade.
 func TestParentJobSpecDeclaresNoDNSByDefault(t *testing.T) {
@@ -809,7 +809,7 @@ func TestParentJobSpecDeclaresNoDNSByDefault(t *testing.T) {
 	}
 }
 
-// TestParentJobSpecCarriesDeploymentDNS is the bug cr-tzsxk.18 filed: an alloc
+// TestParentJobSpecCarriesDeploymentDNS covers a filed bug: an alloc
 // on a systemd-resolved client host inherits the 127.0.0.53 stub, which is
 // unreachable from its bridge netns, so no name resolves inside the box. The
 // configured resolvers must reach Nomad's network.DNS.Servers on the wire —
@@ -867,10 +867,10 @@ func TestParentJobSpecAppendsNodeConstraintsAfterKernelFatalRule(t *testing.T) {
 }
 
 // TestJobspecHashChangesWhenPlacementConfigured wires the two knobs into
-// fnrt-t4l.9's drift detection: ensureParentRegistered decides to re-register
+// the drift detection: ensureParentRegistered decides to re-register
 // purely from jobspecHash, so a deployment that configures a resolver or a
 // fence on an already-registered parent must see the parent actually change —
-// which is the whole point of cr-tzsxk.18 (an out-of-band re-registration is
+// which is the whole point of that bug (an out-of-band re-registration is
 // not needed once the runtime's own register carries the placement).
 func TestJobspecHashChangesWhenPlacementConfigured(t *testing.T) {
 	off := parentJobSpec("default", "", "gc-sessions", logShipperConfig{}, testAgentImage, placementConfig{})
@@ -990,10 +990,10 @@ func TestParentJobSpecFencesPlacementToAmd64(t *testing.T) {
 //
 // The image used to be baked into the parent's task, which made the parent
 // image-specific: one deployment served exactly one image, and a codex lane
-// and a claude lane could not coexist on this runtime at all (cr-420zkj). The
-// parent now carries the deployment default in Meta and the task interpolates
-// it, so a dispatch can name a different image for one session without
-// touching the parent.
+// and a claude lane could not coexist on this runtime at all. The parent
+// now carries the deployment default in Meta and the task interpolates it,
+// so a dispatch can name a different image for one session without touching
+// the parent.
 func TestParentJobSpecResolvesTheImageFromDispatchMeta(t *testing.T) {
 	spec := parentJobSpec("gc", "", "gc-sessions", logShipperConfig{}, testAgentImage, placementConfig{})
 

@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// cr-8eagyh. The pack hardcoded codex's TUI strings in the prime script while the
+// The pack hardcoded codex's TUI strings in the prime script while the
 // README promised "nothing provider-specific lives in the runtime". A non-codex
 // agent behind prime therefore got silently wrong ready/busy detection — the
 // assumption was disclosed only in a code comment. These are provider facts and

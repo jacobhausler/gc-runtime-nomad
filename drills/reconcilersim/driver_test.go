@@ -36,8 +36,8 @@ func buildPackCLI(t *testing.T) string {
 
 // newTestDriver wires a Driver at a fresh fakenomad server plus the real
 // built pack CLI binary, with its own sidecar dir — this package's
-// hermetic offline twin of an L4 run (NRT-P2-06a: "Offline-testable
-// against fakenomad").
+// hermetic offline twin of an L4 run (offline-testable against
+// fakenomad).
 func newTestDriver(t *testing.T) (*reconcilersim.Driver, *fakenomad.Server) {
 	t.Helper()
 	srv := fakenomad.NewServer()
@@ -63,7 +63,7 @@ func newTestDriver(t *testing.T) (*reconcilersim.Driver, *fakenomad.Server) {
 
 // startSession execs `start` for session through the real pack CLI and
 // returns the dispatched child job ID, resolved by its gc_session Meta key
-// (never derivable from the session name itself, e2a-job-id-charset-gap).
+// (never derivable from the session name itself).
 func startSession(t *testing.T, ctx context.Context, d *reconcilersim.Driver, session string) string {
 	t.Helper()
 	res, err := d.RunOp(ctx, "start", reconcilersim.StartPayload(""), session)
@@ -104,7 +104,7 @@ func TestLifecycleRoundtripScenarioOffline(t *testing.T) {
 // TestClassifyDeathBoxKillOffline drives ClassifyDeath (classify.go)
 // through the real pack CLI + observer client against fakenomad's
 // SetAllocStatus fault-injection primitive, which exists specifically so
-// tests can simulate the 08 §1.1 box-kill row's ClientStatus transition
+// tests can simulate the box-kill row's ClientStatus transition
 // (a fake box-kill; fakenomad has no real process to kill -9, so the
 // in-box-agent-kill row's classification path is covered as a pure-logic
 // case in classify_test.go instead — see TestClassifyDeath).
@@ -141,7 +141,7 @@ func TestClassifyDeathBoxKillOffline(t *testing.T) {
 }
 
 // TestCountReplacementAllocsViaPlaceAlloc confirms the "zero replacement
-// allocs" pass criterion (04 §4 fencing) trips correctly once fakenomad's
+// allocs" pass criterion (fencing) trips correctly once fakenomad's
 // PlaceAlloc simulates a second allocation appearing under the same job.
 func TestCountReplacementAllocsViaPlaceAlloc(t *testing.T) {
 	d, srv := newTestDriver(t)

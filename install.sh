@@ -5,12 +5,12 @@
 # answers the RPP protocol handshake.
 #
 # What is NOT here any more: the opt-in agent-launch.sh deploy this script used
-# to carry (cr-gdeav.6.10). That step existed to put a deployment-owned
+# to carry. That step existed to put a deployment-owned
 # bootstrap on the shared artifact volume for the launched pane to exec, and
 # the bootstrap was only ever needed to give a host-mounted toolchain a PATH and
 # an agent HOME. The prebaked image owns the agent toolchain now: the pane runs
 # gc's rendered launch command and nothing else, so there is no bootstrap left
-# for an install step to deploy (cr-3vvnb5).
+# for an install step to deploy.
 #
 # Usage:
 #   ./install.sh    go install the runtime onto PATH

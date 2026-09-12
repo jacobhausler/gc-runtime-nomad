@@ -224,12 +224,11 @@ esac
 			t.Fatalf("set stale candidate terminal: allocation %q not found", allocs[0].ID)
 		}
 
-		// D3 canary signature (cr-x6nr04, 2026-09-10): the session's earlier
-		// box was stopped or reaped and its terminal child is still in the
-		// parent's jobs list while a live child exists. Terminal residue is
-		// not a candidate, so it must not be counted; counting it read one
-		// live box plus one dead child as a disputed binding and refused the
-		// start on every retry.
+		// D3 canary signature (2026-09-10): the session's earlier box was stopped
+		// or reaped and its terminal child is still in the parent's jobs list
+		// while a live child exists. Terminal residue is not a candidate, so it
+		// must not be counted; counting it read one live box plus one dead child
+		// as a disputed binding and refused the start on every retry.
 		before := countDispatchCalls(srv.Trace(), l.parentJobID)
 		got, err := l.recoverBinding(ctx, session, nil)
 		if err != nil {

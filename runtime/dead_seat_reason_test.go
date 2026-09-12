@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// cr-8eagyh gate 4: every failure names its cause at the layer that knows.
+// Gate 4: every failure names its cause at the layer that knows.
 //
 // A seat whose box has died is correctly dropped from list-running — reporting a
 // corpse as alive is the T5 defect. But dropping it SILENTLY leaves an operator

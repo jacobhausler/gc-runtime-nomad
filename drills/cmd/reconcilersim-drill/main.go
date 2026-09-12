@@ -1,17 +1,17 @@
-// Command reconcilersim-drill is the standalone half of the NRT-P2-06a L4
+// Command reconcilersim-drill is the standalone half of the L4
 // harness ("the L4 harness = pack CLI + scripted reconciler-sim driver,
-// standing in for GC until L5" — 08 §1.1). It wires a
+// standing in for GC until L5"). It wires a
 // reconcilersim.Driver from the environment and runs one named scenario
 // against whatever Nomad target GC_NOMAD_ADDR names — fakenomad in offline
 // mode, or the real T1 lab in L4 mode (set GC_NOMAD_TLS_CACERT/CERT/KEY per
-// the NRT-P2-02 baseline).
+// the mTLS baseline).
 //
 // This binary ships exactly one built-in scenario, "lifecycle-roundtrip"
 // (reconcilersim.LifecycleRoundtripSteps) — a smoke check that the wiring
 // (pack CLI subprocess, mTLS front proxy, observer client) actually reaches
-// the target end to end. The 08 §1.1 per-drill beads (fnrt-o37.3 ..
-// fnrt-o37.14) are expected to script their own scenario as a short Go
-// program importing this same reconcilersim package (New, Step, RunScript,
+// the target end to end. Each individual drill is expected to script its
+// own scenario as a short Go program importing this same reconcilersim
+// package (New, Step, RunScript,
 // the classify.go helpers) — this command is a working example of that
 // shape, not a driver for all eleven drills.
 package main

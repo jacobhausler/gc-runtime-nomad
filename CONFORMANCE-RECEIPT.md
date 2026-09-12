@@ -1,4 +1,4 @@
-# Phase-1 conformance receipt (NRT-P1-90)
+# Phase-1 conformance receipt
 
 Commit: `6e280bf6a5ee08a8db5e137f4c90a3b845232a4c`
 gc: `/cache/gc-receipt-0d3256df86` — commit `0d3256df86c5ff8d8355ca5b905c78b0cb6816da`, version `dev`, sha256 `4be57a822f1e5c48497f68f11a786cc247ad4a2bee051117dab63fb75b957fad`
@@ -8,7 +8,7 @@ Conformance ladder exit: 0
 Full offline ladder — no live Nomad cluster or network required. A row
 reading FAIL means the ladder is red at this commit; re-run `./receipt.sh`
 after a fix and regenerate this file. Fixing a red ladder step is out of
-scope for this receipt — bounce back to the owning bead.
+scope for this receipt — bounce it back to whoever owns the failing rung.
 
 The rows report what `gc runtime check` / `gc runtime conformance` said
 and what the ladder's own rungs did; `receipt.sh` exits non-zero if any row

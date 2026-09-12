@@ -21,10 +21,10 @@ type reconcilerStep struct {
 
 // runReconcilerDrill drives l through steps in order against srv: inject,
 // then do, then assert, for each step in turn. It is this pack's scripted
-// reconciler-sim harness (NRT-P1-09) — a reusable "inject fault X, run op
-// Y, expect Z" shape so the L4 drills that replay these scenarios
-// end-to-end (owner assigned per R3b-14) can script sequences the same way
-// this L2 suite does, without re-deriving per-step wiring.
+// reconciler-sim harness — a reusable "inject fault X, run op Y, expect Z"
+// shape so the L4 drills that replay these scenarios end-to-end (owner
+// assigned per R3b-14) can script sequences the same way this L2 suite
+// does, without re-deriving per-step wiring.
 func runReconcilerDrill(t *testing.T, l *lifecycle, srv *fakenomad.Server, steps []reconcilerStep) {
 	t.Helper()
 	ctx := context.Background()

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# toolchain/build-image.sh — the executive host step for the session toolchain image
+# toolchain/build-image.sh — the build-host step for the session toolchain image
 #
-# cr-u7b0s.45. Validates and re-verifies the checksum pins in
+# Validates and re-verifies the checksum pins in
 # toolchain/TOOLCHAIN.lock, builds the toolchain image from
 # toolchain/Dockerfile, composes city content onto it with gc's own native
 # verb, and holds the rollback tag. It NEVER pushes and NEVER runs in an
@@ -12,19 +12,18 @@
 # gc-agent:latest) / --tag (required unless --context-only) / --push / --json,
 # plus pinned internal/buildimage/{context.go,dockerfile.go}. gc build-image
 # assembles CITY CONTENT onto `ARG BASE` and excludes secrets; it does not
-# build or checksum this estate's provider toolchain (contrib/k8s carries no
+# build or checksum a deployment's provider toolchain (contrib/k8s carries no
 # Codex at all) and `prebaked`/`image` have K8s-only readers. So gc is used
 # exactly as shipped for the half it does, and the pack holds provenance +
 # rollback for the half gc has no command for. `--push` is deliberately not
-# offered: publishing the runtime registry is a reserved owner decision
-# (AGENTS.md hard stop). The GC_TOOLCHAIN_HOST_STEP gate below encodes the
-# ruling on cr-gdeav.2.13 (cr-on8x4): allocations never publish the toolchain.
+# offered: publishing to the runtime registry is a reserved owner decision.
+# The GC_TOOLCHAIN_HOST_STEP gate below encodes the rule that allocations never
+# publish the toolchain.
 #
-# cr-dk9i2 (1.0.6) adds three things. Each names the native gc form checked
-# first, per the mechanic charter:
+# 1.0.6 adds three things. Each names the native gc form checked first:
 #
 # 1. LOCAL ARTIFACT. The lock's `gc` component is the upstream-PUBLISHED release
-#    (1.4.1, commit 58ef17e3b). The estate's live pin is NEWER — measured
+#    (1.4.1, commit 58ef17e3b). The deployment's live pin is NEWER — measured
 #    2026-09-09T14:2xZ, `gc version --json --long` -> {"commit":"e52f96f62",
 #    "version":"dev"} — so an image assembled only from published release bytes
 #    ships a gc older than the pin it exists to carry. Native forms checked:
@@ -36,15 +35,15 @@
 #    prefers it; `--published` opts back to the public default deliberately; a
 #    pinned-but-missing or mismatched binary is a hard refusal, never a silent
 #    fallback to the older gc.
-# 2. REFRESH-PIN. The nightly-pin-roll order moves the ESTATE pin and knows
+# 2. REFRESH-PIN. The deployment's own pin-roll moves the live pin and knows
 #    nothing about this file, and no gc command rewrites a pack lock. One command
 #    here rewrites the two local-artifact entries from the binary actually
 #    staged on the build host.
 # 3. BOUNDED CONTEXT. gc build-image copies the whole city directory and excludes
-#    only secrets (internal/buildimage/context.go), so `--city=/Users/home/westlands`
-#    clears gc's own gate and would ship the estate. `require_bounded_city` is
-#    the refusal gc exposes no flag for; ops/tests/test-city-kit mints a city
-#    that passes it (mints under /tmp, private GC_HOME).
+#    only secrets (internal/buildimage/context.go), so pointing `--city` at a
+#    working checkout clears gc's own gate and would ship that whole checkout.
+#    `require_bounded_city` is the refusal gc exposes no flag for; mint a
+#    throwaway city root (under /tmp, with its own GC_HOME) to pass it.
 set -euo pipefail
 
 PACK_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -72,13 +71,13 @@ lock_sha() {
   }' "$LOCK"
 }
 
-file_sha256() { # portable: the builders ship sha256sum, a Mac ships shasum
+file_sha256() { # portable: Linux ships sha256sum, macOS ships shasum
   if command -v sha256sum >/dev/null 2>&1; then sha256sum -b "$1" | awk '{print $1}'
   else shasum -a 256 -b "$1" | awk '{print $1}'
   fi
 }
 
-# --- the live-pin local artifact (cr-dk9i2) ----------------------------------
+# --- the live-pin local artifact ---------------------------------------------
 # An empty path means "no local artifact pinned" — and `build` then refuses
 # rather than quietly shipping the older published gc.
 local_artifact_path() {
@@ -86,10 +85,40 @@ local_artifact_path() {
   else lock_get gc_local_artifact
   fi
 }
-local_artifact_sha() { lock_attr gc_local_artifact sha256; }
-local_artifact_pin() { lock_attr gc_local_artifact pin; }
+# The sha256 and pin override alongside the path, and this is the whole point:
+# GC_LOCAL_ARTIFACT alone was NOT a usable override. Pointing it at your own gc
+# left the checksum and commit still being read from the lock — i.e. from the
+# maintainer's artifact — so every adopter who used the documented override got
+# a checksum failure against a binary they had never seen. An override that
+# only works for the person who wrote the default is not an override.
+local_artifact_sha() {
+  if [ -n "${GC_LOCAL_ARTIFACT_SHA256:-}" ]; then printf '%s\n' "$GC_LOCAL_ARTIFACT_SHA256"
+  else lock_attr gc_local_artifact sha256
+  fi
+}
+local_artifact_pin() {
+  if [ -n "${GC_LOCAL_ARTIFACT_PIN:-}" ]; then printf '%s\n' "$GC_LOCAL_ARTIFACT_PIN"
+  else lock_attr gc_local_artifact pin
+  fi
+}
+
+# Overriding the path without the other two is refused rather than half-applied:
+# the fallback would verify your binary against the lock's checksum and fail with
+# a mismatch, which names the wrong cause.
+require_consistent_artifact_override() {
+  [ -n "${GC_LOCAL_ARTIFACT:-}" ] || return 0
+  if [ -z "${GC_LOCAL_ARTIFACT_SHA256:-}" ] || [ -z "${GC_LOCAL_ARTIFACT_PIN:-}" ]; then
+    die "GC_LOCAL_ARTIFACT is set but GC_LOCAL_ARTIFACT_SHA256 and/or GC_LOCAL_ARTIFACT_PIN are not.
+Set all three when shipping your own gc build: the checksum and the gc commit are
+verified against the artifact, and taking them from the lock would check YOUR binary
+against the maintainer's. Compute them with:
+  shasum -a 256 <your-gc>
+  <your-gc> version --json --long   # the commit field is the pin"
+  fi
+}
 
 require_lock() {
+  require_consistent_artifact_override
   [ -f "$LOCK" ] || die "missing ${LOCK}"
   [ -f "$DOCKERFILE" ] || die "missing ${DOCKERFILE}"
   for c in gc bd git tmux codex libicu74; do
@@ -101,37 +130,38 @@ require_lock() {
   grep -qE '^rollback_image[[:space:]]' "$LOCK" || die "rollback_image is not named in ${LOCK}"
   # The local artifact is optional (the published gc is the public default), but
   # when it is named it is a checksum pin like every other line here — an
-  # unchecksummed local binary is exactly the hole cr-dk9i2 is closing.
+  # unchecksummed local binary is exactly the hole this line closes.
   if [ -n "$(lock_get gc_local_artifact)" ]; then
     [ -n "$(local_artifact_sha)" ] || die "gc_local_artifact is named but carries no sha256=<hex> pin in ${LOCK}"
     [ -n "$(local_artifact_pin)" ] || die "gc_local_artifact is named but carries no pin=<gc commit> in ${LOCK}"
   fi
 }
 
-# The estate checkout, derived rather than hardcoded: the pack lives at
-# <estate>/work/gc-runtime-nomad, so one level up answers which checkout owns it.
-estate_root() { git -C "${PACK_ROOT}/.." rev-parse --show-toplevel 2>/dev/null || true; }
+# The enclosing checkout, derived rather than hardcoded: when this pack is
+# vendored inside a larger working repository, one level up answers which
+# checkout owns it.
+enclosing_repo_root() { git -C "${PACK_ROOT}/.." rev-parse --show-toplevel 2>/dev/null || true; }
 
 # gc build-image copies the city whole (secrets excepted); nothing in gc refuses
-# an estate root, so the refusal lives here. It only ever refuses MORE than gc
-# does — never fewer cities — which is the safe direction for a gate.
+# a working-checkout root, so the refusal lives here. It only ever refuses MORE
+# than gc does — never fewer cities — which is the safe direction for a gate.
 require_bounded_city() {
-  [ -n "$CITY" ] || die "--city=<city-path> required: gc build-image copies the WHOLE city directory. Pass a bounded city — ops/tests/test-city-kit/mk-test-city.sh mints one under /tmp."
+  [ -n "$CITY" ] || die "--city=<city-path> required: gc build-image copies the WHOLE city directory. Pass a bounded city — a city root that contains only what you want inside the image, e.g. a throwaway one under /tmp."
   [ -d "$CITY" ] || die "no such city directory: $CITY"
   local_abs="$(cd "$CITY" && pwd -P)"
   if [ ! -f "${local_abs}/city.toml" ]; then
     die "refusing ${local_abs}: no city.toml, so this is not a city root. gc build-image copies whatever it is given — pass a bounded city root."
   fi
-  root="$(estate_root)"
+  root="$(enclosing_repo_root)"
   if [ -n "$root" ]; then
     case "$local_abs" in
       "$root"|"$root"/*)
-        die "refusing ${local_abs}: it is the estate checkout (or lives inside it). gc build-image excludes only secrets, so this would copy the whole estate — cleanroom, ops, backups, worktrees — into a session image. Pass a bounded city: ops/tests/test-city-kit/mk-test-city.sh mints one under /tmp."
+        die "refusing ${local_abs}: it is the enclosing working checkout (or lives inside it). gc build-image excludes only secrets, so this would copy that whole checkout — docs, ops, backups, worktrees — into a session image. Pass a bounded city: a city root that contains only what you want inside the image, e.g. a throwaway one under /tmp."
         ;;
     esac
   fi
   if [ -e "${local_abs}/_cleanroom" ]; then
-    die "refusing ${local_abs}: it carries estate material (_cleanroom). Pass a bounded city instead."
+    die "refusing ${local_abs}: it carries maintainer-private material (_cleanroom). Pass a bounded city instead."
   fi
   CITY="$local_abs"
 }
@@ -241,11 +271,11 @@ case "$cmd" in
     fi
     ;;
 
-  refresh-pin) # rewrite the two local-artifact lock entries from the staged pin (cr-dk9i2)
+  refresh-pin) # rewrite the two local-artifact lock entries from the staged pin
     [ -f "$LOCK" ] || die "missing ${LOCK}"
     art="${ARTIFACT:-${GC_LOCAL_ARTIFACT:-}}"
-    [ -n "$art" ] || die "usage: toolchain/build-image.sh refresh-pin --artifact=<path-to-linux-gc>   (e.g. --artifact=/mnt/nomad/gc/bin/<pin>/gc on the build host that stages it)"
-    [ -f "$art" ] || die "no gc binary at ${art}. This runs on the host that STAGES the linux pin (rhuidean: /mnt/nomad/gc/bin/<pin>/gc); a Mac's live pin is a darwin build and cannot ship in a linux/amd64 image."
+    [ -n "$art" ] || die "usage: toolchain/build-image.sh refresh-pin --artifact=<path-to-linux-gc>   (the path, on this host, of the linux/amd64 gc you intend to ship)"
+    [ -f "$art" ] || die "no gc binary at ${art}. Run this on the build host where the linux/amd64 gc you intend to ship is staged, and pass its path as --artifact; a darwin or arm64 build cannot ship in a linux/amd64 image."
     kind="$(file -b "$art" 2>/dev/null || echo unknown)"
     case "$kind" in
       *"ELF 64-bit"*x86-64*) : ;;
@@ -284,7 +314,7 @@ case "$cmd" in
         END { exit (pinned ? 0 : 3) }
       ' "$LOCK" > "$tmp"; then
       rm -f "$tmp"
-      die "no gc_local_artifact line in ${LOCK} — that line is part of the lock, add it (see the cr-dk9i2 block) rather than pinning by hand"
+      die "no gc_local_artifact line in ${LOCK} — that line is part of the lock, add it (see the LIVE pin block there) rather than pinning by hand"
     fi
     mv "$tmp" "$LOCK"
     echo "refresh-pin: gc_local_artifact ${was:-none} -> ${art} sha256=${sha} pin=${pin}"
@@ -292,7 +322,7 @@ case "$cmd" in
     ;;
 
   build) # the host step an allocation must never run
-    [ "${GC_TOOLCHAIN_HOST_STEP:-}" = 1 ] || die "refusing to build: publishing the toolchain is an executive host step (ruling cr-on8x4 on cr-gdeav.2.13). Re-run with GC_TOOLCHAIN_HOST_STEP=1 on the build host."
+    [ "${GC_TOOLCHAIN_HOST_STEP:-}" = 1 ] || die "refusing to build: building the toolchain image is a build-host step and must never run inside a session allocation. Re-run with GC_TOOLCHAIN_HOST_STEP=1 on the build host."
     require_lock
     command -v docker >/dev/null || die "docker not found on this host"
     agent="${OUT_TAG:-$(lock_get agent_image)}"
@@ -303,7 +333,7 @@ case "$cmd" in
     else
       art="$(local_artifact_path)"
       if [ -z "$art" ]; then
-        die "no gc_local_artifact in ${LOCK}. Building now ships published gc $(lock_version gc), which is likely older than the live pin. Pin the staged binary with 'toolchain/build-image.sh refresh-pin --artifact=/mnt/nomad/gc/bin/<pin>/gc', or pass --published deliberately."
+        die "no gc_local_artifact in ${LOCK}. Building now ships published gc $(lock_version gc), which is likely older than the live pin. Pin the staged binary with 'toolchain/build-image.sh refresh-pin --artifact=<path-to-staged-linux-gc>', or pass --published deliberately."
       fi
       [ -f "$art" ] || die "gc_local_artifact=${art} is not on this host. Run the build on the host that stages it, or pass --published for upstream gc $(lock_version gc). Refusing to fall back silently — shipping an older gc is the defect this path exists to close."
       art_sha="$(local_artifact_sha)"; art_pin="$(local_artifact_pin)"
@@ -343,8 +373,8 @@ case "$cmd" in
       [ -z "$RECEIPT" ] || printf 'built agent=%s id=%s gc_source=%s gc_pin=%s rollback=%s at=%s\n' "$agent" "$id" "$([ -n "$art" ] && echo local || echo published)" "${art_pin:-published-$(lock_version gc)}" "$rollback" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$RECEIPT"
     fi
     rm -rf "$ctx"
-    echo "next:  export GC_NOMAD_AGENT_IMAGE=${agent}    # the ONE image input the pack reads (cr-u7b0s.41)"
-    echo "back:  export GC_NOMAD_AGENT_IMAGE=${rollback} # unsetting it fails every op closed - the image is the only session shape (cr-3vvnb5.2)"
+    echo "next:  export GC_NOMAD_AGENT_IMAGE=${agent}    # the ONE image input the pack reads"
+    echo "back:  export GC_NOMAD_AGENT_IMAGE=${rollback} # unsetting it fails every op closed - the image is the only session shape"
     ;;
 
   city-image) # gc's native composition step, on top of the toolchain base
@@ -375,17 +405,18 @@ usage: toolchain/build-image.sh <check|verify|refresh-pin|build|city-image|conte
                 Ubuntu Release index) and a staged local pin against its own
                 checksum — read-only, needs network
   refresh-pin   rewrite gc_local_artifact's path+sha256+pin from the binary
-                staged on THIS host (run it where /mnt/nomad/gc/bin lives)
+                staged on THIS host (run it where that binary lives)
   build         docker build the toolchain image, rollback-tagging whatever is
-                live first (executive host step: needs GC_TOOLCHAIN_HOST_STEP=1,
+                live first (build-host step: needs GC_TOOLCHAIN_HOST_STEP=1,
                 never pushed). Prefers the lock's live-pin local artifact;
                 --published builds upstream gc deliberately instead.
   city-image    gc build-image --base-image <toolchain> --tag <agent_image>
   context-only  gc build-image --context-only (assembly proof only)
 
-  --city MUST be a bounded city (a city root outside the estate checkout —
-  ops/tests/test-city-kit/mk-test-city.sh mints one). gc build-image copies the
-  whole directory and excludes only secrets, so an estate root is refused here.
+  --city MUST be a bounded city (a city root outside the enclosing working
+  checkout, containing only what you want inside the image). gc build-image
+  copies the whole directory and excludes only secrets, so the enclosing
+  checkout is refused here.
 USAGE
     ;;
 esac

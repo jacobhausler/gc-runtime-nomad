@@ -10,7 +10,7 @@ import (
 )
 
 // This file implements just enough of RFC 6455 to speak the client side of
-// the Nomad alloc-exec WebSocket (e2a-exec-protocol) — a handshake plus
+// the Nomad alloc-exec WebSocket — a handshake plus
 // masked text-frame writes and unmasked text-frame reads, with no
 // compression, fragmentation, or payloads beyond 16-bit extended length.
 // It mirrors fakenomad/ws.go's server-side implementation with client and

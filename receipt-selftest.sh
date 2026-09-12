@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fail-closed regression for the conformance receipt (cr-u7b0s.48).
+# Fail-closed regression for the conformance receipt.
 #
 # The distinguishing case is NOT a gc that fails loudly. With a stub GC_BIN that
 # prints nothing, receipt.sh's prose-derived rows already read FAIL and it
@@ -20,9 +20,8 @@
 #                      gc_sha256, a {passed,failed,skipped,status} row per item,
 #                      and a retry-idempotency rung that actually ran.
 #
-# Go is built here, so this runs off-Mac (AGENTS.md):
-#   /Users/home/westlands/ops/bin/nomad-run --repo . \
-#     --rev "$(git rev-parse HEAD)" -- ./receipt-selftest.sh
+# Go is built here, so run it wherever this pack's Go builds run:
+#   ./receipt-selftest.sh
 set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -24,9 +24,9 @@ const sessionLockPollInterval = 20 * time.Millisecond
 const (
 	// allocExecReadyAttempts and allocExecReadyDelay bound the small window
 	// between Nomad dispatch returning and the allocation's exec endpoint
-	// becoming usable. Since cr-u9vul4 that window is only the websocket
-	// handshake: whether the task is up at all is settled BEFORE the first
-	// exec by awaitExecAllocReady, not by dialling a task that has not started.
+	// becoming usable. That window is now only the websocket handshake:
+	// whether the task is up at all is settled BEFORE the first exec by
+	// awaitExecAllocReady, not by dialling a task that has not started.
 	// This stays deliberately short, not a general retry for provider or
 	// command failures.
 	allocExecReadyAttempts = 20
@@ -80,11 +80,11 @@ var (
 
 // lifecycle implements the RPP ops this pack scopes so far: the four
 // dispatch/deregister/blocking-read lifecycle ops (start, stop, is-running,
-// list-running, NRT-P1-03), the provision/launch split and warm relaunch
-// (provision, exec, relaunch, NRT-P1-08), and workspace/secret staging
-// (stage, NRT-P1-06, 04 §5) — using the sidecar for the session_name ->
-// child-job-ID binding (04 §2.1: "sidecar binding is primary") and its
-// launched marker (04 §1/§6).
+// list-running), the provision/launch split and warm relaunch
+// (provision, exec, relaunch), and workspace/secret staging
+// (stage) — using the sidecar for the session_name ->
+// child-job-ID binding ("sidecar binding is primary") and its
+// launched marker.
 type lifecycle struct {
 	client      *client
 	sidecar     *sidecar
@@ -92,13 +92,13 @@ type lifecycle struct {
 
 	// nodePool is the Nomad node pool the parent job registers into (empty
 	// keeps Nomad's own "default" pool). Unlike namespace it carries no
-	// per-request query param (04 §2.1's nsQuery has no node-pool analog on
+	// per-request query param (nsQuery has no node-pool analog on
 	// any route this pack calls) — it only ever rides the parent job body
 	// parentJobSpec builds, so it lives here rather than on client.
 	nodePool string
 
 	// egressDir is the local sink directory for the stop-path transcript/
-	// evidence egress (NRT-P1-07). Empty disables egress entirely — a
+	// evidence egress. Empty disables egress entirely — a
 	// deployment that never sets GC_NOMAD_EGRESS_DIR gets the pre-egress
 	// stop behavior unchanged. Sinks beyond a local directory (remote
 	// upload, etc.) are out of scope for this bead.
@@ -107,14 +107,14 @@ type lifecycle struct {
 	// forbidRegistration, when true, makes ensureParentRegistered fail
 	// closed instead of ever attempting to register the parent job — for a
 	// deployment whose runtime token deliberately lacks the submit-job
-	// capability (04 §4 lab ACL model, NRT-P2-06.1) and wants a clear
+	// capability (the lab ACL model) and wants a clear
 	// config-time guarantee that dispatch never even probes that capability
 	// boundary, trading a start failure with a precise cause for the
 	// default behavior of attempting register and surfacing its 403.
 	forbidRegistration bool
 
 	// logShipper configures the optional log-shipper task added to the
-	// session task group's jobspec (fnrt-t4l.13). Zero value (Sink=="")
+	// session task group's jobspec. Zero value (Sink=="")
 	// disables it — parentJobSpec's default single-task group is
 	// unaffected. It only ever rides the parent job body parentJobSpec
 	// builds, same as nodePool above.
@@ -123,7 +123,7 @@ type lifecycle struct {
 	// agentImage names the prebaked Docker image that owns the agent toolchain.
 	// It is required — the Docker task is the only session shape — and
 	// newLifecycle fails closed when GC_NOMAD_AGENT_IMAGE is unset,
-	// because cr-3vvnb5.2 deletes the legacy exec task it used to select.
+	// because the legacy exec task it used to select has been deleted.
 	agentImage string
 
 	// diagnostics is the durable half of logf — the file under the sidecar
@@ -131,14 +131,15 @@ type lifecycle struct {
 	diagnostics diagnosticsSink
 
 	// placement is the deployment-configured DNS servers and node constraints
-	// that ride the parent job body parentJobSpec builds (cr-tzsxk.18), read
+	// that ride the parent job body parentJobSpec builds, read
 	// from GC_NOMAD_DNS_SERVERS / GC_NOMAD_NODE_CONSTRAINT by newLifecycle.
-	// Zero value renders the pre-cr-tzsxk.18 jobspec unchanged — the same
+	// Zero value renders the jobspec as it was before placement config
+	// existed — the same
 	// optional-stanza shape as logShipper above.
 	placement placementConfig
 
 	// adoptMaxAge bounds how old a live-but-unlaunched box may be before
-	// provision/start refuse to ADOPT it and reap it instead (cr-gdeav.6.1).
+	// provision/start refuse to ADOPT it and reap it instead.
 	// Before it existed, adoption was unbounded: the DF-03 canary's box,
 	// dispatched 2026-09-05T20:54Z, was still being adopted at 11:15Z the
 	// next day (14h20m old) and re-staged as if it were this tick's work.
@@ -158,7 +159,7 @@ type lifecycle struct {
 
 // lockSession acquires an exclusive, cross-process advisory file lock for
 // sessionName under the sidecar directory — the single-flight lock
-// concurrent same-name Start must go through (R2b-03). It has to be
+// concurrent same-name Start must go through. It has to be
 // cross-process, not merely in-process: `gc` execs this binary fresh per
 // op (main.go's calling convention, "gc execs the binary directly — no
 // shell wrapping"), so two concurrent `start` calls for one session are
@@ -202,7 +203,7 @@ func (l *lifecycle) lockSession(ctx context.Context, sessionName string) (func()
 // allocation, so a recursive sweep can never carry the session's staged
 // secrets (alloc/secrets/, tmp/) into a durable sink.
 //
-// The agent-capture trio (cr-gdeav.6.5) is written inside the allocation by
+// The agent-capture trio is written inside the allocation by
 // the deployment bootstrap ops/nomad/agent-launch.sh:
 //
 //	alloc/logs/agent.exit   exit= started= ended= pane= argv0= alloc= — the
@@ -216,8 +217,8 @@ func (l *lifecycle) lockSession(ctx context.Context, sessionName string) (func()
 // All three must be copied before deregister. The pane dies with the session,
 // `nomad alloc logs` reads the *task's* streams (the pause shell — empty), and
 // `gc session logs` cannot resolve a session written with `codex --ephemeral`,
-// so after deregistration the three channels are simply gone (cr-gdeav.6.3
-// forensics found all of them empty). A lane whose capture block has not
+// so after deregistration the three channels are simply gone (forensics on
+// a lost box found all of them empty). A lane whose capture block has not
 // landed yet 404s on these paths, which egressAllocFiles already skips.
 var egressFiles = []struct {
 	allocPath string
@@ -285,7 +286,7 @@ func configureExecTaskName() {
 }
 
 // tmuxSessionName is the wire-contract constant in-box tmux session name
-// (04 §5 R1a-08/-09): every carrier verb and the launch command target
+// name: every carrier verb and the launch command target
 // exactly this session.
 const tmuxSessionName = "main"
 
@@ -302,7 +303,7 @@ exec "$@"`
 // deployment-configured agent script. tmux builds a pane's environment from
 // the tmux SERVER and never from the client that issued the verb, so the
 // client-side sourcing above reaches neither new-session nor respawn-pane
-// (cr-gdeav.6.8, measured on tmux 3.7b): an agent launched that way had no
+// (measured on tmux 3.7b): an agent launched that way had no
 // GC_CITY_URL, no session identity and no relay pointers while still
 // reporting launched=true. Sourcing the staged env.sh inside the pane, where
 // the tmpfs already holds it, is the one delivery path every provider shares,
@@ -315,7 +316,7 @@ const paneStagedEnvPrelude = `if [ -f "$NOMAD_SECRETS_DIR/env.sh" ]; then . "$NO
 	`unset GC_CITY GC_CITY_PATH GC_RIG; `
 
 // paneCwdPrelude is the shell the launched pane runs to choose its working
-// directory (cr-gdeav.6.10 deliverable 3). Nothing cd'd the pane before, so
+// directory. Nothing cd'd the pane before, so
 // it inherited the exec driver's cwd - "/" on the D3 attempt-3 canary, which
 // is why a rig-shaped session could not run one git command in the box.
 // The rule: use gc's work_dir when the alloc actually has it (gc sends its
@@ -342,7 +343,7 @@ func paneCwdPrelude(workDir string) string {
 // — a deployment-configured bridge letting the supervisor's own process env
 // (e.g. via ~/.gc/secrets.env passthrough) deliver a named secret into a
 // session's staged environment when gc's own city.toml provider env map has
-// no way to interpolate it (cr-u4plc.2). Unset/empty means no extra keys,
+// no way to interpolate it. Unset/empty means no extra keys,
 // so stage() behaves exactly as before this seam landed — the rollback
 // path.
 var extraSecretKeys []string
@@ -377,7 +378,7 @@ var defaultTmuxLaunchArgs = []string{"new-session", "-d", "-s", tmuxSessionName}
 // the pack contributes the value-safe env wrapper, the argvSafe `-e` pairs, and
 // the in-pane staged-env plus cwd preludes, and the CALLER owns the pane body:
 // gc's rendered provider command, on the docker-driver (prebaked image) task
-// that is the only session shape (cr-3vvnb5.2/.3).
+// that is the only session shape.
 func buildLaunchCommandForPane(env map[string]string, workDir, paneCommand string) []string {
 	return buildLaunchCommandForTmuxWithPaneCommand(env, defaultTmuxLaunchArgs, workDir, paneCommand)
 }
@@ -386,14 +387,14 @@ func buildLaunchCommandForPane(env map[string]string, workDir, paneCommand strin
 // and runs paneCommand after the pack's in-pane staged-environment and cwd
 // preludes. paneCommand is always gc's OWN rendered launch command: the
 // deployment bootstrap seam (GC_NOMAD_AGENT_LAUNCH_SCRIPT) is deleted
-// (cr-3vvnb5.3), so the docker task's pane has exactly one body, and an empty
+// outright, so the docker task's pane has exactly one body, and an empty
 // rendered command fails the launch closed at launch() rather than falling
-// back to a placeholder shell (cr-hcgaxt).
+// back to a placeholder shell.
 //
-// env's argvSafe-classified entries (envArgvSafe, NRT-P1-06) ride as `-e
+// env's argvSafe-classified entries (envArgvSafe) ride as `-e
 // KEY=VALUE` on this argv — safe by construction, since envArgvSafe's whole
-// job is excluding anything credential-shaped from ever reaching argv
-// (E1a §4.5). The wrapper sources the value-safe env.sh produced by stage
+// job is excluding anything credential-shaped from ever reaching argv. The
+// wrapper sources the value-safe env.sh produced by stage
 // before invoking tmux, and the pane body re-sources it INSIDE the pane
 // (paneStagedEnvPrelude), because tmux gives a pane the server's environment
 // and never the client's; keys are sorted so the command is deterministic.
@@ -415,8 +416,8 @@ func buildLaunchCommandForTmuxWithPaneCommand(env map[string]string, tmuxArgs []
 	// paneStagedEnvPrelude): the client-side wrapper cannot reach it. The cwd
 	// prelude runs after it and before paneCommand, so gc's rendered command
 	// starts in a directory the alloc actually has (paneCwdPrelude). There is no
-	// placeholder-pane shape left to fall back to (cr-3vvnb5.3): launch() has
-	// already failed closed on an empty rendered command (cr-hcgaxt).
+	// placeholder-pane shape left to fall back to: launch() has
+	// already failed closed on an empty rendered command.
 	cmd = append(cmd, "/bin/sh", "-c", paneStagedEnvPrelude+paneCwdPrelude(workDir)+paneCommand)
 	return cmd
 }
@@ -435,11 +436,11 @@ func isTerminalStatus(status string) bool {
 // no launch. The dispatched task runs a tmux-only supervisor (jobspec.go's
 // sessionTask); no agent process exists in the box yet, and the sidecar
 // binding's launched marker stays false, so is-running reports false even
-// though the box already answers exec (04 §3 provision row, RPP-PROVISION-001).
+// though the box already answers exec.
 //
 // Provision is idempotent over the box it already made: a session whose
 // bound child is still live but NOT launched is ADOPTED (staging re-run
-// against it) rather than rejected. That is the fnrt-t4l.46 fix — a
+// against it) rather than rejected. That is the idempotent-retry fix — a
 // provision that dispatched its child and then never got its launch
 // confirmed leaves exactly that state, and a controller that re-drives
 // provision every tick must be able to finish the job instead of collecting
@@ -447,15 +448,15 @@ func isTerminalStatus(status string) bool {
 //
 // A session whose child is live AND launched is still rejected: an agent is
 // running in that box, so provisioning over it is a duplicate, not a retry.
-// That rejection's stderr message MUST contain "already exists" (04 §6
-// wire-contract constant, R1a-02: gc's exec proxy infers ErrSessionExists
+// That rejection's stderr message MUST contain "already exists" (a
+// wire-contract constant: gc's exec proxy infers ErrSessionExists
 // from that exact phrase).
 func (l *lifecycle) opProvision(ctx context.Context, sessionName string) error {
 	return l.opProvisionWithConfig(ctx, sessionName, stageConfig{})
 }
 
-// opProvisionWithConfig is opProvision plus NRT-P1-06 staging: once the box
-// is dispatched (and therefore exec-able, RPP-PROVISION-001), cfg's
+// opProvisionWithConfig is opProvision plus staging: once the box
+// is dispatched (and therefore exec-able), cfg's
 // workspace files and secret env vars are materialized into it before this
 // returns — staging does not wait for launch, since a provisioned-but-not-
 // launched box already answers exec and the agent bootstrap command started
@@ -520,20 +521,20 @@ func (l *lifecycle) opProvisionWithConfig(ctx context.Context, sessionName strin
 	}
 	defer unlock()
 
-	// Adopt-or-dispatch (fnrt-t4l.46): a live child already bound to this
+	// Adopt-or-dispatch: a live child already bound to this
 	// session is the box this call was asked to make, so re-drive staging
-	// against it instead of dispatching a second one (04 §2.1 rule 4) or
+	// against it instead of dispatching a second one or
 	// rejecting the caller. Re-staging is safe — stage's channels are
 	// overwriting writes into fixed paths, so the adopted box converges on
 	// the same state a fresh provision would have produced.
 	//
-	// This subsumes the narrower StagePending resume (fnrt-t4l.18): a
+	// This subsumes the narrower StagePending resume: a
 	// provision that died mid-staging is only one of the ways a live,
 	// unlaunched box gets left behind. The DF-03 canary hit the other one —
 	// staging finished, the launch was never confirmed, and every later
 	// provision tick was rejected while the alloc kept running.
 	//
-	// Adoption is bounded (cr-gdeav.6.1): the box has to be young enough
+	// Adoption is bounded: the box has to be young enough
 	// (adoptMaxAge) and its agent confirmed absent, or it is not this call's
 	// half-finished box but an orphan, and adoptExisting reaps it so the
 	// dispatch below makes a fresh one. See classifyAdoption.
@@ -642,20 +643,20 @@ func (l *lifecycle) confirmDispatchPlaced(ctx context.Context, sessionName strin
 	}
 }
 
-// opStart is provision + launch (04 §3 start row): dispatch a fresh child,
+// opStart is provision + launch: dispatch a fresh child,
 // then launch the agent into it over exec, and only then mark the binding
 // launched. Held under sessionName's single-flight lock end-to-end
-// (R2b-03) so two concurrent Start calls for the same session cannot both
+// so two concurrent Start calls for the same session cannot both
 // observe an absent/terminal binding and each dispatch a child.
 //
 // Before dispatching, it checks for a binding left by a prior attempt that
 // crashed after the dispatch call committed but before the launched marker
-// was recorded (04 §2.1 rule 6 territory, the "after binding, before
+// was recorded (the "after binding, before
 // ConfirmStarted" crash point): that binding IS the positive attribution
 // (no cluster lookup needed, since this pack already wrote it), so the
 // retry resumes straight to launch instead of dispatching a second child or
 // being rejected by dispatch's already-exists check. That resume is bounded by
-// the same adopt-or-reap gate provision uses (cr-gdeav.6.1): a box too old to
+// the same adopt-or-reap gate provision uses: a box too old to
 // be this attempt's, or one whose agent is gone, is reaped instead of resumed,
 // and a box whose agent is actually running is refused rather than
 // double-launched.
@@ -663,7 +664,7 @@ func (l *lifecycle) opStart(ctx context.Context, sessionName string) error {
 	return l.opStartWithConfig(ctx, sessionName, stageConfig{})
 }
 
-// opStartWithConfig is opStart plus NRT-P1-06 staging: cfg's workspace
+// opStartWithConfig is opStart plus staging: cfg's workspace
 // files and secret env vars are materialized (l.stage) after the box is
 // dispatched (or adopted through the same bounded adopt-or-reap gate
 // provision uses) and before launch, so the agent bootstrap command that
@@ -776,8 +777,8 @@ func (l *lifecycle) liveChild(ctx context.Context, sessionName string) (binding,
 
 // adoptPath is the decision the two adopt-or-dispatch doors (provision and
 // start) take for a session whose sidecar binding already names a live child.
-// cr-gdeav.6.1 added the two rules the doors were missing: an age limit, and
-// an agent-absence check before reuse. Before them the only split was
+// Two rules were added to the doors: an age limit, and an agent-absence
+// check before reuse. Before them the only split was
 // launched-reject / unlaunched-adopt, so a box left half-provisioned for hours
 // was still adopted as if it were this tick's work — the 2026-09-06 canary
 // re-staged a child dispatched 14h20m earlier.
@@ -785,10 +786,10 @@ type adoptPath uint8
 
 const (
 	// adoptReuse re-drives this pack's own half of the job against the box it
-	// already made — fnrt-t4l.46's idempotent retry, now conditional on that
+	// already made — the idempotent retry, now conditional on that
 	// box being young AND its agent being confirmed absent.
 	adoptReuse adoptPath = iota
-	// adoptReject answers with the 04 §6 wire contract ("already exists"),
+	// adoptReject answers with the wire contract ("already exists"),
 	// which gc's exec proxy maps to ErrSessionExists: an agent is running in
 	// that box (or the pack cannot tell either way), so the call is a
 	// duplicate, not a retry.
@@ -800,8 +801,8 @@ const (
 	// re-stage-and-double-launch into a live agent.
 	adoptSelfHealLaunched
 	// adoptReap deregisters the box, tombstones the binding beside it, and
-	// lets the caller dispatch fresh — executive ruling cr-mnl96 G2 (option
-	// A, REAP FIRST): an aged or agent-less provisioned box is an ephemeral
+	// lets the caller dispatch fresh — the REAP FIRST ruling: an aged or
+	// agent-less provisioned box is an ephemeral
 	// runtime allocation, and the estate's answer to it is a record plus a
 	// clean dispatch. This is never a bypass of liveChild: liveChild is the
 	// gate that just said "this box is not the one to reuse".
@@ -834,11 +835,11 @@ func (l *lifecycle) classifyAdoption(ctx context.Context, sessionName string, b 
 		return adoptReap, "binding says launched but its in-box agent is gone: the box is a shell, not a session"
 	case b.Launched:
 		// Probe unavailable: unknown is not confirmed-absent. Same honesty
-		// split opIsRunning applies (04 §6) — reaping on a transport fault
+		// split opIsRunning applies — reaping on a transport fault
 		// would destroy a live session because the API blipped.
 		return adoptReject, fmt.Sprintf("agent liveness unknown (probe unavailable, binding age %s): keeping the already-exists contract", age)
 	// An unlaunched box whose agent state could not be read is reaped, not
-	// reused and not refused. Human ruling cr-gdeav.6.1-probe-absence-unknown:
+	// reused and not refused. The probe-absence-unknown ruling:
 	// every adopt read that cannot CONFIRM the agent absent is a reap trigger,
 	// because the alternative reading of that silence is exactly the canary's —
 	// a box that really was half-launched, its agent reset landing after the
@@ -906,7 +907,7 @@ func (l *lifecycle) adoptExisting(ctx context.Context, sessionName string, b bin
 		// The self-heal re-records a launch that already happened, so it
 		// re-states what the binding already holds — the recorded provider
 		// command included, so healing the marker cannot drop the command a
-		// later relaunch needs (cr-hcgaxt).
+		// later relaunch needs.
 		if err := l.confirmLaunched(ctx, sessionName, b.WorkDir, b.ProviderCommand); err != nil {
 			return false, err
 		}
@@ -952,7 +953,7 @@ func (l *lifecycle) reapChild(ctx context.Context, sessionName string, b binding
 // bindingAgentStatus runs the in-box liveness probe against b's current live
 // alloc. It reports known=false — NOT dead — when the alloc or the probe
 // could not be reached, so no caller mistakes a transport fault for a
-// confirmed-absent agent (04 §6's honesty split).
+// confirmed-absent agent (the honesty split).
 func (l *lifecycle) bindingAgentStatus(ctx context.Context, b binding) (alive, known bool) {
 	allocID := l.liveAllocID(ctx, b)
 	if allocID == "" {
@@ -992,25 +993,25 @@ func (l *lifecycle) logDecision(format string, args ...any) {
 }
 
 // opRelaunch re-execs the agent inside the SAME alloc without a fresh
-// dispatch — the warm-box mechanism for launch-only fingerprint drift (04
-// §7 Relaunch): tmux-respawn analog via exec kill+relaunch, no re-dispatch.
+// dispatch — the warm-box mechanism for launch-only fingerprint drift:
+// a tmux-respawn analog via exec kill+relaunch, no re-dispatch.
 // It requires an existing provisioned box with a live alloc; a session with
 // nothing running has nothing to relaunch into.
 func (l *lifecycle) opRelaunch(ctx context.Context, sessionName string) error {
 	if _, err := l.currentAlloc(ctx, sessionName); err != nil {
 		return fmt.Errorf("relaunching session %q: %w", sessionName, err)
 	}
-	// No fresh env rides a relaunch (04 §7: it re-execs into the SAME alloc
+	// No fresh env rides a relaunch (it re-execs into the SAME alloc
 	// with no fresh dispatch) — the box's workspace/secrets were already
 	// staged at start/provision time and are still there.
 	return l.markLaunched(ctx, sessionName, stageConfig{})
 }
 
 // opExec runs command inside sessionName's current alloc over the Nomad
-// alloc-exec WebSocket (04 §3 exec row: "op exit = command exit",
-// RPP-CONN-001). It works regardless of the launched marker — this is
-// exactly the "box exec-able" half of the provision contract
-// (RPP-PROVISION-001): a provisioned-but-not-launched box still answers
+// alloc-exec WebSocket ("op exit = command exit"). It works regardless of
+// the launched marker — this is exactly the "box exec-able" half of the
+// provision contract: a
+// provisioned-but-not-launched box still answers
 // exec. The one stateful exception is gc's canonical separable-transport
 // tmux launch: after that exact command succeeds, the pack must confirm the
 // launch in its private sidecar just as opStart does, or its own is-running
@@ -1042,7 +1043,7 @@ func (l *lifecycle) opExec(ctx context.Context, sessionName string, command []st
 	// stdout keeps the plain execAlloc semantics (peek's pane capture must not
 	// start seeing box diagnostics spliced in); stderr is collected only to
 	// record why a nonzero command failed, because gc discards the pack's own
-	// output whenever the op exits nonzero (cr-86ytiq).
+	// output whenever the op exits nonzero.
 	exitCode, stdout, boxErr, err := l.client.execAllocObserved(ctx, allocID, execTaskName, command, nil)
 	if err != nil {
 		return 0, nil, fmt.Errorf("exec on session %q: %w", sessionName, err)
@@ -1143,7 +1144,7 @@ func parseExecWireArgv(command string) ([]string, bool) {
 
 // opNudge sends text into sessionName's tmux session as if typed at the
 // keyboard, followed by Enter — the turn-start driving verb, realized as
-// tmux commands over exec rather than a bespoke protocol (fnrt-szx). text
+// tmux commands over exec rather than a bespoke protocol. text
 // is carried as a positional shell argument ($1), never interpolated into
 // the script string, so arbitrary content (quotes, backticks, newlines)
 // can never break out of the intended two tmux calls.
@@ -1263,7 +1264,7 @@ func (l *lifecycle) dispatch(ctx context.Context, sessionName, image string) err
 		return err
 	}
 
-	// Positive-attribution adoption (04 §2.1 rule 6): a prior attempt may
+	// Positive-attribution adoption: a prior attempt may
 	// have crashed after its dispatch call returned but before the binding
 	// commit that records ChildJobID, leaving an orphaned child cluster-side
 	// the sidecar only half-remembers (an intent record with a nonce and no
@@ -1284,7 +1285,7 @@ func (l *lifecycle) dispatch(ctx context.Context, sessionName, image string) err
 		return err
 	}
 
-	// Dispatch-intent record BEFORE the call (04 §2.1 rule 1): Nomad mints
+	// Dispatch-intent record BEFORE the call: Nomad mints
 	// the child ID in the dispatch response, so the binding cannot exist
 	// before the call — this placeholder is what a crash between dispatch
 	// and the binding write would otherwise lose.
@@ -1305,7 +1306,7 @@ func (l *lifecycle) dispatch(ctx context.Context, sessionName, image string) err
 
 // ensureParentRegistered makes sure the parent job dispatch's children come
 // from exists, in the current namespace, and matches the jobspec this build
-// is configured for — the NRT-P2-06.1 fix for the lab ACL model (04 §4): the
+// is configured for — the fix for the lab ACL model: the
 // runtime token dispatch normally runs under may hold read-job and
 // dispatch-job but deliberately NOT submit-job, since registering the
 // parent is a one-time management-token setup step, not a per-Start action.
@@ -1315,10 +1316,10 @@ func (l *lifecycle) dispatch(ctx context.Context, sessionName, image string) err
 // It looks the parent up first via a GET (dispatch-scoped tokens can always
 // read-job) and only calls register when the parent is missing or has
 // drifted from this build's config on either signal getJob reports: NodePool
-// (the one parentJobSpec field beyond namespace that varies at runtime,
-// NRT-P2-05) or the jobspecHashMetaKey fingerprint (fnrt-t4l.9) — added
+// (the one parentJobSpec field beyond namespace that varies at runtime)
+// or the jobspecHashMetaKey fingerprint — added
 // because a NodePool-only comparison missed a registered parent whose TASK
-// had gone stale (e.g. t4l.7's supervisor-script swap): the parent still
+// had gone stale (e.g. a supervisor-script swap): the parent still
 // existed and still matched on NodePool, so Start silently kept dispatching
 // onto the old task instead of re-registering. A token that is genuinely
 // dispatch-only, against a parent that already matches on both signals,
@@ -1346,9 +1347,9 @@ func (l *lifecycle) ensureParentRegistered(ctx context.Context) error {
 	if err := l.client.registerJob(ctx, spec); err != nil {
 		if errors.Is(err, errJobForbidden) {
 			if ok {
-				return fmt.Errorf("parent job %q is stale — re-register with a management token: the registered parent no longer matches this build's jobspec (node pool and/or task spec drifted) and the runtime token lacks the submit-job capability to fix it in place (04 §4 lab ACL model): %w", l.parentJobID, err)
+				return fmt.Errorf("parent job %q is stale — re-register with a management token: the registered parent no longer matches this build's jobspec (node pool and/or task spec drifted) and the runtime token lacks the submit-job capability to fix it in place (the lab ACL model): %w", l.parentJobID, err)
 			}
-			return fmt.Errorf("registering parent job %q: token lacks the submit-job capability required to register jobs in namespace %q — register it once with a management token (04 §4 lab ACL model), or set GC_NOMAD_FORBID_REGISTER and do so out-of-band: %w", l.parentJobID, l.client.namespace, err)
+			return fmt.Errorf("registering parent job %q: token lacks the submit-job capability required to register jobs in namespace %q — register it once with a management token, or set GC_NOMAD_FORBID_REGISTER and do so out-of-band: %w", l.parentJobID, l.client.namespace, err)
 		}
 		return fmt.Errorf("registering parent job %q: %w", l.parentJobID, err)
 	}
@@ -1357,7 +1358,7 @@ func (l *lifecycle) ensureParentRegistered(ctx context.Context) error {
 
 func (l *lifecycle) parentJobSpec() nomadJob {
 	// One shape: the Docker task the configured image describes. There is no
-	// legacy exec variant left to choose between (cr-3vvnb5.2).
+	// legacy exec variant left to choose between.
 	return parentJobSpec(l.client.namespace, l.nodePool, l.parentJobID, l.logShipper, l.agentImage, l.placement)
 }
 
@@ -1370,8 +1371,8 @@ func (l *lifecycle) parentJobSpec() nomadJob {
 // are neither candidates nor, on their own, evidence of a dispute: they are
 // residue from an attempt that already ended. Counting them made one live box
 // plus one dead child read as a disputed binding on every retry, which is how
-// the D3 canary lost every runtime-backed seat on 2026-09-10 (cr-x6nr04:
-// "matching children are ambiguous ... found 2 children"). Zero non-terminal
+// the D3 canary lost every runtime-backed seat on 2026-09-10
+// ("matching children are ambiguous ... found 2 children"). Zero non-terminal
 // matches, multiple non-terminal matches, or a missing nonce are all loud
 // errors; the caller must never guess a child or dispatch around a disputed
 // binding. With nothing live left to recover, a terminal match keeps its own
@@ -1466,8 +1467,8 @@ func parseCreatedAtMeta(meta map[string]string) time.Time {
 	return createdAt.UTC()
 }
 
-// findOrphanByNonce looks up the parent job's dispatched children (04 §2.1
-// rule 2: "list the city parent's children with meta=true") for one whose
+// findOrphanByNonce looks up the parent job's dispatched children ("list
+// the city parent's children with meta=true") for one whose
 // Meta gc_session/gc_nonce match, and reports it only if it is still
 // non-terminal — a matched-but-terminal child died along with the crashed
 // attempt that dispatched it and is not adopted.
@@ -1486,17 +1487,17 @@ func (l *lifecycle) findOrphanByNonce(ctx context.Context, sessionName, nonce st
 }
 
 // launch execs the composed tmux-client launch into sessionName's current
-// alloc — the detached tmux-client call that starts the agent (04 §3 provision
-// row launch invariant).
+// alloc — the detached tmux-client call that starts the agent (the launch
+// invariant).
 //
 // providerCommand is gc's rendered launch command. The Docker task is the only
-// session shape (cr-3vvnb5.2) and it owns the agent toolchain, so the pane
+// session shape and it owns the agent toolchain, so the pane
 // runs what gc rendered instead of a deployment bootstrap the image neither
 // needs nor can reach — the session shape declares no artifact volume
-// (jobspec.go sessionTask), so a /mnt/nomad bootstrap would name a path that
+// (jobspec.go sessionTask), so a host-volume bootstrap would name a path that
 // is not mounted. GC_NOMAD_AGENT_IMAGE is required and a run without it fails
-// closed in newLifecycle; gc's rendered command is the only pane body: cr-3vvnb5.3
-// deletes the deployment bootstrap seam, so there is no alternative body left
+// closed in newLifecycle; gc's rendered command is the only pane body: the
+// deployment bootstrap seam is deleted, so there is no alternative body left
 // for the pack to compose.
 //
 // An image-mode launch with no rendered command fails closed here rather than
@@ -1504,14 +1505,14 @@ func (l *lifecycle) findOrphanByNonce(ctx context.Context, sessionName, nonce st
 // agent-less-box wedge this weld exists to close.
 func (l *lifecycle) launch(ctx context.Context, sessionName string, env map[string]string, workDir, providerCommand string) error {
 	if strings.TrimSpace(providerCommand) == "" {
-		return fmt.Errorf("launching session %q: %s is set but gc sent no rendered launch command, and the prebaked image leaves the pack no bootstrap to substitute (cr-hcgaxt)",
+		return fmt.Errorf("launching session %q: %s is set but gc sent no rendered launch command, and the prebaked image leaves the pack no bootstrap to substitute",
 			sessionName, envAgentImage)
 	}
 	// The same class reaches the pane by a second door: tmux `new-session -e`
 	// seeds the SERVER environment, which every pane inherits, so an
 	// argv-safe PATH would hide the image toolchain even from a clean env.sh.
 	// The canonical transport path hands no env to the builder at all, so
-	// this is the only place it can cross (cr-jr2kw7).
+	// this is the only place it can cross.
 	return l.launchWithCommand(ctx, sessionName, buildLaunchCommandForPane(boxFilesystemEnvInput(env), workDir, providerCommand))
 }
 
@@ -1530,7 +1531,7 @@ func (l *lifecycle) launchWithCommand(ctx context.Context, sessionName string, c
 		// the pack's own stdout/stderr on the floor
 		// (internal/runtime/exec/exec.go Provider.Exec/launchAgent), so the
 		// box's diagnostics are the only reason that survives this boundary —
-		// and they arrive on the exec stream's stderr frames (cr-86ytiq).
+		// and they arrive on the exec stream's stderr frames.
 		exitCode, out, boxErr, err := l.client.execAllocObserved(ctx, allocID, execTaskName, command, nil)
 		if err != nil {
 			return fmt.Errorf("launching session %q: %w", sessionName, err)
@@ -1547,8 +1548,8 @@ func (l *lifecycle) launchWithCommand(ctx context.Context, sessionName string, c
 // created inside sessionName's current alloc — the in-box liveness probe
 // (opIsRunning) later kill -0's this exact pid rather than trusting the
 // tmux session's mere existence, which alone cannot tell "agent died,
-// nothing reaped the empty session" apart from "agent alive" (08 §3 in-box
-// agent kill row). A lookup failure here is non-fatal to launch itself: it
+// nothing reaped the empty session" apart from "agent alive" (the in-box
+// agent-kill case). A lookup failure here is non-fatal to launch itself: it
 // just leaves AgentPID unset, and the probe falls back to a tmux-session-
 // only check.
 func (l *lifecycle) capturePanePID(ctx context.Context, sessionName string) (int, error) {
@@ -1597,7 +1598,7 @@ var bareShellCommands = map[string]bool{
 func bareShellRefusalHint() string {
 	return "the launch command started nothing in this box. A provider shaped for the orchestrator " +
 		"(argv flags, hook support, argv priming) does not survive here; the box needs gc's rendered launch " +
-		"command. Left unchecked this box reports healthy forever and claims no work (cr-8eagyh)"
+		"command. Left unchecked this box reports healthy forever and claims no work"
 }
 
 // paneRunsAgent classifies what tmux reports for the pane. This is the judgement
@@ -1634,7 +1635,7 @@ func paneRunsAgent(paneCommand string) bool {
 //
 // A check that can refuse a healthy launch is worse than the dark lane it
 // replaces: it converts a silent failure into a broken one. The diagnosis was
-// always the valuable half — the empty box in cr-8eagyh went six minutes with a
+// always the valuable half — an empty box went six minutes with a
 // P0 routed to it and NOTHING in any log — so the warning stays and the refusal
 // goes.
 func (l *lifecycle) warnIfPaneRunsNoAgent(ctx context.Context, sessionName string) {
@@ -1729,7 +1730,7 @@ func (l *lifecycle) warnIfBoxGCCannotClaim(ctx context.Context, sessionName stri
 // boxRunsAnAgent reports whether the box holds any process that is not part of
 // the empty-box furniture.
 //
-// This is the check I actually used by hand to diagnose cr-8eagyh: a box with
+// This is the check actually used by hand to diagnose one such box: a box with
 // nothing in it showed exactly `sleep` (the task's own idle process), a tmux
 // server and a shell, and NOTHING else. A box with a live agent showed codex
 // beside them. That distinction survives a wrapped pane, which the pane's
@@ -1842,7 +1843,7 @@ func (l *lifecycle) markLaunched(ctx context.Context, sessionName string, cfg st
 // The caller already holds sessionName's lock.
 //
 // Once the launch is confirmed, it hands the pane off to the detached prime
-// window exactly as markLaunched does (cr-gdeav.6.12/6.13): this is gc's
+// window exactly as markLaunched does: this is gc's
 // proc.provision path, which stages the startup prompt separately
 // (opProvisionWithConfig -> savePromptPending) from the launch it later
 // drives through this transport handshake, so the prompt fields ride the
@@ -1850,8 +1851,8 @@ func (l *lifecycle) markLaunched(ctx context.Context, sessionName string, cfg st
 // own argv, which carries only the transport verb. startupPrimeDetached
 // returns as soon as the window is spawned, so this op keeps returning the
 // instant launch is confirmed, same as before any priming existed
-// (cr-gdeav.6.13: a blocking wait here is what put attempt 6's start past
-// gc's async-start budget and looped a fresh dispatch every ~30s).
+// (a blocking wait here is what put attempt 6's start past gc's
+// async-start budget and looped a fresh dispatch every ~30s).
 func (l *lifecycle) markTransportLaunched(ctx context.Context, sessionName string, transport []string) error {
 	if len(transport) != 6 {
 		return fmt.Errorf("invalid transport launch argv length %d", len(transport))
@@ -1880,7 +1881,7 @@ func (l *lifecycle) markTransportLaunched(ctx context.Context, sessionName strin
 func (l *lifecycle) confirmLaunched(ctx context.Context, sessionName string, workDir, providerCommand string) error {
 	// THE PANE MUST BE RUNNING AN AGENT, not merely holding a live pid.
 	//
-	// cr-8eagyh, measured 2026-09-12: a lane whose provider was not pre-shaped
+	// Measured 2026-09-12: a lane whose provider was not pre-shaped
 	// for a box got a running alloc, a running tmux server, and a pane holding a
 	// bare `sh` — no agent at all. Nothing failed. `launch` had exited 0 (tmux
 	// started fine; the command inside the pane is what did not survive),
@@ -1946,7 +1947,7 @@ func (l *lifecycle) stageTracked(ctx context.Context, sessionName string, cfg st
 }
 
 // savePromptPending persists cfg's startup-prompt/priming subset onto
-// sessionName's binding (cr-gdeav.6.12), so a later transport launch through
+// sessionName's binding, so a later transport launch through
 // opExec — which runs with no stageConfig of its own — can still deliver the
 // prompt gc sent at provision/start time. A cfg that owes no prompt
 // (cfg.startupPrompt() is empty) is a complete no-op: provision/start behave
@@ -2003,14 +2004,14 @@ func stagesAnything(cfg stageConfig) bool {
 }
 
 // stage materializes cfg's workspace files and secret env vars into
-// sessionName's current alloc (NRT-P1-06, 04 §5 data contract) over two
+// sessionName's current alloc (the data contract) over two
 // tar-over-exec-stdin calls: cfg.CopyFiles read off the orchestrator and
 // archived by copyFilesToStageFiles, extracted under cfg.WorkDir, and cfg.Env's values extracted under
 // $NOMAD_SECRETS_DIR both as individual files (legacy/value-specific access)
 // and as a sourceable env.sh contract for the launched process. Neither
 // channel ever touches the job spec, argv, or the sidecar — the only place
 // secret BYTES appear is the alloc-exec WebSocket stream itself (accepted
-// residual, 05 §7 R9). A zero-value cfg is a no-op, so start/provision behave
+// residual). A zero-value cfg is a no-op, so start/provision behave
 // exactly as before staging landed when a caller sends no config.
 func (l *lifecycle) stage(ctx context.Context, sessionName string, cfg stageConfig) error {
 	workspaceFiles, err := copyFilesToStageFiles(cfg.CopyFiles)
@@ -2053,16 +2054,16 @@ func (l *lifecycle) stage(ctx context.Context, sessionName string, cfg stageConf
 
 	// Runtime secrets stay FILE-delivered into Nomad's own secrets mount. The
 	// pack declares no `template {}` / Vault / Consul / identity block anywhere
-	// (jobspec.go sessionTask, R2a-05), so secret bytes reach a box only over
+	// (jobspec.go sessionTask), so secret bytes reach a box only over
 	// the alloc-exec stream below — never through the job spec, argv, or a
 	// Nomad-interpolated template. The docker-driver shape resolves that
 	// mount's path from the box before writing anything that names it:
 	// contexts.toml is literal TOML with no $NOMAD_SECRETS_DIR expansion, and a
 	// guessed /secrets would point gc's mTLS files at a directory that may not
-	// exist in a container (cr-hcgaxt). The empty-image branch below is only a
+	// exist in a container. The empty-image branch below is only a
 	// discriminator now: GC_NOMAD_AGENT_IMAGE is required and a run without it
-	// already failed closed in newLifecycle (cr-3vvnb5.2), and cr-3vvnb5.3
-	// deleted the launch-script seam that shape used to reach.
+	// already failed closed in newLifecycle, and the launch-script seam that
+	// shape used to reach has been deleted.
 	secretsDir := ""
 	if l.agentImage != "" && len(secretEnv) > 0 {
 		resolved, err := l.boxSecretsDir(ctx, sessionName)
@@ -2081,7 +2082,7 @@ func (l *lifecycle) stage(ctx context.Context, sessionName string, cfg stageConf
 	}
 	if len(secretEnv) > 0 {
 		// The image shape has no deployment bootstrap to hand its agent home to
-		// (cr-3vvnb5.3 deletes the launch-script seam outright), so the pack
+		// (the launch-script seam is deleted outright), so the pack
 		// stages the Codex home itself. A box staged without an image keeps its
 		// bytes unchanged.
 		codexHome := codexHomeOwned(secretsDir, secretEnv)
@@ -2089,7 +2090,7 @@ func (l *lifecycle) stage(ctx context.Context, sessionName string, cfg stageConf
 		// An image-mode box owns its own filesystem. PATH, HOME, TMPDIR, the XDG
 		// dirs and anything else naming this host are sourced by the pane before
 		// its command, so they hid the image's toolchain and the pane died with
-		// its tmux server (cr-jr2kw7). secretsDir is only resolved in the image
+		// its tmux server. secretsDir is only resolved in the image
 		// shape, so it is that shape's discriminator here too; the legacy shape
 		// still reaches buildEnvScript with its bytes unchanged.
 		if secretsDir != "" {
@@ -2099,7 +2100,7 @@ func (l *lifecycle) stage(ctx context.Context, sessionName string, cfg stageConf
 			envInput = codexHomeEnvScriptInput(envInput)
 		}
 		envScript := buildEnvScript(envInput)
-		// The remote-context bridge (cr-gdeav.6.15) rides the same env.sh:
+		// The remote-context bridge rides the same env.sh:
 		// GC_HOME/GC_CITY_CONTEXT are a no-op append when GC_CITY_NAME or
 		// GC_CITY_URL is absent from the wire, so this costs nothing for a
 		// deployment that has not opted in.
@@ -2107,8 +2108,8 @@ func (l *lifecycle) stage(ctx context.Context, sessionName string, cfg stageConf
 		if codexHome {
 			// Appended last on purpose: an export written after every staged
 			// provider value is the one that wins when the pane sources env.sh,
-			// and this is the override of the provider env that cr-usnvaw asks
-			// for. The recipe lives in codex_home.go, not here.
+			// and this is the override of the provider env the image-mode Codex
+			// home asks for. The recipe lives in codex_home.go, not here.
 			envScript = append(envScript, buildCodexHomeEnvLines()...)
 		}
 		secretFiles = append(secretFiles, stageFile{
@@ -2158,7 +2159,7 @@ func (l *lifecycle) stage(ctx context.Context, sessionName string, cfg stageConf
 // deliver, and it fails closed on an empty answer: a box with no secrets mount
 // has nowhere for the staged runtime secret files to go, and staging them to a
 // path the box cannot see would hand the agent a credential-less session with
-// nothing in the record to say so (cr-hcgaxt).
+// nothing in the record to say so.
 //
 // The probe prints only a mount POINT — the same path the pack already writes
 // into its own comments and job specs — never a secret value.
@@ -2228,7 +2229,7 @@ func (l *lifecycle) execStage(ctx context.Context, sessionName string, command [
 // is not hidden behind a retry delay.
 //
 // It is the handshake retry, not the readiness gate: both of its callers
-// resolve the allocation through awaitExecAllocReady first (cr-u9vul4), because
+// resolve the allocation through awaitExecAllocReady first, because
 // a task that has not started is a state to wait for, not a transport failure
 // to punch at for five seconds.
 func retryAllocExecReady(ctx context.Context, operation func() error) error {
@@ -2256,8 +2257,8 @@ func retryAllocExecReady(ctx context.Context, operation func() error) error {
 // reading or writing when the peer went away, and on how many hops sit in
 // between: reading gives EOF (clean close before any frame),
 // ErrUnexpectedEOF (close partway through a frame the codec had committed
-// to reading), or ECONNRESET; writing gives EPIPE — the shape fnrt-t4l.18
-// hit on the lab, where the staging tar's own stdin frames raced a
+// to reading), or ECONNRESET; writing gives EPIPE — the shape seen on the
+// lab, where the staging tar's own stdin frames raced a
 // half-closed proxy tunnel ("writing exec stdin-close frame: broken pipe").
 // All of them mean the same thing to a caller: the box is not exec-ready
 // yet, re-dial and try again. A genuinely dead stream just exhausts the
@@ -2287,7 +2288,7 @@ var errSessionNotFound = errors.New("session not found")
 var errAllocNotReady = errors.New("allocation not ready")
 
 // currentAlloc resolves the non-terminal Nomad alloc ID backing
-// sessionName's current child job, sidecar-binding-primary (04 §2.1 rule 1),
+// sessionName's current child job, sidecar-binding-primary,
 // recovering a missing binding from Nomad Meta under the session lock.
 func (l *lifecycle) currentAlloc(ctx context.Context, sessionName string) (string, error) {
 	rec, err := l.currentAllocRecord(ctx, sessionName)
@@ -2359,7 +2360,7 @@ func (l *lifecycle) currentAllocRecord(ctx context.Context, sessionName string) 
 
 // awaitExecAllocReady resolves sessionName's allocation and returns its ID
 // only once execTaskName's task inside it is running -- the readiness contract
-// the exec seam was missing (cr-u9vul4). An alloc in "Task Setup" is
+// the exec seam was missing. An alloc in "Task Setup" is
 // non-terminal, so currentAlloc returned it gladly and the first staging exec
 // died on "reading exec frame: EOF"; the pack then looked like a provider
 // failure and gc reaped and re-dispatched the session.
@@ -2426,8 +2427,8 @@ func describeTaskState(allocID string, state allocTaskState) string {
 }
 
 // egressMaxAttempts bounds the stop-path transcript/evidence egress retries
-// before opStop gives up and falls back to an evidence_lost marker (04 §6
-// R2b-04): evidence-best-effort beats a wedged fleet.
+// before opStop gives up and falls back to an evidence_lost marker:
+// evidence-best-effort beats a wedged fleet.
 const egressMaxAttempts = 3
 
 const (
@@ -2489,10 +2490,10 @@ func (l *lifecycle) flushLogShipper(ctx context.Context, allocID string) error {
 }
 
 // opStop egresses sessionName's transcript/evidence files (if egress is
-// configured, NRT-P1-07), deregisters its child job without purge, confirms
+// configured), deregisters its child job without purge, confirms
 // terminal via a blocking read, and tombstones the sidecar binding. Stop on
 // a session with no binding (never started, or already stopped) is a
-// success no-op — Stop stays idempotent (04 §6, E1a §6.1).
+// success no-op — Stop stays idempotent.
 func (l *lifecycle) opStop(ctx context.Context, sessionName string) error {
 	b, ok, err := l.sidecar.load(sessionName)
 	if err != nil {
@@ -2508,7 +2509,7 @@ func (l *lifecycle) opStop(ctx context.Context, sessionName string) error {
 	}
 
 	// Best-effort: end the agent's tmux session before the task itself is
-	// killed below (NRT-P2-06.1). The task's own exit is independent of
+	// killed below. The task's own exit is independent of
 	// this — the Docker task-main exits on Nomad's own stop — but tmux's server
 	// process is
 	// a detached daemon outside the task's process tree once launch starts
@@ -2531,13 +2532,13 @@ func (l *lifecycle) opStop(ctx context.Context, sessionName string) error {
 	}
 
 	// Egress transcript/evidence before deregister makes them unreachable.
-	// A failing egress gets egressMaxAttempts bounded retries (R2b-04); if
+	// A failing egress gets egressMaxAttempts bounded retries; if
 	// it still hasn't succeeded, stop PROCEEDS rather than wedging behind
 	// evidence collection — it just marks the tombstone evidence_lost
 	// instead. Either outcome is receipted in the sidecar (still resident)
 	// before deregister, so a stop that then crashes before deregister
 	// retries idempotently: it neither re-attempts a marker that already
-	// gave up nor re-copies files it already egressed (NRT-P1-07).
+	// gave up nor re-copies files it already egressed.
 	if needEgress {
 		var egressErr error
 		for attempt := 0; attempt < egressMaxAttempts; attempt++ {
@@ -2562,7 +2563,7 @@ func (l *lifecycle) opStop(ctx context.Context, sessionName string) error {
 		return err
 	}
 	if idx > 0 {
-		// Confirm terminal via blocking read (04 §3 stop row ordering
+		// Confirm terminal via blocking read (the stop-row ordering
 		// invariant). fakenomad drives allocs terminal synchronously inside
 		// deregister, so this resolves immediately rather than genuinely
 		// blocking — it still exercises the blocking-read code path a real
@@ -2626,7 +2627,7 @@ func warnUnknownLiveness(w io.Writer, sessionName, what string, err error) {
 // still answer kill -0. A box whose alloc stays non-terminal but whose
 // agent died inside it (the tmux session and/or its pane process gone) is
 // otherwise indistinguishable from a healthy session to an alloc-status-
-// only check (08 §3 in-box agent kill row). A transport error execing the
+// only check (the in-box agent-kill case). A transport error execing the
 // probe itself is returned to the caller rather than collapsed to
 // alive/dead here — opIsRunning applies its own honesty split to that case.
 func (l *lifecycle) probeAgentAlive(ctx context.Context, allocID string, pid int) (bool, error) {
@@ -2644,14 +2645,14 @@ func (l *lifecycle) probeAgentAlive(ctx context.Context, allocID string, pid int
 // opIsRunning reports whether sessionName has a non-terminal child alloc,
 // is past the launched marker, AND the in-box agent itself is still alive —
 // a provisioned-but-not-launched box (alloc running, launched marker unset)
-// answers false here even though it already answers exec (04 §6 decision
-// table, RPP-PROVISION-001: the launched marker is what distinguishes
+// answers false here even though it already answers exec (the launched
+// marker is what distinguishes
 // "provisioned, agent never launched" from "launched, agent died"). Once
 // launched, alive=true requires BOTH the alloc to be non-terminal AND
 // probeAgentAlive to confirm the agent process/tmux session is still there
 // — alive=false with the box otherwise healthy means the agent died inside
-// a surviving box (08 §3 in-box agent kill row), which the alloc's
-// ClientStatus alone can never see. The per-op honesty split (04 §6) still
+// a surviving box (the in-box agent-kill case), which the alloc's
+// ClientStatus alone can never see. The per-op honesty split still
 // applies to every transport fault along the way — listing allocs or
 // execing the probe itself — answering last-known-good (true, since a
 // binding is still on record) rather than false; flipping to false on mere
@@ -2688,24 +2689,24 @@ func (l *lifecycle) opIsRunning(ctx context.Context, sessionName string) (bool, 
 		return true, nil
 	}
 	// Best-effort: pick up the detached prime window's marker files if this
-	// session is still owed one (cr-gdeav.6.13). A no-op exec-free check
+	// session is still owed one. A no-op exec-free check
 	// once PromptedAt is set or no prompt was ever staged, so this costs
 	// nothing on the common path and never affects the liveness answer.
 	l.syncPromptedMarker(ctx, sessionName)
 	return alive, nil
 }
 
-// opListRunning enumerates every launched, non-terminal session, per 04
-// §2.1 rule 2/3: the children-of-parent jobs list (meta=true) is the source
+// opListRunning enumerates every launched, non-terminal session:
+// the children-of-parent jobs list (meta=true) is the source
 // of existence — never the sidecar, which can drift stale — filtered to
 // non-terminal children, decoded via each child's `gc_session` Meta key
-// (never ID-string parsing, e2a-job-id-charset-gap), and then to prefix, if
-// one was given (ListRunning(prefix), E2a amendment A-1). The sidecar is
+// (never ID-string parsing), and then to prefix, if
+// one was given (ListRunning(prefix)). The sidecar is
 // still consulted for exactly one thing the children list cannot answer:
-// the launched marker (04 §6 RPP-PROVISION-001) — a provisioned-but-not-
+// the launched marker — a provisioned-but-not-
 // launched box is not "running", same gate as opIsRunning. On ANY lookup
 // error it returns an error rather than a partial list — matching the
-// "list-based reap arms defer on ANY error" contract (04 §6).
+// "list-based reap arms defer on ANY error" contract.
 // childHasLiveAlloc reports whether a dispatched child still has an allocation
 // that could be running a session.
 //
@@ -2963,8 +2964,8 @@ func (l *lifecycle) opListRunning(ctx context.Context, prefix string) ([]string,
 			// anywhere. Nomad already knows: the allocation's task events carry
 			// OOM kills, constraint evictions, a failed pull, a bad entrypoint.
 			// Asking costs one read on a path that runs only when a box has
-			// actually died (cr-8eagyh gate 4: every failure names its cause at
-			// the layer that knows).
+			// actually died: every failure names its cause at the layer that
+			// knows.
 			if why := l.deadChildReason(ctx, c.ID); why != "" {
 				fmt.Fprintf(os.Stderr, "gc-runtime-nomad: seat %q is gone: %s\n", name, why) //nolint:errcheck
 			}

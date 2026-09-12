@@ -10,13 +10,13 @@ import (
 // adding a single field to gc's launch wire.
 //
 // A provider can run a DIFFERENT INTERACTION MODE depending on where its
-// session runs. Measured (cr-8eagyh): one estate's codex provider runs
-// `codex exec` locally — non-interactive, argv-driven, no prompt ever printed
-// — while the same provider under this runtime runs the interactive TUI, which
-// must be primed by typing and therefore needs a prompt to wait for. The
-// provider's own ready_prompt_prefix cannot express both: set, the local exec
-// lane waits forever for a prompt that never comes; unset, the box types into
-// a TUI that is not ready.
+// session runs. Measured: one estate's codex provider runs `codex exec`
+// locally — non-interactive, argv-driven, no prompt ever printed — while
+// the same provider under this runtime runs the interactive TUI, which must
+// be primed by typing and therefore needs a prompt to wait for. The
+// provider's own ready_prompt_prefix cannot express both: set, the local
+// exec lane waits forever for a prompt that never comes; unset, the box
+// types into a TUI that is not ready.
 //
 // That is what forced a WRAPPER PROVIDER — a second provider block restating
 // one provider's facts in box shape — which is precisely what "any lane

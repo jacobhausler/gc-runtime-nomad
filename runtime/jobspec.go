@@ -10,8 +10,8 @@ import (
 	"time"
 )
 
-// logShipperConfig configures the optional log-shipper task (fnrt-t4l.13,
-// owner requirement fnrt-t4l.12: "first-class, one env var to enable").
+// logShipperConfig configures the optional log-shipper task (owner
+// requirement: "first-class, one env var to enable").
 // The zero value (Sink == "") disables the task entirely — sessionTaskGroup
 // then builds the exact single-task group it always has, so an unset
 // GC_NOMAD_LOG_SINK leaves every existing deployment's jobspec byte-for-byte
@@ -23,7 +23,7 @@ type logShipperConfig struct {
 	// TokenFile is an in-box path the log-shipper task reads its
 	// Authorization bearer token's VALUE from at task start
 	// (GC_NOMAD_LOG_SINK_TOKEN_FILE) — the token itself never rides this
-	// job spec (mirrors R2a-02's "no capability in Meta" rule for the
+	// job spec (mirrors the "no capability in Meta" rule for the
 	// dispatch-identity token: this job spec is registered once and is
 	// readable by anyone who can `nomad job inspect` the parent). Empty
 	// disables the sink's auth block — an unauthenticated sink.
@@ -44,16 +44,16 @@ type logShipperConfig struct {
 func (c logShipperConfig) enabled() bool { return c.Sink != "" }
 
 // killTimeout is sized to agent drain; the cluster's max_kill_timeout is the
-// cap (04 §4, e2a-kill-shutdown-timers).
+// cap.
 const killTimeout = 30 * time.Second
 
-// lostAfter bounds the disconnect.replace=false unknown-client window (04
-// §4); after it expires the reschedule block below (zeroed) governs, so no
-// replacement alloc is ever created (R1c-08 serial-dependency note).
+// lostAfter bounds the disconnect.replace=false unknown-client window;
+// after it expires the reschedule block below (zeroed) governs, so no
+// replacement alloc is ever created (the serial-dependency note).
 const lostAfter = 5 * time.Minute
 
-// sessionCPU/sessionMemoryMB are the explicit per-session resource class (04
-// §4 resources bullet). sessionSecretsMB overrides Nomad's 1 MiB secrets-tmpfs
+// sessionCPU/sessionMemoryMB are the explicit per-session resource class.
+// sessionSecretsMB overrides Nomad's 1 MiB secrets-tmpfs
 // default: deployment bootstraps keep CODEX_HOME there so auth remains outside
 // alloc-fs, and Codex's state database alone can exceed 300 MiB. Nomad counts
 // this reservation in scheduling, unlike its unrequested 1 MiB default.
@@ -64,22 +64,22 @@ const (
 )
 
 // parentJobSpec builds the city's parameterized parent job — the job every
-// session is dispatched from (04 §2 identity contract: session_name maps to
+// session is dispatched from (the identity contract: session_name maps to
 // a dispatch child of this job). It fences the Nomad-side reconciler out of
-// session lifecycle per 04 §4 ("Nomad-side job template invariants"): GC is
+// session lifecycle per the "Nomad-side job template invariants": GC is
 // meant to be the ONLY self-healer for session jobs, so every knob that
 // would let Nomad replace or restart a dispatched child on its own is
 // zeroed or disabled here.
 //
 // nodePool is left empty by default (Nomad's own "default" node pool);
-// NRT-P2-05 drift row 3 found that without an explicit value here, every
+// A drift check found that without an explicit value here, every
 // registered parent/dispatch job lands in the default pool and never places
 // on a lab cluster's named pool (e.g. lab-session) — so a deployment that
 // needs non-default placement must set GC_NOMAD_NODE_POOL.
 //
 // agentImage names the prebaked Docker image that owns the agent toolchain,
 // and it is REQUIRED: the Docker task is the only session task shape
-// (cr-3vvnb5.2 deletes the legacy exec task, and with it the
+// (the legacy exec task has been deleted, and with it the
 // GC_NOMAD_ARTIFACT_VOLUME host volume that used to deliver a Linux gc
 // binary to it). With no second shape left to fall back to, newLifecycle
 // refuses to build a lifecycle at all without an image rather than
@@ -91,14 +91,14 @@ func parentJobSpec(namespace, nodePool, parentID string, logShipper logShipperCo
 		NodePool:  nodePool,
 		Type:      "batch",
 		// Priority stays below every cluster system job by the invariant's
-		// margin (04 §4 priority/preemption invariant); the lab/offline
+		// margin (the priority/preemption invariant); the lab/offline
 		// cluster this pack targets keeps service/batch preemption off, so
 		// this default is a documented starting point, not an enforcement
 		// mechanism on its own.
 		Priority: 40,
 		Constraints: []nomadConstraint{
-			// host-network is a FATAL rule for session jobs (04 §4,
-			// R2a-05): bridge/cni networking is Linux-only, so a
+			// host-network is a FATAL rule for session jobs:
+			// bridge/cni networking is Linux-only, so a
 			// non-Linux placement must fail closed rather than silently
 			// fall back to host mode.
 			{LTarget: "${attr.kernel.name}", RTarget: "linux", Operand: "="},
@@ -119,13 +119,13 @@ func parentJobSpec(namespace, nodePool, parentID string, logShipper logShipperCo
 			// its wrong-arch binary tears nothing down and raises nothing —
 			// the session runs, looks healthy, and its logs silently never
 			// ship. Fail the placement closed instead, exactly as the
-			// kernel rule above does for a non-Linux client (04 §4, R2a-05).
+			// kernel rule above does for a non-Linux client.
 			{LTarget: "${attr.cpu.arch}", RTarget: "amd64", Operand: "="},
 		},
 		ParameterizedJob: &nomadParameterizedJob{
 			// Dispatch Meta carries only non-secret attribution
-			// (gc_session + a per-dispatch nonce, 04 §2.1 rule); the
-			// instance token/capability NEVER rides Meta (R2a-02).
+			// (gc_session + a per-dispatch nonce); the
+			// instance token/capability NEVER rides Meta.
 			// gc_created_at (client.go createdAtMetaKey) is the durable creation
 			// stamp the binding-adoption gate reads back: Nomad's jobs list carries
 			// SubmitTime, but a RECOVERED binding had no age, so adoption refused it
@@ -135,22 +135,22 @@ func parentJobSpec(namespace, nodePool, parentID string, logShipper logShipperCo
 			// EVERY provision. Measured 2026-09-11 in the executive proof city: zero
 			// boxes started on the 0a35596 pack until this list matched what the
 			// dispatcher actually sends. Still non-secret attribution only - the
-			// instance token/capability NEVER rides Meta (R2a-02).
+			// instance token/capability NEVER rides Meta.
 			MetaOptional: []string{"gc_session", "gc_nonce", "gc_created_at", agentImageMetaKey},
 			Payload:      "forbidden",
 		},
 		TaskGroups: []nomadTaskGroup{sessionTaskGroup(logShipper, agentImage, dep)},
 	}
-	// Stamp the jobspec's own fingerprint into its Meta (fnrt-t4l.9): a
+	// Stamp the jobspec's own fingerprint into its Meta: a
 	// registered parent that still exists and still matches on NodePool can
-	// nonetheless carry a stale task (04 §3, e.g. t4l.7's supervisor-script
-	// swap) that a NodePool-only comparison can never see. Computed over job
+	// nonetheless carry a stale task (e.g. a supervisor-script swap) that a
+	// NodePool-only comparison can never see. Computed over job
 	// BEFORE this field is set, so the hash never includes itself.
 	// Deployment-configured node constraints ride AFTER the linux fatal rule, so
 	// an operator placement fence can never displace it (jobspec_test guards the
 	// ordering). Appended before the hash is stamped, so a placement change is
 	// drift-visible to ensureParentRegistered rather than silently ignored on an
-	// already-registered parent (fnrt-t4l.9).
+	// already-registered parent.
 	job.Constraints = append(job.Constraints, dep.nodeConstraints...)
 	// The deployment default rides in the parent's Meta and is hashed WITH the
 	// job, so changing the default is drift-visible exactly as changing the
@@ -167,7 +167,7 @@ func parentJobSpec(namespace, nodePool, parentID string, logShipper logShipperCo
 const agentImageMetaKey = "gc_image"
 
 // jobspecHashMetaKey is the parent job Meta key ensureParentRegistered reads
-// back via getJob to detect drift beyond NodePool (fnrt-t4l.9).
+// back via getJob to detect drift beyond NodePool.
 const jobspecHashMetaKey = "gc_jobspec_hash"
 
 // jobspecHash returns a short, stable fingerprint of job's registerable
@@ -189,7 +189,7 @@ func jobspecHash(job nomadJob) string {
 // the parent job: the resolvers the bridge network writes into the alloc's
 // /etc/resolv.conf, and any node constraints the estate fences sessions to.
 // Both are EMPTY by default and an empty value renders the jobspec byte-for-byte
-// as it was before cr-tzsxk.18 — including its jobspecHash — so an unset
+// as it was before placement config existed — including its jobspecHash — so an unset
 // deployment sees no drift and no behavior change. That is also the rollback:
 // unset the variable and the pack goes back to the spec it shipped.
 type placementConfig struct {
@@ -257,11 +257,11 @@ func sessionTaskGroup(logShipper logShipperConfig, agentImage string, dep placem
 	agent := sessionTask(agentImage)
 	tasks := []nomadTask{agent}
 	// bridge networking so the host-network fatal-rule constraint above
-	// has a placement to fail closed against (04 §4, R2a-05).
+	// has a placement to fail closed against.
 	networks := []nomadNetwork{{Mode: "bridge"}}
 	if len(dep.dnsServers) > 0 {
 		// A bridge alloc gets a resolv.conf written by Nomad from this stanza,
-		// not one copied from the client host (cr-tzsxk.18).
+		// not one copied from the client host.
 		networks[0].DNS = &nomadDNS{Servers: dep.dnsServers}
 	}
 
@@ -277,7 +277,7 @@ func sessionTaskGroup(logShipper logShipperConfig, agentImage string, dep placem
 		tasks = append(tasks, logShipperTask(logShipper))
 		// The one port this group ever declares: vector's built-in
 		// prometheus_exporter, on a group-local dynamic port every task
-		// sees as $NOMAD_PORT_metrics (fnrt-t4l.13 scope). Only declared
+		// sees as $NOMAD_PORT_metrics. Only declared
 		// when the shipper task exists to bind it.
 		networks[0].DynamicPorts = []nomadPort{{Label: logShipperMetricsPortLabel}}
 	}
@@ -285,7 +285,7 @@ func sessionTaskGroup(logShipper logShipperConfig, agentImage string, dep placem
 	group := nomadTaskGroup{
 		Name:  "session",
 		Count: 1,
-		// GC is the only self-healer for session jobs (04 §4): a dead
+		// GC is the only self-healer for session jobs: a dead
 		// agent must produce a terminal alloc that STAYS terminal, so both
 		// in-place restart and reschedule are disabled here.
 		RestartPolicy: nomadRestartPolicy{Attempts: 0, Mode: "fail"},
@@ -295,8 +295,7 @@ func sessionTaskGroup(logShipper logShipperConfig, agentImage string, dep placem
 		},
 		// disconnect.replace=false governs only the unknown-client window;
 		// after lost_after the zeroed reschedule block above is what
-		// actually forbids a replacement alloc (04 §4 serial-dependency
-		// note, R1c-08).
+		// actually forbids a replacement alloc (the serial-dependency note).
 		Disconnect: &nomadDisconnect{
 			Replace:   boolPtr(false),
 			Reconcile: "keep_original",
@@ -312,7 +311,7 @@ func sessionTask(agentImage string) nomadTask {
 	// The image owns the agent toolchain. Keep the task alive with a
 	// signal-aware native sleep process; GC's rendered command and runtime
 	// environment still arrive later through alloc-exec/staging. This Docker
-	// task is the only session shape there is (cr-3vvnb5.2).
+	// task is the only session shape there is.
 	task := nomadTask{
 		Name:   "agent",
 		Driver: "docker",
@@ -322,7 +321,7 @@ func sessionTask(agentImage string) nomadTask {
 			// Baking the literal made the parent job image-specific, so one
 			// deployment served exactly one image and two lanes wanting
 			// different agent toolchains could not coexist on this runtime at
-			// all (cr-420zkj). The parent now carries the deployment default
+			// all. The parent now carries the deployment default
 			// in Meta and a dispatch may override it per session, which is
 			// what lets a lane onboard by naming its runtime rather than by
 			// standing up a second deployment.
@@ -346,13 +345,13 @@ func sessionTask(agentImage string) nomadTask {
 		KillTimeout: killTimeout.Nanoseconds(),
 		// No identity{env|file}, Vault, Consul, or template blocks: Nomad's
 		// default workload identity is fail-closed already, and this design
-		// keeps it that way as a named control (04 §4, R2a-05) — so nothing
+		// keeps it that way as a named control — so nothing
 		// is declared here.
 	}
 	return task
 }
 
-// --- log-shipper task (fnrt-t4l.13) ---
+// --- log-shipper task ---
 
 const (
 	logShipperTaskName         = "log-shipper"
@@ -430,7 +429,7 @@ fi
 exit "$vector_status"`
 
 // logShipperTask builds the log-shipper task added to the session group
-// when cfg.enabled() (fnrt-t4l.13). It shares the group's alloc dir with
+// when cfg.enabled(). It shares the group's alloc dir with
 // the agent task for free (every task in a Nomad group sees the same
 // $NOMAD_ALLOC_DIR) — that shared dir is exactly what lets vector tail the
 // agent's Nomad-captured stdout (vectorConfigTOML's session_stdout source)
@@ -495,15 +494,14 @@ func (c logShipperConfig) artifactSource() string {
 // payload's gc_session Meta key), and this task's own Env block values
 // (GC_LOG_SINK, GC_LOG_LABELS, GC_LOG_NODE_NAME) — is written here as real
 // Nomad template interpolation ("{{ env "VAR" }}"), the same mechanism
-// fnrt-t4l.24 proved for the prom_exporter sink's address. fnrt-3bvg
-// extended that fix to the rest of the config after a live-Nomad proof
-// (ops/receipts/nrt-t4l-20-lab-proof.md) hit the sibling defect at the
+// proven for the prom_exporter sink's address, and extended to the rest of
+// the config after a live-Nomad proof hit the sibling defect at the
 // gc_log_sink URI: relying on VECTOR'S OWN "${VAR}" substitution, resolved
 // from its own process environment when it starts, does not reliably work
 // inside the exec-driver task's environment on real Nomad — GC_LOG_SINK
 // rendered as the literal string "${GC_LOG_SINK}", which Vector rejected as
-// an invalid URI, the same Exit 78 failure class t4l.24 already fixed for
-// the port. Baking the real value into the file at Nomad render time removes
+// an invalid URI, the same Exit 78 failure class already fixed for the
+// port. Baking the real value into the file at Nomad render time removes
 // the dependency on Vector's own env-substitution for every one of these
 // fields.
 //
@@ -531,7 +529,7 @@ func (c logShipperConfig) artifactSource() string {
 //
 // The session_stdout source declares two patterns rather than one, because
 // two different names can appear under {{ env "NOMAD_ALLOC_DIR" }}/logs and
-// only the second was ever listed (cr-gdeav.6.5.5):
+// only the second was ever listed:
 //   - "logs/agent.stdout" — the file the deployment bootstrap actually writes
 //     (ops/nomad/agent-launch.sh taps the pane with `tmux pipe-pane -o
 //     "cat >> '$LOGS/agent.stdout'"`, unsuffixed) and the exact name the
@@ -544,7 +542,7 @@ func (c logShipperConfig) artifactSource() string {
 //     match at most one of the two patterns, so declaring both is free.
 //
 // The sibling capture channels get their own sources rather than extra
-// patterns bolted onto session_stdout (cr-gdeav.6.5.8):
+// patterns bolted onto session_stdout:
 //   - session_stderr — logs/agent.stderr, the launcher's `"$AGENT_CMD"
 //     2>>"$LOGS/agent.stderr"`, plus the same .N rotation pattern the stdout
 //     source uses for the task's own stream.
@@ -638,7 +636,7 @@ type nomadJob struct {
 	Constraints      []nomadConstraint      `json:"Constraints,omitempty"`
 	ParameterizedJob *nomadParameterizedJob `json:"ParameterizedJob,omitempty"`
 	TaskGroups       []nomadTaskGroup       `json:"TaskGroups"`
-	// Meta carries jobspecHashMetaKey (fnrt-t4l.9) — the parent job's own
+	// Meta carries jobspecHashMetaKey — the parent job's own
 	// drift fingerprint, set by parentJobSpec and read back by
 	// ensureParentRegistered via getJob. Unlike ParameterizedJob.MetaOptional
 	// (the dispatch-time Meta keys a child MAY carry), this Meta rides the
@@ -682,7 +680,7 @@ type nomadDisconnect struct {
 	Reconcile string `json:"Reconcile,omitempty"`
 	// Nomad's API marshals time.Duration fields as int64 nanoseconds, not
 	// a Go duration string (empirically confirmed against real Nomad
-	// v2.0.5 — NRT-P2-05; fakenomad never validated this, so the drift
+	// v2.0.5; fakenomad never validated this, so the drift
 	// was invisible to the offline L1 suite until run against a real
 	// cluster).
 	LostAfter int64 `json:"LostAfter,omitempty"`
@@ -694,11 +692,11 @@ type nomadNetwork struct {
 	// writes into the alloc's /etc/resolv.conf. nil declares nothing, which
 	// leaves a bridge alloc inheriting the CLIENT HOST's resolv.conf — on a
 	// systemd-resolved host that is the 127.0.0.53 stub, unreachable from the
-	// alloc netns, so every name lookup in the box dies in ~1ms (cr-tzsxk.18).
+	// alloc netns, so every name lookup in the box dies in ~1ms.
 	DNS *nomadDNS `json:"DNS,omitempty"`
 	// DynamicPorts declares group-local ports every task in the group sees
 	// as $NOMAD_PORT_<Label> — only populated when the log-shipper task
-	// exists to bind one (fnrt-t4l.13's prometheus_exporter port).
+	// exists to bind one (the shipper's prometheus_exporter port).
 	DynamicPorts []nomadPort `json:"DynamicPorts,omitempty"`
 }
 
@@ -717,7 +715,7 @@ type nomadTask struct {
 	Name   string `json:"Name"`
 	Driver string `json:"Driver"`
 	// Leader, when true, makes Nomad stop every OTHER task in the group
-	// only after this task exits (fnrt-t4l.13's "kill_timeout ordering" —
+	// only after this task exits (the "kill_timeout ordering" requirement —
 	// see sessionTaskGroup). Only ever set on the agent task, and only
 	// when a log-shipper task exists to order against.
 	Leader      bool                `json:"Leader,omitempty"`
@@ -747,7 +745,7 @@ type nomadResources struct {
 
 // nomadArtifact mirrors Nomad's artifact stanza (go-getter): GetterOptions
 // carries the "checksum" key logShipperTask uses to pin vector's binary
-// download to its published sha256 (fnrt-t4l.13 — "pinned version + sha256").
+// download to its published sha256 ("pinned version + sha256").
 type nomadArtifact struct {
 	GetterSource  string            `json:"GetterSource"`
 	GetterOptions map[string]string `json:"GetterOptions,omitempty"`

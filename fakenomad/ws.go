@@ -13,10 +13,10 @@ import (
 	"net/http"
 )
 
-// This file implements just enough of RFC 6455 to fake the Nomad
-// alloc-exec WebSocket (e2a-exec-protocol): a server-side handshake plus
-// text-frame read/write, with no compression, fragmentation, or TLS
-// support — deliberately out of scope per NRT-P1-02.
+// This file implements just enough of RFC 6455 to fake the Nomad alloc-exec
+// WebSocket: a server-side handshake plus text-frame
+// read/write, with no compression, fragmentation, or TLS support —
+// deliberately out of scope.
 
 const wsMagicGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
@@ -27,7 +27,7 @@ const (
 
 // handleExecWS fakes `GET /v1/client/allocation/:alloc_id/exec`. After a
 // successful handshake it collects every stdin data frame the client sends
-// (NRT-P1-06 staging: a tar-over-exec-stdin payload rides here) until it
+// (staging: a tar-over-exec-stdin payload rides here) until it
 // sees a stdin-close, then actually runs the command carried in the
 // `command` query param (runCommand) with that collected stdin wired to the
 // real subprocess, and replies with its real stdout and stderr as separate frames plus its exit code —
@@ -130,10 +130,9 @@ func (s *Server) handleExecWS(w http.ResponseWriter, r *http.Request, allocID st
 				return
 			}
 			// Real Nomad carries the command's stderr in its own data frames
-			// (e2a-exec-protocol), so the fake does too — a client that only
-			// reads stdout now visibly loses the box's diagnostics, which is
-			// the fidelity gap that made an in-box launch failure unreadable
-			// (cr-86ytiq).
+			// so the fake does too — a client that only reads
+			// stdout now visibly loses the box's diagnostics, which is the fidelity
+			// gap that made an in-box launch failure unreadable.
 			if len(stderr) > 0 {
 				stderrFrame, _ := json.Marshal(map[string]any{
 					"stderr": map[string]string{"data": base64.StdEncoding.EncodeToString(stderr)},

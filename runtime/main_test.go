@@ -79,15 +79,15 @@ func TestProtocolHandshakeDeclaresProvisionAndExec(t *testing.T) {
 }
 
 // testAgentImage is the session image every lifecycle test now supplies:
-// GC_NOMAD_AGENT_IMAGE became required when cr-3vvnb5.2 deleted the exec
-// task, and fakenomad only records the jobspec it was sent — it never pulls.
+// GC_NOMAD_AGENT_IMAGE became required when the prebaked-image shape
+// deleted the exec task, and fakenomad only records the jobspec it was sent — it never pulls.
 const testAgentImage = "registry.example/gc-agent:test"
 
-// imageModeStartPayload is the minimal start wire a launch needs now that the
-// exec placeholder pane is gone: the Docker task runs the command gc rendered,
-// and an empty one fails the launch closed (cr-hcgaxt, cr-3vvnb5.2). /bin/sh
-// keeps the pane an interactive shell so the key-driving rows still have a
-// pane to type into.
+// imageModeStartPayload is the minimal start wire a launch needs now that
+// the exec placeholder pane is gone: the Docker task runs the command gc
+// rendered, and an empty one fails the launch closed. /bin/sh keeps the
+// pane an interactive shell so the key-driving rows still have a pane to
+// type into.
 const imageModeStartPayload = `{"command":"/bin/sh"}`
 
 func TestRunCheckWarnsWhenLogSinkUnset(t *testing.T) {
@@ -172,11 +172,11 @@ func TestNewLifecycleReadsLogShipperArtifact(t *testing.T) {
 	}
 }
 
-// TestNewLifecycleRequiresAgentImage is the fail-closed half of ONE SHAPE
-// (cr-3vvnb5.2): with the legacy exec task and its artifact-volume delivery
-// deleted there is no session shape without an image, so a run naming none
-// must stop at the launcher rather than register a parent whose boxes have
-// no toolchain to run an agent.
+// TestNewLifecycleRequiresAgentImage is the fail-closed half of ONE SHAPE:
+// with the legacy exec task and its artifact-volume delivery deleted there
+// is no session shape without an image, so a run naming none must stop at
+// the launcher rather than register a parent whose boxes have no toolchain
+// to run an agent.
 func TestNewLifecycleRequiresAgentImage(t *testing.T) {
 	srv := fakenomad.NewServer()
 	t.Cleanup(srv.Close)
@@ -254,7 +254,7 @@ func TestRunExecReadsCommandFromStdin(t *testing.T) {
 }
 
 // TestStartRegistersParentJobWithNamespaceAndNodePool is a regression test
-// for NRT-P2-05 drift row 3: GC_NOMAD_NAMESPACE and GC_NOMAD_NODE_POOL must
+// for a drift this pack once had: GC_NOMAD_NAMESPACE and GC_NOMAD_NODE_POOL must
 // both reach the registered parent job, or every session silently lands in
 // default/default instead of a lab cluster's named namespace/pool.
 func TestStartRegistersParentJobWithNamespaceAndNodePool(t *testing.T) {
@@ -305,10 +305,10 @@ func TestStartRegistersParentJobWithNamespaceAndNodePool(t *testing.T) {
 
 // TestRunDrivingVerbsOverTmux exercises nudge/peek/send-keys/interrupt/
 // clear-scrollback end to end against a real tmux session inside a real
-// alloc (fakenomad's exec actually forks the command, NRT-P1-05): proof
-// these driving verbs are genuine tmux commands sent over exec, not canned
-// replies. Skips if tmux isn't on PATH rather than failing, keeping the
-// hermetic offline suite green on a machine without it.
+// alloc (fakenomad's exec actually forks the command): proof these driving
+// verbs are genuine tmux commands sent over exec, not canned replies. Skips
+// if tmux isn't on PATH rather than failing, keeping the hermetic offline
+// suite green on a machine without it.
 func TestRunDrivingVerbsOverTmux(t *testing.T) {
 	t.Setenv(envAgentImage, testAgentImage)
 	if _, err := exec.LookPath("tmux"); err != nil {
@@ -401,12 +401,12 @@ func TestRunLifecycleOpRequiresConfig(t *testing.T) {
 	}
 }
 
-// TestParseAdoptMaxAge covers the GC_NOMAD_ADOPT_MAX_AGE config surface
-// (cr-gdeav.6.1): unset means the shipped 30m default, a real duration is
-// honored, and anything that would silently turn the limit off — a typo, or a
-// non-positive value — is a config error rather than a fallback. The failure
-// mode this knob exists to prevent is precisely "nobody noticed the limit was
-// not being applied".
+// TestParseAdoptMaxAge covers the GC_NOMAD_ADOPT_MAX_AGE config surface:
+// unset means the shipped 30m default, a real duration is honored, and
+// anything that would silently turn the limit off — a typo, or a
+// non-positive value — is a config error rather than a fallback. The
+// failure mode this knob exists to prevent is precisely "nobody noticed the
+// limit was not being applied".
 func TestParseAdoptMaxAge(t *testing.T) {
 	if got, err := parseAdoptMaxAge(""); err != nil || got != defaultAdoptMaxAge {
 		t.Fatalf(`parseAdoptMaxAge("") = (%v, %v), want the %v default`, got, err, defaultAdoptMaxAge)
@@ -421,7 +421,7 @@ func TestParseAdoptMaxAge(t *testing.T) {
 	}
 }
 
-// TestRunCheckWarnsWhenDNSServersUnset keeps cr-tzsxk.18's failure mode from
+// TestRunCheckWarnsWhenDNSServersUnset keeps a measured failure mode from
 // being silent again: with no resolver configured the pack still registers a
 // working-looking box that cannot resolve a single name.
 func TestRunCheckWarnsWhenDNSServersUnset(t *testing.T) {

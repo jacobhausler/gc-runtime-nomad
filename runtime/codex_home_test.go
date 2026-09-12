@@ -6,11 +6,10 @@ import (
 	"testing"
 )
 
-// TestImageModeStagesCodexHomeOverridingProviderEnv is the RED/GREEN pair for
-// cr-usnvaw. Proof runs 5-7 (ops/receipts/nrt-d3/2026-09-10-disposable-proof-
-// 5-7-image-mode.md) killed every image-mode box at launch: the box inherited
-// the orchestrator's CODEX_HOME (the estate's provider env pins it to
-// /Users/home/.codex, city.toml:82), codex refused to start ("Error finding
+// TestImageModeStagesCodexHomeOverridingProviderEnv is the RED/GREEN pair
+// for a measured failure. Proof runs 5-7 killed every image-mode box at
+// launch: the box inherited the orchestrator's CODEX_HOME (the provider env
+// pins it to a path on the orchestrator host), codex refused to start ("Error finding
 // codex home"), its pane died, the tmux server went with it, and gc reported
 // only "tmux exited 1". The image shape has no bootstrap to fix this (the
 // pack's former launch-script seam is deleted) - so the pack stages the agent
@@ -28,7 +27,7 @@ func TestImageModeStagesCodexHomeOverridingProviderEnv(t *testing.T) {
 	const session = "sess-image-codex-home"
 	cfg := stageConfig{Env: map[string]string{
 		// The provider env as the city stages it today: a Mac CODEX_HOME.
-		codexHomeEnvName:          "/Users/home/.codex",
+		codexHomeEnvName:          "/home/orchestrator/.codex",
 		codexModelProviderKey:     "haus_qwen38_rtxpro6000",
 		codexModelProviderBaseURL: "http://192.168.0.122:18030/v1",
 		codexModelKey:             "rtxpro6000-gateway/qwen38-flashnext-nvfp4",
@@ -52,7 +51,7 @@ func TestImageModeStagesCodexHomeOverridingProviderEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read env.sh: %v", err)
 	}
-	if strings.Contains(envSh, "/Users/home/.codex") {
+	if strings.Contains(envSh, "/home/orchestrator/.codex") {
 		t.Fatalf("env.sh still carries the orchestrator's CODEX_HOME: %s", envSh)
 	}
 	if want := `export CODEX_HOME="$NOMAD_SECRETS_DIR/` + codexHomeDir + `"`; !strings.Contains(envSh, want) {
@@ -107,7 +106,7 @@ func TestImageModeStagesCodexHomeOverridingProviderEnv(t *testing.T) {
 // TestLegacyExecModeLeavesCodexHomeUnchanged protects the rollback shape: with
 // no image the deployment bootstrap owns the agent home (staging_test.go's
 // TestBuildLaunchCommandRunsConfiguredAgentScript is that seam's coverage), so
-// env.sh bytes must be exactly what they were before cr-usnvaw - the inherited
+// env.sh bytes must be exactly what they were before that change - the inherited
 // CODEX_HOME still exported verbatim, and no codex-home staged at all.
 func TestLegacyExecModeLeavesCodexHomeUnchanged(t *testing.T) {
 	l, _ := newTestLifecycle(t)
@@ -115,7 +114,7 @@ func TestLegacyExecModeLeavesCodexHomeUnchanged(t *testing.T) {
 	const session = "sess-legacy-codex-home"
 
 	cfg := stageConfig{Env: map[string]string{
-		codexHomeEnvName:          "/Users/home/.codex",
+		codexHomeEnvName:          "/home/orchestrator/.codex",
 		codexModelProviderKey:     "haus_qwen38_rtxpro6000",
 		codexModelProviderBaseURL: "http://192.168.0.122:18030/v1",
 		"GC_SESSION":              "legacy-lane",
@@ -128,7 +127,7 @@ func TestLegacyExecModeLeavesCodexHomeUnchanged(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read env.sh: %v", err)
 	}
-	if !strings.Contains(envSh, `export CODEX_HOME='/Users/home/.codex'`) {
+	if !strings.Contains(envSh, `export CODEX_HOME='/home/orchestrator/.codex'`) {
 		t.Fatalf("legacy env.sh no longer passes the deployment's CODEX_HOME through unchanged: %s", envSh)
 	}
 	if strings.Contains(envSh, codexHomeDir) {
@@ -155,9 +154,9 @@ func TestCodexHomeOwnedOnlyWhenTheBoxHasNoHome(t *testing.T) {
 		env        map[string]string
 		want       bool
 	}{
-		{"legacy exec shape is the bootstrap's", "", map[string]string{codexHomeEnvName: "/Users/home/.codex"}, false},
+		{"legacy exec shape is the bootstrap's", "", map[string]string{codexHomeEnvName: "/home/orchestrator/.codex"}, false},
 		{"image with no CODEX_HOME at all", "/secrets", map[string]string{}, true},
-		{"image inheriting an orchestrator path", "/secrets", map[string]string{codexHomeEnvName: "/Users/home/.codex"}, true},
+		{"image inheriting an orchestrator path", "/secrets", map[string]string{codexHomeEnvName: "/home/orchestrator/.codex"}, true},
 		{"image already inside the mount", "/secrets", map[string]string{codexHomeEnvName: "/secrets/codex-home"}, false},
 		{"image pointing at the mount itself", "/secrets", map[string]string{codexHomeEnvName: "/secrets"}, false},
 		{"image with a same-prefix sibling outside the mount", "/secrets", map[string]string{codexHomeEnvName: "/secrets-backup/codex-home"}, true},

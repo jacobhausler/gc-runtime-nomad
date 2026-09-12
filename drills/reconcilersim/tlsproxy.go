@@ -10,11 +10,10 @@ import (
 
 // TLSProxy fronts a plain-HTTP local listener for a real mTLS Nomad API, so
 // the pack CLI subprocess — which has zero TLS/client-cert configuration by
-// design (NRT-P1-04, reaffirmed at NRT-P2-05) — can still reach the T1 lab
-// cluster's NRT-P2-02 mTLS baseline. It presents the client cert/key on the
+// design — can still reach the T1 lab cluster's mTLS baseline. It presents the client cert/key on the
 // upstream leg and trusts only the given CA, the same way this package's
 // own Client does for its direct reads; unlike the throwaway, gitignored
-// proxy NRT-P2-05's reconciliation pass improvised for one manual run, this
+// proxy an earlier reconciliation pass improvised for one manual run, this
 // is the harness's own reusable, committed version of the same technique.
 type TLSProxy struct {
 	listener net.Listener

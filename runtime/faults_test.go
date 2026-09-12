@@ -13,14 +13,15 @@ import (
 	"github.com/gastownhall/gc-runtime-nomad/fakenomad"
 )
 
-// This file is the L2 failure-injection suite (NRT-P1-09): one test per 08
-// §3 fault row, each asserting the 04 §6 required answer for that row —
-// principally the honesty split (is-running never flips to false on mere
-// API unavailability; it answers last-known-good instead) and
+// This file is the L2 failure-injection suite: one test per fault row in
+// the fault matrix, each asserting the required answer for that row —
+// principally
+// the honesty split (is-running never flips to false on mere API
+// unavailability; it answers last-known-good instead) and
 // unavailable-is-never-empty (list-running surfaces ANY lookup error rather
-// than a silently-empty list). Real-network partitions are out of scope
-// (NRT-P2-06); every fault here is scripted against fakenomad or the local
-// sidecar filesystem.
+// than a silently-empty list). Real-network partitions are out of scope;
+// every fault here is scripted against fakenomad or the local sidecar
+// filesystem.
 
 // TestFaultAPIOutage covers the API-outage fault row: the Nomad API becomes
 // entirely unreachable (connection refused) after a session is running.
@@ -34,8 +35,8 @@ func TestFaultAPIOutage(t *testing.T) {
 	}
 	srv.Close()
 
-	// Honesty split (04 §6): a known binding plus an unreachable API answers
-	// true (last-known-good), never false.
+	// Honesty split: a known binding plus an unreachable API answers true
+	// (last-known-good), never false.
 	running, err := l.opIsRunning(ctx, session)
 	if err != nil || !running {
 		t.Fatalf("is-running during outage = (%v, %v), want (true, nil)", running, err)
@@ -104,10 +105,10 @@ func TestFaultTLSHandshake(t *testing.T) {
 	}
 }
 
-// TestFaultTimeoutMidDispatch covers the timeout-mid-dispatch fault row: the
-// dispatch call hangs past the caller's deadline. The pre-dispatch intent
-// binding (written before the call that can hang, 04 §2.1 rule 1) must
-// survive so a later attempt is not permanently wedged.
+// TestFaultTimeoutMidDispatch covers the timeout-mid-dispatch fault row:
+// the dispatch call hangs past the caller's deadline. The pre-dispatch
+// intent binding (written before the call that can hang) must survive so a
+// later attempt is not permanently wedged.
 func TestFaultTimeoutMidDispatch(t *testing.T) {
 	l, srv := newTestLifecycle(t)
 	ctx := context.Background()
@@ -230,7 +231,7 @@ func TestFaultLostAlloc(t *testing.T) {
 	}
 }
 
-// TestFaultTaskExitedBeforeLaunch covers the NRT-P2-06.1 regression: a
+// TestFaultTaskExitedBeforeLaunch covers the terminal-alloc regression: a
 // session task that has already exited (terminal alloc) by the time an op
 // needs to exec into the box — the /bin/true placeholder's failure mode on
 // a real client, simulated directly here rather than racing a real
@@ -273,7 +274,8 @@ func TestFaultTaskExitedBeforeLaunch(t *testing.T) {
 }
 
 // TestFaultUnknownAlloc covers the unknown-alloc half of the unknown/lost
-// fault row: 04 §6 lists alloc-unknown (a disconnected client node — the
+// fault row: the wire contract lists alloc-unknown (a disconnected client
+// node — the
 // client hasn't been heard from, but nothing has declared the alloc dead)
 // and alloc-lost as SEPARATE rows with OPPOSITE required answers. "unknown"
 // must never read as gone — the honesty split holds: is-running stays true
@@ -358,13 +360,13 @@ func TestFaultReplacementAlloc(t *testing.T) {
 	}
 }
 
-// TestFaultInBoxAgentKill covers the in-box-agent-kill fault row (08 §3):
-// the box (alloc) survives untouched, but the agent process/tmux session
-// inside it dies on its own (e.g. an OOM kill) without ever touching
-// Nomad's task-main process. is-running must flip to false (agent-dead)
-// even though the alloc's ClientStatus stays "running" throughout — the
-// exact honesty gap ClientStatus-only checks can never see — and must not
-// read as a confirmed box death either: a relaunch into the SAME alloc (no
+// TestFaultInBoxAgentKill covers the in-box-agent-kill fault row: the box
+// (alloc) survives untouched, but the agent process/tmux session inside it
+// dies on its own (e.g. an OOM kill) without ever touching Nomad's
+// task-main process. is-running must flip to false (agent-dead) even though
+// the alloc's ClientStatus stays "running" throughout — the exact honesty
+// gap ClientStatus-only checks can never see — and must not read as a
+// confirmed box death either: a relaunch into the SAME alloc (no
 // re-dispatch) brings the session straight back.
 func TestFaultInBoxAgentKill(t *testing.T) {
 	l, _ := newTestLifecycle(t)
@@ -445,7 +447,7 @@ func TestFaultTokenAfterPurge(t *testing.T) {
 }
 
 // TestFaultCrashPointSuite covers the crash-point-suite fault row's three
-// pinned crash points (08 §3 line 96 / 04 §2.1 rule 6, R2b-02): crash
+// pinned crash points: crash
 // before dispatch, crash after dispatch but before the binding commit, and
 // crash after the binding commit but before the launched marker
 // ("ConfirmStarted"). Each must converge to a single non-terminal child on
@@ -461,9 +463,9 @@ func TestFaultCrashPointSuite(t *testing.T) {
 		if err != nil {
 			t.Fatalf("newNonce: %v", err)
 		}
-		// Simulates a crash between the pre-dispatch intent write (04 §2.1
-		// rule 1) and the dispatch call itself: the intent is on record,
-		// but no child job was ever created cluster-side.
+		// Simulates a crash between the pre-dispatch intent write and the
+		// dispatch call itself: the intent is on record, but no child job was
+		// ever created cluster-side.
 		if err := l.sidecar.save(binding{SessionName: session, Namespace: "default", Nonce: nonce, CreatedAt: time.Now().UTC()}); err != nil {
 			t.Fatalf("sidecar.save(intent): %v", err)
 		}
@@ -521,7 +523,7 @@ func TestFaultCrashPointSuite(t *testing.T) {
 			t.Fatalf("sidecar.load(%q) after adoption = (%v, %v, %v)", session, b, ok, err)
 		}
 		if b.ChildJobID != orphanID {
-			t.Fatalf("sidecar binding after retry = %q, want the orphaned child %q adopted rather than a fresh dispatch (04 §2.1 rule 6)", b.ChildJobID, orphanID)
+			t.Fatalf("sidecar binding after retry = %q, want the orphaned child %q adopted rather than a fresh dispatch", b.ChildJobID, orphanID)
 		}
 
 		names, err := l.opListRunning(ctx, "")
@@ -581,14 +583,13 @@ func TestFaultCrashPointSuite(t *testing.T) {
 	})
 }
 
-// TestFaultStopSuite covers the stop-suite fault row's three pinned rows
-// (08 §3 line 99 / R2b-04): egress error exhausts bounded retries and falls
+// TestFaultStopSuite covers the stop-suite fault row's three pinned rows:
+// egress error exhausts bounded retries and falls
 // back to an evidence_lost marker rather than wedging stop; stop during an
 // outage exits with a failure; and a crash between egress and deregister
-// retries idempotently via the egress-complete marker (not re-copying
-// files a prior attempt already egressed). Also covers the pre-dispatch
-// intent-only binding shape, since Stop must stay idempotent there too
-// (04 §6, E1a §6.1).
+// retries idempotently via the egress-complete marker (not re-copying files
+// a prior attempt already egressed). Also covers the pre-dispatch
+// intent-only binding shape, since Stop must stay idempotent there too.
 func TestFaultStopSuite(t *testing.T) {
 	t.Run("intent-only binding from a pre-dispatch crash", func(t *testing.T) {
 		l, _ := newTestLifecycle(t)
@@ -631,7 +632,7 @@ func TestFaultStopSuite(t *testing.T) {
 
 		before := len(srv.Trace())
 		if err := l.opStop(ctx, session); err != nil {
-			t.Fatalf("stop with a persistently failing egress = %v, want nil (bounded retries then evidence_lost, R2b-04)", err)
+			t.Fatalf("stop with a persistently failing egress = %v, want nil (bounded retries then evidence_lost)", err)
 		}
 		after := srv.Trace()
 
@@ -646,7 +647,7 @@ func TestFaultStopSuite(t *testing.T) {
 			}
 		}
 		if catAttempts != egressMaxAttempts {
-			t.Fatalf("egress fs-cat attempts = %d, want exactly %d (bounded retries, R2b-04); trace = %v", catAttempts, egressMaxAttempts, after[before:])
+			t.Fatalf("egress fs-cat attempts = %d, want exactly %d (bounded retries); trace = %v", catAttempts, egressMaxAttempts, after[before:])
 		}
 		if !deregistered {
 			t.Fatalf("stop never deregistered the child job after the evidence_lost fallback; trace = %v", after[before:])
@@ -716,7 +717,7 @@ func TestFaultStopSuite(t *testing.T) {
 		srv.Close()
 
 		if err := l.opStop(ctx, session); err == nil {
-			t.Fatalf("stop during an API outage = nil error, want failure (04 §3 stop row)")
+			t.Fatalf("stop during an API outage = nil error, want failure")
 		}
 		if _, ok, err := l.sidecar.load(session); err != nil || !ok {
 			t.Fatalf("sidecar binding for %q removed despite an unconfirmed stop", session)
@@ -772,7 +773,7 @@ func TestFaultStopSuite(t *testing.T) {
 
 // TestFaultConcurrentStartRace covers the concurrency-race fault row:
 // concurrent same-name Start under the single-flight lock must produce
-// exactly one child (R2b-03) — not merely avoid a panic or corrupt the
+// exactly one child — not merely avoid a panic or corrupt the
 // on-disk sidecar binding. Run with -race to catch real data races on top.
 func TestFaultConcurrentStartRace(t *testing.T) {
 	l, srv := newTestLifecycle(t)
@@ -797,7 +798,7 @@ func TestFaultConcurrentStartRace(t *testing.T) {
 		}
 	}
 	if succeeded != 1 {
-		t.Fatalf("concurrent same-name start: %d of 2 calls succeeded, want exactly 1 under the single-flight lock (R2b-03); errs = %v", succeeded, errs)
+		t.Fatalf("concurrent same-name start: %d of 2 calls succeeded, want exactly 1 under the single-flight lock; errs = %v", succeeded, errs)
 	}
 
 	b, ok, err := l.sidecar.load(session)
@@ -820,7 +821,7 @@ func TestFaultConcurrentStartRace(t *testing.T) {
 		}
 	}
 	if dispatches != 1 {
-		t.Fatalf("concurrent same-name start issued %d dispatch calls, want exactly 1 non-terminal child (R2b-03); trace = %v", dispatches, srv.Trace())
+		t.Fatalf("concurrent same-name start issued %d dispatch calls, want exactly 1 non-terminal child; trace = %v", dispatches, srv.Trace())
 	}
 }
 
@@ -881,7 +882,7 @@ func TestFaultConcurrentStartRaceCrossProcess(t *testing.T) {
 		}
 	}
 	if succeeded != 1 {
-		t.Fatalf("concurrent same-name start from two independent lifecycle values (simulating two OS processes): %d of 2 succeeded, want exactly 1 (R2b-03); errs = %v", succeeded, errs)
+		t.Fatalf("concurrent same-name start from two independent lifecycle values (simulating two OS processes): %d of 2 succeeded, want exactly 1; errs = %v", succeeded, errs)
 	}
 
 	names, err := l1.opListRunning(ctx, "")
@@ -984,17 +985,17 @@ func TestFaultPermanentAuth(t *testing.T) {
 	}
 
 	// list-running's honesty split is driven by the children-of-parent jobs
-	// list (04 §2.1 rule 2/3), not the per-job allocations endpoint
-	// is-running above just exercised — fault that endpoint too so
-	// list-running's own unavailable-is-never-empty answer gets asserted.
+	// list, not the per-job allocations endpoint is-running above just
+	// exercised — fault that endpoint too so list-running's own
+	// unavailable-is-never-empty answer gets asserted.
 	srv.FailSticky("GET", "/v1/jobs", 401, `{"error":"permission denied"}`)
 	if _, err := l.opListRunning(ctx, ""); err == nil {
 		t.Fatalf("list-running under permanent auth failure = nil error, want a propagated error")
 	}
 }
 
-// TestFaultProvisionResumesAfterStagingHangup covers the wedge fnrt-t4l.18
-// hit on the lab: staging died mid-stdin ("writing exec stdin-close frame:
+// TestFaultProvisionResumesAfterStagingHangup covers the wedge measured on
+// the lab: staging died mid-stdin ("writing exec stdin-close frame:
 // broken pipe") AFTER the dispatch had already committed a live child, so
 // every later provision tick was rejected by dispatch's already-exists
 // guard and the session could never finish being provisioned. The second
@@ -1054,9 +1055,9 @@ func TestFaultProvisionRetriesTransientStagingHangup(t *testing.T) {
 }
 
 // TestFaultProvisionOfALaunchedSessionStillReportsAlreadyExists pins the
-// wire contract the adopt path must not erode (04 §6 / R1a-02: gc's exec
-// proxy infers ErrSessionExists from that exact phrase) — and, with it, the
-// line fnrt-t4l.46 moved. A fully staged but never launched box is now
+// wire contract the adopt path must not erode (gc's exec proxy infers
+// ErrSessionExists from that exact phrase) — and, with it, the line
+// adoption moved. A fully staged but never launched box is now
 // ADOPTED by a re-driven provision, because "staging finished, launch was
 // never confirmed" is exactly the DF-03 state a controller must be able to
 // converge out of. Only a session with an agent actually running in its box

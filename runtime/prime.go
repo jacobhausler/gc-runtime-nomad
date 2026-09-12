@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// Detached in-box startup priming (cr-gdeav.6.13).
+// Detached in-box startup priming.
 //
 // Attempt 6 (pack 6d13b8f) looped: supervisor.log showed op=start cycling
 // provider_error(~5s) -> stale_async_start(~30.5-30.7s), with a FRESH dispatch
@@ -48,7 +48,7 @@ const (
 	// script polls for. They are staged like ready_prefix.txt rather than baked
 	// into the script because they are PROVIDER facts, not runtime facts: a
 	// different agent family paints a different "still loading" line and a
-	// different busy indicator (cr-8eagyh).
+	// different busy indicator.
 	primeLoadingFile = "loading_marker.txt"
 	primeBusyFile    = "busy_marker.txt"
 	primeMarkerFile  = "prompted_at"
@@ -57,7 +57,7 @@ const (
 	primeInterval    = 2   // seconds; mirrors startupReadyIntervalDefault
 
 	// primeDefaultReadyDelayMs is the settle applied AFTER readiness when the
-	// wire carries no ready_delay_ms (cr-gdeav.6.16). This is a different
+	// wire carries no ready_delay_ms. This is a different
 	// role than gc's own ReadyDelayMs, which is a PRE-readiness fallback
 	// delay used only when no ready_prompt_prefix is configured at all
 	// (WaitForRuntimeReady, tmux.go:3388-3400) - a strict superset of that
@@ -69,14 +69,14 @@ const (
 
 	// Submit tuning below is gc's own (internal/runtime/tmux/tmux.go,
 	// nudgeSubmitDebounce / submitEnterAndConfirm's consts), copied verbatim
-	// rather than guessed at (cr-gdeav.6.14). Live evidence is why this
+	// rather than guessed at. Live evidence is why this
 	// matters: attempt 7 (pack bfe4378) typed the nudge as literal text
 	// followed by a LONE Enter the instant the ready prefix matched — which
 	// on this box is ~200ms after launch, well inside Codex's own startup
 	// terminal-query/discard phase (OSC 10/11, CSI 6n, kitty keyboard query,
 	// captured at the very head of agent.stdout) — and Codex exited 1,
 	// "timed out discarding buffered terminal input". Reproduced live against
-	// alloc 12d0aa58 (§11): the same immediate lone-Enter sequence either
+	// alloc 12d0aa58: the same immediate lone-Enter sequence either
 	// stranded the text drafted-but-unsubmitted or crashed the agent; gc's
 	// own sequence — literal paste, THEN a 500ms debounce, THEN Escape
 	// then Enter as ONE submit unit, confirmed by polling for codex's busy
@@ -104,7 +104,7 @@ const (
 //     without the NBSP-fold and box-border strip the Go matcher carries;
 //     those cover TUI rendering edge cases the ready row observed in
 //     production does not need, and keeping the script this small keeps it
-//     auditable by inspection in the alloc. cr-gdeav.6.16 adds two more
+//     auditable by inspection in the alloc. The script adds two more
 //     conditions gc's own rule has no need for, because gc never observed
 //     this failure mode locally: Codex paints its ready row
 //     ("› Ask Codex to do anything") in the SAME first frame as
@@ -112,7 +112,7 @@ const (
 //     agent.stdout (testdata/codex-loading-not-ready.raw) shows both at
 //     once — so a prefix-only match fires while Codex is still inside its
 //     startup terminal-query/discard window, and typing there is what
-//     killed it (cr-gdeav.6.14's crash, again). Readiness is now: the ready
+//     killed it (the same crash, again). Readiness is now: the ready
 //     prefix row is present, AND the pane contains no "loading" marker
 //     (model:/directory: have resolved), AND the capture is IDENTICAL to
 //     the previous poll (one full interval of no repaint at all - the
@@ -160,7 +160,7 @@ fi
 
 # pane_ready FILE: exit 0 when FILE (a tmux capture-pane -p rendering)
 # shows the configured ready prefix AND carries no "loading" marker
-# (cr-gdeav.6.16 - Codex paints its ready row in the SAME frame as
+# (Codex paints its ready row in the SAME frame as
 # "model: loading"/"directory: loading", so the prefix alone is not
 # enough). PREFIX empty (no ready_prompt_prefix configured) skips the
 # prefix half only, matching the Go matcher's own fallback. Named and kept
@@ -209,7 +209,7 @@ if [ "$ready" -eq 1 ]; then
   # argument: tmux 3.7b rejects an argument over ~16 KiB ("command too long",
   # rc=1) and the worker-local charter is 20,857 bytes, so the literal-argument
   # form died right here and the seat was handed NOTHING while the launch still
-  # looked healthy (cr-liv6ac). load-buffer takes a FILE path, so no
+  # looked healthy. load-buffer takes a FILE path, so no
   # argument-size limit applies; paste-buffer -p keeps the prompt's line feeds
   # and -d deletes the buffer as it pastes, so a 20 KB prompt does not linger
   # in the box's tmux state. The explicit delete-buffer covers a paste that
@@ -231,7 +231,7 @@ if [ "$ready" -eq 1 ]; then
   # nothing in front of the agent: status is nudge_failed and prompted_at is
   # NOT written, because a prime that records success while the pane still
   # reads "Ask Codex to do anything" is exactly what made a dark lane look
-  # healthy (cr-liv6ac). Only a definite no-change counts as failure - a pane
+  # healthy. Only a definite no-change counts as failure - a pane
   # that repainted for any reason at all passes - so this can never turn a real
   # delivery into a false negative.
   AFTER="$DIR/.pane_post_paste"
@@ -473,7 +473,7 @@ func (l *lifecycle) syncPromptedMarker(ctx context.Context, sessionName string) 
 		// The status file's own word wins (delivered / submit_unconfirmed /
 		// nudge_failed / not_ready, from run.sh) rather than being collapsed
 		// to "delivered" whenever a marker is present: run.sh writes
-		// prompted_at even on an unconfirmed submit (cr-gdeav.6.14, matching
+		// prompted_at even on an unconfirmed submit (matching
 		// gc's own "handed to tmux" best-effort contract), so the marker
 		// alone cannot tell confirmed from best-effort.
 		b.PromptStatus = status

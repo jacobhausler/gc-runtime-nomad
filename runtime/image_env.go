@@ -5,19 +5,18 @@ import (
 )
 
 // The prebaked-image shape has no deployment bootstrap: the pack's former
-// GC_NOMAD_AGENT_LAUNCH_SCRIPT seam is deleted outright (cr-3vvnb5.3), because
+// GC_NOMAD_AGENT_LAUNCH_SCRIPT seam is deleted outright, because
 // the image owns the agent toolchain. That makes the IMAGE's PATH, HOME, TMPDIR and XDG dirs the only
 // ones an agent in the box can run with - yet stage() sourced the orchestrator's own
 // values for every one of them into env.sh, and the estate's provider env carries them
-// verbatim (harness scratch toolchain, /opt/homebrew/bin, /Users/home/.local/bin).
+// verbatim (harness scratch toolchain, /opt/homebrew/bin, $HOME/.local/bin).
 // Proof run 11 measured it: the exec session's PATH was the image's
 // (/opt/codex/bin/current:...) and /opt/codex/bin/current/codex existed, but after
 // paneStagedEnvPrelude sourced env.sh, `command -v codex` was MISSING - the pane died,
-// its tmux server exited with it, and gc reported only "tmux exited 1"
-// (ops/receipts/nrt-d3/2026-09-10-image-mode-proof-9-11.md, cr-jr2kw7).
+// its tmux server exited with it, and gc reported only "tmux exited 1".
 //
-// cr-usnvaw fixed exactly this class for CODEX_HOME: remove the inherited value from
-// env.sh rather than shadow it. This is that treatment applied to the whole
+// The CODEX_HOME staging fixed exactly this class: it removes the inherited value from
+// env.sh rather than shadowing it. This is that treatment applied to the whole
 // filesystem-shaped class it left behind, on the same rule - env.sh IS the pane's
 // environment, and a path that exists only on the orchestrator is not data there, it
 // is a breakage.
@@ -120,7 +119,7 @@ func orchestratorPathRoots(env map[string]string) []string {
 
 // namesOrchestratorPath reports whether value is, or lives under, one of the
 // orchestrator's roots. The child test is path-aware on purpose: a plain prefix match
-// would call /Users/homeless a child of /Users/home.
+// would call /home/username a child of /home/user.
 func namesOrchestratorPath(value string, roots []string) bool {
 	candidate := strings.TrimSuffix(strings.TrimSpace(value), "/")
 	for _, root := range roots {

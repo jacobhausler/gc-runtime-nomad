@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# toolchain/local-pin-test.sh — offline fixture for cr-dk9i2 (the live-pin image path)
+# toolchain/local-pin-test.sh — offline fixture for the live-pin image path
 #
-# Proves, with NO network, NO docker daemon and NO estate side effects:
+# Proves, with NO network, NO docker daemon and NO side effects outside /tmp:
 #   1. the lock's live-pin entry is well-formed and what `check` reports;
 #   2. `build` PREFERS the staged local gc and passes its checksum + commit into
 #      the Dockerfile, into a MINTED build context (never the pack working tree);
@@ -9,7 +9,7 @@
 #      but missing, checksum mismatch, unpinned line, no line at all;
 #   4. --published is the deliberate way back to upstream, and then the local
 #      args go empty (the Dockerfile's public default);
-#   5. --city that is the estate checkout (or any non-city) is refused, and a
+#   5. --city that is the enclosing checkout (or any non-city) is refused, and a
 #      bounded city is accepted;
 #   6. refresh-pin will not pin a missing binary or a non-x86-64 one;
 #   7. the Dockerfile and the script agree on the staging contract.
@@ -42,7 +42,7 @@ refuse() { # refuse <label> <needle> <cmd…>  — must exit non-zero AND say wh
 }
 
 # A pack copy in /tmp with its own lock, so the pins can be moved without
-# touching the estate checkout. PACK_ROOT follows BASH_SOURCE, so this works.
+# touching this checkout. PACK_ROOT follows BASH_SOURCE, so this works.
 mint_pack() { # mint_pack <name> -> echo pack root
   pr="${W}/$1"; mkdir -p "${pr}/toolchain"
   cp "${REAL_SCRIPT}" "${DOCKERFILE}" "${REAL_LOCK}" "${pr}/toolchain/"
@@ -52,15 +52,28 @@ strip_lock_pin() { # strip_lock_pin <pack-root> — the lock WITHOUT any local-a
   awk '$1!="gc_local_artifact"' "${1}/toolchain/TOOLCHAIN.lock" > "${1}/toolchain/l2" && mv "${1}/toolchain/l2" "${1}/toolchain/TOOLCHAIN.lock"
 }
 set_lock_pin() { # set_lock_pin <pack-root> <path> <sha> <pin>
+  # APPENDS when the lock has no gc_local_artifact line, which is now the
+  # shipped state — the private default was removed because any value there is
+  # a path on one machine. A substitute-only helper silently rewrote nothing
+  # and left every fixture below testing an unpinned lock.
   awk -v p="$2" -v s="$3" -v c="$4" '
-    $1=="gc_local_artifact" { printf "gc_local_artifact %s sha256=%s pin=%s asserts=gc version --json --long -> commit == pin\n", p, s, c; next }
-    { print }' "${1}/toolchain/TOOLCHAIN.lock" > "${1}/toolchain/l2" && mv "${1}/toolchain/l2" "${1}/toolchain/TOOLCHAIN.lock"
+    $1=="gc_local_artifact" { printf "gc_local_artifact %s sha256=%s pin=%s asserts=gc version --json --long -> commit == pin\n", p, s, c; seen=1; next }
+    { print }
+    END { if (!seen) printf "gc_local_artifact %s sha256=%s pin=%s asserts=gc version --json --long -> commit == pin\n", p, s, c }' \
+    "${1}/toolchain/TOOLCHAIN.lock" > "${1}/toolchain/l2" && mv "${1}/toolchain/l2" "${1}/toolchain/TOOLCHAIN.lock"
 }
 
 # --- 1. the shipped lock -------------------------------------------------------
 expect "check passes on the shipped lock"        "six components sha256-pinned" bash "${REAL_SCRIPT}" check
-expect "check reports the live pin"              "gc LOCAL  /mnt/nomad/gc/bin/" bash "${REAL_SCRIPT}" check
-expect "check keeps upstream as the public default" "published gc 1.4.1 stays the public default" bash "${REAL_SCRIPT}" check
+# The shipped lock pins NO local artifact, on purpose: any value there is a path
+# on one machine. `check` must say so plainly rather than looking configured.
+expect "shipped lock pins no local artifact"     "no gc_local_artifact" bash "${REAL_SCRIPT}" check
+# And the documented replacement must be refused when it is half-supplied —
+# a path without its checksum and pin would verify the caller's binary against
+# the lock's, which reports a mismatch and names the wrong cause.
+expect "half-supplied override is refused"       "GC_LOCAL_ARTIFACT is set but" \
+  env GC_LOCAL_ARTIFACT=/nonexistent/gc bash "${REAL_SCRIPT}" check
+expect "check names the published default"       "published gc 1.4.1" bash "${REAL_SCRIPT}" check
 
 # --- 2. the preference, and a bounded context ---------------------------------
 P="$(mint_pack prefer)"
@@ -90,7 +103,7 @@ refuse "an unchecksummed local line is refused" "no sha256=<hex> pin" bash "${P}
 
 P="$(mint_pack nolocal)"; strip_lock_pin "${P}"
 refuse "no local line + no --published is refused" "which is likely older than the live pin" env GC_TOOLCHAIN_HOST_STEP=1 bash "${P}/toolchain/build-image.sh" build --dry-run
-# the cr-dk9i2 COMMENT block names gc_local_artifact too; only a line whose first
+# the LIVE-pin COMMENT block names gc_local_artifact too; only a line whose first
 # field is the key is a pin (that is what lock_get reads), so assert on the anchor.
 grep -qE '^gc_local_artifact ' "${P}/toolchain/TOOLCHAIN.lock" && bad "strip_lock_pin left an active pin" || ok "a lock with only the comment block has no active pin"
 
@@ -103,13 +116,13 @@ out="$(GC_TOOLCHAIN_HOST_STEP=1 bash "${P}/toolchain/build-image.sh" build --dry
 case "$out" in *"--build-arg=GC_SHA256=8d8c8b51"*) ok "--published keeps the upstream published checksum";; *) bad "--published lost the published pin";; esac
 
 # --- 5. the bounded-city refusal ----------------------------------------------
-ESTATE="$(cd "${TOOLCHAIN_DIR}/../.." && git rev-parse --show-toplevel 2>/dev/null || true)"
-case "${ESTATE}" in */gc-runtime-nomad|"") ESTATE="" ;; esac
-if [ -n "${ESTATE}" ]; then
-  refuse "the estate checkout is refused as a build context" "estate checkout" bash "${REAL_SCRIPT}" city-image --city="${ESTATE}" --dry-run
-  refuse "…and by context-only too" "estate checkout" bash "${REAL_SCRIPT}" context-only --city="${ESTATE}" --dry-run
+OUTER="$(cd "${TOOLCHAIN_DIR}/../.." && git rev-parse --show-toplevel 2>/dev/null || true)"
+case "${OUTER}" in */gc-runtime-nomad|"") OUTER="" ;; esac
+if [ -n "${OUTER}" ]; then
+  refuse "the enclosing checkout is refused as a build context" "enclosing working checkout" bash "${REAL_SCRIPT}" city-image --city="${OUTER}" --dry-run
+  refuse "…and by context-only too" "enclosing working checkout" bash "${REAL_SCRIPT}" context-only --city="${OUTER}" --dry-run
 else
-  ok "estate checkout not derivable from this checkout (pack not under <estate>/work/) — estate refusal not applicable"
+  ok "no enclosing checkout derivable here (this pack is not vendored inside one) — that refusal is not applicable"
 fi
 refuse "a non-city directory is refused" "no city.toml" bash "${REAL_SCRIPT}" city-image --city="${W}" --dry-run
 BOUNDED="${W}/gctc-fake-city"; mkdir -p "${BOUNDED}"; printf '# bounded test city\n' > "${BOUNDED}/city.toml"
@@ -127,12 +140,12 @@ grep -q 'ARG GC_LOCAL_ARTIFACT=' "${DOCKERFILE}" && ok "Dockerfile declares the 
 grep -q 'ARG GC_LOCAL_SHA256=' "${DOCKERFILE}" && grep -q 'ARG GC_PIN_COMMIT=' "${DOCKERFILE}" && ok "Dockerfile declares the checksum + commit ARGs" || bad "Dockerfile lost GC_LOCAL_SHA256/GC_PIN_COMMIT"
 grep -q 'COPY .local/' "${DOCKERFILE}" && ok "Dockerfile copies the minted staging dir" || bad "Dockerfile lost COPY .local/"
 grep -q "jq -r '.commit // empty'" "${DOCKERFILE}" && ok "Dockerfile asserts the pin's reported commit by equality" || bad "Dockerfile lost the commit equality assertion"
-# The docker build on rhuidean is what found the FIRST version of the gc RUN line
+# The first real docker build is what found the FIRST version of the gc RUN line
 # unparseable ("/bin/sh: 1: Syntax error: Unterminated quoted string") — an
 # ~8-minute round trip through bd's rebuild to learn it. So every RUN body is
 # joined back from its continuations and parsed here, offline, with `sh -n`: a RUN
 # that does not parse is a build step that fails, caught at no cost and no daemon.
-# The image's /bin/sh is dash (ubuntu:24.04). /bin/dash exists on the Mac too; use
+# The image's /bin/sh is dash (ubuntu:24.04). /bin/dash may exist locally too; use
 # it when present so this parses the way the build step will. The CANARY is not
 # optional decoration: a syntax gate that cannot reject an unbalanced quote is a
 # gate that passes every build, so it is reported as inert instead of as a pass.

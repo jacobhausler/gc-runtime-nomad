@@ -1,6 +1,6 @@
 package main
 
-// Startup prompt delivery tests (cr-gdeav.6.10).
+// Startup prompt delivery tests.
 //
 // Cross-boundary tier: these tests carry gc's OWN wire encoding
 // (internal/runtime/exec/json.go's startConfig field names) through this
@@ -27,19 +27,19 @@ import (
 // in nudge. Written out in gc's field names on purpose: this pack cannot
 // import gc, so a rename upstream must land here as a failure.
 const gcLaunchWire = `{
-  "work_dir": "/Users/home/westlands/work/fable-nomad",
-  "command": "/bin/sh -c '. \"$NOMAD_SECRETS_DIR/env.sh\"; . /mnt/nomad/gc/agent-launch.sh'",
+  "work_dir": "/home/user/work/example-agent",
+  "command": "/bin/sh -c '. \"$NOMAD_SECRETS_DIR/env.sh\"; . /srv/gc/agent-launch.sh'",
   "lifecycle": "one_shot",
   "env": {"GC_CITY_URL": "https://192.168.0.107:8443"},
   "process_names": ["codex"],
   "nudge": "Run gc hook --claim --json now.",
   "ready_prompt_prefix": "Ask Codex",
   "ready_delay_ms": 5000,
-  "pre_start": ["mkdir -p /mnt/nomad/gc"],
-  "session_setup": ["git -C /mnt/nomad/gc status -sb"],
+  "pre_start": ["mkdir -p /srv/gc"],
+  "session_setup": ["git -C /srv/gc status -sb"],
   "session_setup_script": "/tmp/session-setup.sh",
   "session_live": ["gc runtime heartbeat"],
-  "pack_overlay_dirs": ["/Users/home/.gc/packs/gc-runtime-nomad/overlay"],
+  "pack_overlay_dirs": ["/home/user/.gc/packs/gc-runtime-nomad/overlay"],
   "overlay_dir": "/tmp/session-overlay",
   "copy_files": [{"src": "/tmp/x", "rel_dst": "x"}]
 }`
@@ -57,16 +57,16 @@ var gcStartWireFields = []string{
 }
 
 // TestStageConfigCarriesEveryGcLaunchWireField pins the wire schema in BOTH
-// directions, and it started life as the RED half of the drop cr-gdeav.6.9
-// receipt §1.4 named: the pack decoded only work_dir/env/files, so gc's
+// directions, and it started life as the RED half of a measured drop: the
+// pack decoded only work_dir/env/files, so gc's
 // command, nudge, process_names and ready_* arrived and were thrown away.
 //
-// The second half (cr-u7b0s.40) is the one that keeps a private schema from
-// growing back inside the wire: a key this pack decodes that gc's
-// marshalStartConfig does not serialize is a field nothing will ever send,
-// and `files`, `prompt_suffix` and `prompt_flag` were exactly that. It
-// asserts on tags rather than fields so it compiles (and fails) against any
-// pack whose struct disagrees with the pin.
+// The second half is the one that keeps a private schema from growing back
+// inside the wire: a key this pack decodes that gc's marshalStartConfig
+// does not serialize is a field nothing will ever send, and `files`,
+// `prompt_suffix` and `prompt_flag` were exactly that. It asserts on tags
+// rather than fields so it compiles (and fails) against any pack whose
+// struct disagrees with the pin.
 func TestStageConfigCarriesEveryGcLaunchWireField(t *testing.T) {
 	typ := reflect.TypeOf(stageConfig{})
 	have := map[string]bool{}
@@ -112,7 +112,7 @@ func TestReadStageConfigDecodesGcLaunchWire(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readStageConfig: %v", err)
 	}
-	if cfg.WorkDir != "/Users/home/westlands/work/fable-nomad" {
+	if cfg.WorkDir != "/home/user/work/example-agent" {
 		t.Errorf("WorkDir = %q", cfg.WorkDir)
 	}
 	if !strings.Contains(cfg.Command, "agent-launch.sh") {
@@ -156,7 +156,7 @@ func TestReadStageConfigDecodesGcLaunchWire(t *testing.T) {
 }
 
 // TestStartupPromptIgnoresKeysGcDoesNotSerialize is the other half of the
-// cr-u7b0s.40 deletion: prompt_suffix / prompt_flag exist on runtime.Config
+// prompt-key deletion: prompt_suffix / prompt_flag exist on runtime.Config
 // and the native tmux adapter consumes them in-process, but gc's
 // marshalStartConfig never puts either on the exec wire - so a caller that
 // sends them must NOT get a prompt out of them. `nudge` is the pack's only

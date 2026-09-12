@@ -10,10 +10,10 @@ import (
 // TestPackVersionMatchesTheTopReleaseNote pins pack.toml's declared version to
 // the newest section of RELEASE-NOTES.md.
 //
-// These drifted: RELEASE-NOTES.md carried a `# v1.0.7` section documenting a
-// BREAKING removal (GC_NOMAD_AGENT_LAUNCH_SCRIPT, cr-3vvnb5) while pack.toml
-// still declared 1.0.6. pack.toml is what an installer reads, so the manifest
-// was advertising a version whose documented contract the code no longer
+// These drifted: RELEASE-NOTES.md carried a `# v1.0.7` section documenting
+// a BREAKING removal (GC_NOMAD_AGENT_LAUNCH_SCRIPT) while pack.toml still
+// declared 1.0.6. pack.toml is what an installer reads, so the manifest was
+// advertising a version whose documented contract the code no longer
 // honoured — someone installing "1.0.6" got 1.0.7 behaviour, including a
 // removed environment variable, with no way to tell from the manifest.
 //

@@ -1,9 +1,9 @@
-# toolchain/Dockerfile — estate session toolchain (the base gc build-image composes city content onto)
+# toolchain/Dockerfile — the session toolchain base (the image gc build-image composes city content onto)
 #
-# cr-u7b0s.45. Provider-neutral by construction: this file never mentions
-# Nomad, an allocation, a host volume, /mnt/nomad, or a provider binary path
-# other than in-image paths. It is the Docker build INPUT — building it is an
-# executive host step (toolchain/build-image.sh), and nothing here publishes,
+# Provider-neutral by construction: this file never mentions Nomad, an
+# allocation, a host volume, a host artifact path, or a provider binary path
+# other than in-image paths. It is the Docker build INPUT — building it is a
+# build-host step (toolchain/build-image.sh), and nothing here publishes,
 # promotes, or canaries anything.
 #
 # Every ARG default below is a value read from toolchain/TOOLCHAIN.lock, which
@@ -57,10 +57,10 @@ FROM ${BASE_IMAGE}
 
 ARG GC_URL=https://github.com/gastownhall/gascity/releases/download/v1.4.1/gascity_1.4.1_linux_amd64.tar.gz
 ARG GC_SHA256=8d8c8b511db3fc44931445aab5cb9f212509c0867105c880d6c3d0e6e5d33e42
-# cr-dk9i2 — which gc goes into the image. The published release above is the
-# PUBLIC DEFAULT; when GC_LOCAL_ARTIFACT names a file under .local/ (staged by
+# Which gc goes into the image. The published release above is the PUBLIC
+# DEFAULT; when GC_LOCAL_ARTIFACT names a file under .local/ (staged by
 # toolchain/build-image.sh from the lock's gc_local_artifact), that binary — the
-# estate's LIVE pin — is installed instead and its own reported commit is
+# deployment's LIVE pin — is installed instead and its own reported commit is
 # asserted, because a gc older than the pin is the defect this closes.
 # build-image.sh passes empty values for all three to mean "published".
 ARG GC_LOCAL_ARTIFACT=
@@ -68,12 +68,12 @@ ARG GC_LOCAL_SHA256=
 ARG GC_PIN_COMMIT=
 ARG GIT_VERSION=1:2.43.0-1ubuntu7.3
 ARG TMUX_VERSION=3.4-1ubuntu0.1
-# libicu74 is not decoration: the estate's own built gc NEEDS it. `ldd` on the
+# libicu74 is not decoration: a locally built gc NEEDS it. `ldd` on the
 # digest-pinned base reports `libicui18n.so.74 => not found` for the staged pin,
 # so the install succeeded and the binary then died at its first command
-# (`gc: error while loading shared libraries`). rhuidean has ICU installed, which
-# is exactly why the host cannot show this gap and only an image build can.
-# Measured + pinned by cr-dk9i2; the assertion is at the foot of the gc RUN.
+# (`gc: error while loading shared libraries`). A build host normally has ICU
+# installed, which is exactly why the host cannot show this gap and only an
+# image build can. Measured and pinned; the assertion is at the foot of the gc RUN.
 ARG LIBICU_VERSION=74.2-1ubuntu3.1
 ARG CODEX_URL=https://github.com/openai/codex/releases/download/rust-v0.150.1/codex-package-x86_64-unknown-linux-musl.tar.gz
 ARG CODEX_SHA256=00aba704f029f6dc0d948be407a756e0c97cc840132fd691353b2c6b0a505b17
@@ -114,7 +114,7 @@ RUN apt-get update \
 # the same RUN that consumes it, so the artifact adds no layer.
 COPY .local/ /tmp/toolchain-local/
 
-# gc — either the estate's LIVE pin (checksum-verified, commit-asserted) or,
+# gc — either the deployment's LIVE pin (checksum-verified, commit-asserted) or,
 # with no local artifact named, the published release archive. Both paths are
 # checksum-verified and identity-asserted; the local path asserts the commit the
 # pin REPORTS about itself, which is the assertion that would otherwise rot:
@@ -154,7 +154,7 @@ COPY --from=bd-builder /out/bd /usr/local/bin/bd
 RUN BD_DISABLE_METRICS=1 BD_DISABLE_EVENT_FLUSH=1 bd --version
 
 # Codex — the COMPLETE standalone package (NOT the bare codex-<target> archive,
-# which is what made a D4 seat come up as a chat window that cannot run a
+# which is what made a dogfood seat come up as a chat window that cannot run a
 # tool). Layout is asserted from the package's own codex-package.json, the
 # entrypoint is checksum-asserted, and the PATH dir mirrors the shape the
 # launcher already expects: a `current` symlink to a versioned directory.
@@ -162,9 +162,9 @@ RUN BD_DISABLE_METRICS=1 BD_DISABLE_EVENT_FLUSH=1 bd --version
 # does not create the parent, so the very last step of the unpack failed
 # (`ln: failed to create symbolic link '/opt/codex/bin/current': No such file or
 # directory`) — the file the versions dir was created from a path that existed
-# and the link target's parent never was. cr-u7b0s.45 recorded honestly that
-# this Dockerfile had never been built; that is why this is the first build to
-# find it, not a regression from anything in cr-dk9i2.
+# and the link target's parent never was. The commit that added this Dockerfile
+# recorded honestly that it had never been built; that is why the first build to
+# run it found this, and it is not a regression from any later change.
 RUN set -eu; \
     curl -fsSL --retry 3 "${CODEX_URL}" -o /tmp/codex-package.tar.gz; \
     echo "${CODEX_SHA256}  /tmp/codex-package.tar.gz" | sha256sum --check --strict; \
@@ -186,17 +186,17 @@ RUN set -eu; \
     install -d /opt/codex/bin; \
     ln -sfn "/opt/codex/versions/${CODEX_VERSION}" /opt/codex/bin/current
 
-# The PATH dir a seat needs to run a tool. The launcher seam (cr-u7b0s.41/.42)
-# owns what a session's PATH is; this is the in-image default, and the build
+# The PATH dir a seat needs to run a tool. The launch seam owns what a session's
+# PATH is; this is the in-image default, and the build
 # proves it with the README's own check rather than asserting it.
 ENV PATH="/opt/codex/bin/current:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 RUN env -i PATH="/opt/codex/bin/current:/usr/bin:/bin" sh -c 'command -v codex && command -v codex-code-mode-host'
 
 # No secrets, credentials, city content, or runtime state are baked here —
 # gc build-image excludes them from the context it composes on top of this
-# base (internal/buildimage/context.go:39-63) and this estate stages secrets
+# base (internal/buildimage/context.go:39-63) and the pack stages secrets
 # value-blind at runtime (README part 1 step 9).
-# The gc binary itself may be a locally built artifact (cr-dk9i2): a build-time
-# copy of the staged pin, verified by checksum and by the commit it reports.
-# That path is a BUILD input only — the image still mounts nothing, and no
-# allocation writes /mnt/nomad/gc/bin (ruling cr-on8x4).
+# The gc binary itself may be a locally built artifact: a build-time copy of the
+# staged pin, verified by checksum and by the commit it reports. That path is a
+# BUILD input only — the image still mounts nothing, and no allocation writes
+# the pin-staging directory.
