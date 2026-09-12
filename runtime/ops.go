@@ -1577,7 +1577,15 @@ func (l *lifecycle) verifyPaneRunsAgent(ctx context.Context, sessionName string)
 		// in front while the agent runs beneath it, which made this warn on every
 		// healthy launch in the harness — and a warning that cries wolf every
 		// time teaches an operator to ignore the one that matters.
-		if l.boxRunsAnAgent(ctx, allocID) {
+		runs, unmeasurable := l.boxRunsAnAgent(ctx, allocID)
+		if unmeasurable {
+			return fmt.Errorf("launching session %q: cannot tell whether an agent is running — "+
+				"the process probe exited nonzero inside the box, which means the image has no "+
+				"usable `ps`. This runtime requires it (COMPATIBILITY.md, \"The agent image\"): "+
+				"without it an empty box is indistinguishable from a working one, for every "+
+				"session this deployment ever runs", sessionName)
+		}
+		if runs {
 			return nil
 		}
 		cmd, err := l.paneCurrentCommand(ctx, allocID)
@@ -1613,13 +1621,39 @@ func (l *lifecycle) verifyPaneRunsAgent(ctx context.Context, sessionName string)
 // beside them. That distinction survives a wrapped pane, which the pane's
 // foreground command does not.
 //
-// Unreadable is NOT an answer: a failed probe returns true (do not warn), so an
-// unreachable box never produces a false alarm.
-func (l *lifecycle) boxRunsAnAgent(ctx context.Context, allocID string) bool {
+// Unreadable is NOT an answer: a failed probe reports runs=true (do not warn),
+// so an unreachable box never produces a false alarm.
+//
+// The two ways it can fail are not the same failure and are reported apart.
+// A transport fault (err != nil) says nothing about the box. But an exec that
+// REACHED the box and came back nonzero means the probe command itself failed
+// in there — overwhelmingly, an image with no `ps`. That is an image-contract
+// violation (COMPATIBILITY.md lists `ps` as required), and it matters more
+// than it looks: without `ps` this probe can never answer for the life of the
+// deployment, so every box silently forfeits its empty-box diagnosis. Naming
+// it is the layer that knows doing its job; an outside review found this path
+// asserting health on a probe that could not run.
+func (l *lifecycle) boxRunsAnAgent(ctx context.Context, allocID string) (runs, unmeasurable bool) {
 	exitCode, out, err := l.client.execAlloc(ctx, allocID, execTaskName,
 		[]string{"/bin/sh", "-c", "ps -eo comm 2>/dev/null || ps -o comm 2>/dev/null"})
-	if err != nil || exitCode != 0 {
-		return true
+	return classifyProcessProbe(err, exitCode, out)
+}
+
+// classifyProcessProbe is boxRunsAnAgent's decision, separated from its
+// transport so it can be tested at all.
+//
+// It cannot be reached through this pack's offline harness: fakenomad runs a
+// box's commands as local subprocesses on the developer's machine, where `ps`
+// always exists, so the missing-`ps` case is unreachable there by
+// construction. That is worth stating rather than working around — it is a
+// concrete instance of the harness being blind to a real-box property, and
+// the reason this logic is a pure function.
+func classifyProcessProbe(err error, exitCode int, out []byte) (runs, unmeasurable bool) {
+	if err != nil {
+		return true, false
+	}
+	if exitCode != 0 {
+		return true, true
 	}
 	for _, line := range strings.Split(string(out), "\n") {
 		name := strings.TrimSpace(line)
@@ -1635,9 +1669,9 @@ func (l *lifecycle) boxRunsAnAgent(ctx context.Context, allocID string) bool {
 		case bareShellCommands[name]:
 			continue
 		}
-		return true
+		return true, false
 	}
-	return false
+	return false, false
 }
 
 // paneCurrentCommand reads the foreground command tmux reports for the pane.
