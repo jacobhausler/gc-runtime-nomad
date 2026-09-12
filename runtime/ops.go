@@ -463,6 +463,9 @@ func agentCaptureBody(paneCommand string) string {
 		// keeps the shell alive while the child still receives SIGINT
 		// normally, and the trap body runs only once the child has exited.
 		`trap : INT; ` +
+		// The box answers what only the box can: which of the paths in the
+		// agent's own arguments do not exist here. See host_path_args.go.
+		hostPathProbe(absolutePathArgs(paneCommand)) +
 		`__gc_started=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown); ` +
 		`{ ` + paneCommand + `; }; __gc_rc=$?; ` +
 		`{ printf 'exit=%s started=%s ended=%s pane=%s argv0=%s alloc=%s\n' ` +

@@ -541,6 +541,11 @@ func (l *lifecycle) diagnosePaneGone(ctx context.Context, allocID string) string
 				out += " Its stderr ended: " + execExcerpt([]byte(tail))
 			}
 		}
+		// The one cause an exit code cannot express and the box alone can
+		// answer. Appended AFTER the record because it explains it.
+		if report, ok := l.readBoxFile(ctx, allocID, "alloc/data/"+hostPathReportName); ok {
+			out += l.hostPathFinding(report)
+		}
 		return out
 	}
 	return " The pane's command has exited (a tmux server exits with its last session), but this box " +
@@ -609,4 +614,30 @@ func lastLine(s string) string {
 		}
 	}
 	return ""
+}
+
+// hostPathFinding turns the box's missing-path report into the sentence that
+// sends the reader to the right file. The remedy is never in the box: the path
+// came from the provider's own arguments, which are rendered on the
+// orchestrator, where it does exist. That asymmetry is the whole defect, and
+// it cost this estate days of a lane whose agent exited 1 in the same second
+// it started, with the real cause being an orchestrator-only path in a `-c` flag.
+func (l *lifecycle) hostPathFinding(report string) string {
+	var paths []string
+	for _, line := range strings.Split(report, "\n") {
+		line = strings.TrimSpace(line)
+		if p := strings.TrimPrefix(line, "missing-path:"); p != line {
+			if p = strings.TrimSpace(p); p != "" {
+				paths = append(paths, p)
+			}
+		}
+	}
+	if len(paths) == 0 {
+		return ""
+	}
+	return " AND THE BOX WAS GIVEN PATHS THAT DO NOT EXIST IN IT: " + strings.Join(paths, ", ") +
+		" — these are absolute paths in the AGENT'S OWN ARGUMENTS, which are rendered on the " +
+		"orchestrator, where they do exist. Nothing in the image can fix this; the provider " +
+		"configuration has to name a path that is valid inside the allocation (stage the file, bake " +
+		"it into the image, or drop the argument in the runtime's shape)."
 }
