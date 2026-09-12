@@ -65,7 +65,17 @@ the documented path was actually followed and the symptom persists.
    gate certifying them. The runtime probes the in-box `gc` once at launch and
    warns when it cannot claim, naming the AGENT IMAGE rather than the
    supervisor. If `check` passes and seats still drain `no_work`, that warning
-   — and `gc version --json` run INSIDE the image — is where to look.
+   is where to look — and the probe in the table's first row, run inside the
+   image.
+
+   **A FAIL alongside boxes that are up and running is normal, not a
+   contradiction.** The gate refuses only the ops that MINT a box — `start`,
+   `provision`, `relaunch`. `stop`, `is-running`, `list-running` and `peek`
+   deliberately keep working, because a box that already exists must stay
+   stoppable or a startup refusal becomes stranded allocations. So boxes
+   minted before the gate landed, or before the `gc` on PATH changed, go on
+   running and looking healthy while `check` fails. Do not discard a correct
+   diagnosis because live allocations seem to disprove it.
 
 Exit-code contract: lifecycle ops return 0 success, 1 error, 2 unknown operation
 (the RPP forward-compatibility signal callers treat as no-op success). `exec` is
@@ -81,7 +91,7 @@ nothing. The FAIL is the answer; the warnings are a to-do list.
 
 | Symptom | Read first | Usual cause |
 |---|---|---|
-| **Seats drain `no_work` while the city lists work as ready** — box healthy, agent up, pane fine | `gc-runtime-nomad check` **first**, then `gc version --json` on the host AND inside the image | The driving `gc` lacks `remote-worker-lifecycle`, so the seat cannot claim at all. `check` names this and exits nonzero. If `check` passes, suspect the **in-box** `gc`: the gate probes the host's, the image's is the one that claims, and a launch-time warning names that case |
+| **Seats drain `no_work` while the city lists work as ready** — box healthy, agent up, pane fine | `gc-runtime-nomad check` **first**. To confirm by hand, or to test the `gc` INSIDE the image, run the gate's own probe: `gc bd claim probe --city-url https://127.0.0.1:1 --city-name probe` | The driving `gc` lacks `remote-worker-lifecycle`, so the seat cannot claim at all. `check` names it and exits nonzero. **Do not reach for `gc version --json`** — it prints a commit and the literal string `dev`, which looks perfectly normal and only incriminates if you already know that commit is the upstream base. The probe answers directly: `remote worker subset` in the refusal means the family is PRESENT; `remote support is being enabled incrementally` means it is ABSENT. If the host passes, suspect the **in-box** `gc` — the gate probes the host's, the image's is the one that claims |
 | Every lifecycle op fails at once | `gc-runtime-nomad check` | `GC_NOMAD_AGENT_IMAGE` unset; the required image fails every op closed |
 | `parent job "gc-sessions" is stale - re-register with a management token` | parent `gc_jobspec_hash` vs current jobspec | Any task-spec, resolver, or placement change is a jobspec change; the runtime token cannot fix it |
 | Child job exists, never places, no error | placement keys and scheduler events | A placement selection with no eligible client stays pending forever; look at placement facts, not dispatch or liveness |
@@ -100,7 +110,24 @@ nothing. The FAIL is the answer; the warnings are a to-do list.
 
 ## 2. Collect evidence with native verbs, in this order
 
-City side - these are the record, and they are read-only alongside a live
+Pack side, FIRST - the pack's own diagnostics answer its contract without
+touching a cluster, and when the fault IS the pack or the `gc` driving it, the
+city-side verbs below are ten commands spent interrogating a broken instrument:
+
+```bash
+gc-runtime-nomad check                 # RUN THIS FIRST. See below - it can FAIL, not just warn
+gc-runtime-nomad protocol              # the advertised RPP version and capabilities
+gc-runtime-nomad is-running <session>  # and: list-running [prefix]
+```
+
+`check` is not advisory. It **warns** on an unset log sink, an unset required
+image and an unset resolver list — each a real fault on its own — and it
+**FAILS, exiting nonzero**, when the `gc` on PATH cannot claim work from inside
+an allocation. That FAIL is the single most decisive line this pack produces
+and it supersedes every warning above it. Attach the whole output to any bug
+report.
+
+City side, SECOND - these are the record, and they are read-only alongside a live
 controller:
 
 ```bash
@@ -117,23 +144,6 @@ did or did not do X to a session - and `gc analyze` first for aggregate
 questions across sessions. Fall back to raw event greps only where neither can
 answer. Trace state persists under the city's runtime directory and stays
 manageable even when the controller is offline.
-
-Pack side FIRST - the pack's own diagnostics answer its contract without
-touching a cluster, and when the fault IS the pack or the `gc` driving it, the
-city-side verbs above are ten commands spent interrogating a broken instrument:
-
-```bash
-gc-runtime-nomad check                 # RUN THIS FIRST. See below - it can FAIL, not just warn
-gc-runtime-nomad protocol              # the advertised RPP version and capabilities
-gc-runtime-nomad is-running <session>  # and: list-running [prefix]
-```
-
-`check` is not advisory. It **warns** on an unset log sink, an unset required
-image and an unset resolver list — each a real fault on its own — and it
-**FAILS, exiting nonzero**, when the `gc` on PATH cannot claim work from inside
-an allocation. That FAIL is the single most decisive line this pack produces
-and it supersedes every warning above it. Attach the whole output to any bug
-report.
 
 Cluster side, read-only, correlated by child job and allocation id:
 `nomad job status`, `nomad job allocations`, `nomad alloc status`,
@@ -166,10 +176,20 @@ not evidence.
 Run the narrowest check that can distinguish your two remaining hypotheses, and
 stop when one of them dies.
 
-1. **Hermetic, always first.** `GC_BIN=$(command -v gc) ./conformance.sh` builds
-   the executable and an in-memory fake Nomad API and runs the full RPP
-   lifecycle with no cluster and no network. It is the pack's CI gate. A defect
-   that reproduces here needs no cluster to fix.
+1. **Hermetic, first among CHECKS — but after `check`.**
+   `GC_BIN=$(command -v gc) ./conformance.sh` builds the executable and an
+   in-memory fake Nomad API and runs the full RPP lifecycle with no cluster and
+   no network. It is the pack's CI gate. A defect that reproduces here needs no
+   cluster to fix.
+
+   **A green conformance run is NOT evidence the lane can claim.** conformance.sh
+   exports `GC_NOMAD_SKIP_GC_CAPABILITY_GATE=1` by design — the ladder drives
+   the RPP surface against a fake with no city and nothing to claim, so the
+   gate's question is irrelevant there. The consequence is the trap: run this
+   ladder on a deployment whose `gc` cannot claim a single bead and it goes
+   green. It answers "does the pack implement the protocol", never "can this
+   deployment do work". `gc-runtime-nomad check` is the one that answers the
+   second question, which is why §1 says to run it before anything.
 2. **Know what the fake cannot see.** The fake accepts loose JSON, so real
    drift classes show only against a real server: wire-level durations must be
    integer nanoseconds; a namespace must be a query parameter on every route
@@ -187,12 +207,22 @@ stop when one of them dies.
    never value — `${VAR+x}` is set-or-not without expanding the value, so it
    cannot print a token even by accident:
 
-   ```sh
+   ```bash
+   #!/bin/bash
+   # bash: ${!v} is indirect expansion. In zsh the spelling is ${(P)v+x} —
+   # ${!v+x} is not portable between them and silently reports garbage in the
+   # wrong shell, which is worse than not probing at all.
    for v in GC_NOMAD_AGENT_IMAGE GC_NOMAD_LOG_SINK GC_NOMAD_DNS_SERVERS \
             GC_NOMAD_SKIP_GC_CAPABILITY_GATE NOMAD_SKIP_VERIFY; do
      [ -n "${!v+x}" ] && echo "$v set" || echo "$v unset"
    done
    ```
+
+   **And whose environment?** `check` and this loop read the environment of
+   whoever RUNS them. The pack reads the SUPERVISOR's. Run these as the
+   supervisor, or treat their warnings as facts about your shell — an unset
+   `GC_NOMAD_AGENT_IMAGE` in your terminal says nothing about a deployment
+   whose boxes are demonstrably running.
 
    Almost every key in the table is diagnosable from set-vs-unset alone. Where
    a value genuinely matters (an image tag, a sink URL), read it from the

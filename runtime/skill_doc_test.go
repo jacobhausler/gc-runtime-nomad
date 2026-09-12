@@ -146,3 +146,37 @@ func TestSkillSuppliesASafeEnvironmentProbe(t *testing.T) {
 		t.Errorf("%s demands an environment probe but supplies no presence-only spelling", skillDoc)
 	}
 }
+
+// TestSkillWarnsThatConformanceDisablesTheGate is a TWO-WAY guard, and it
+// exists because the skill's own recommended first check was hiding the fault
+// the skill is most often used to find.
+//
+// conformance.sh exports GC_NOMAD_SKIP_GC_CAPABILITY_GATE=1 by design: the
+// ladder drives the RPP surface against a fake with no city and nothing to
+// claim. The consequence is that running it on a deployment whose gc cannot
+// claim a single bead goes GREEN. An operator following "hermetic, always
+// first" got a clean pass on a dead lane.
+//
+// Both directions matter. If conformance.sh stops setting the flag the
+// warning becomes false; if the skill drops the warning while the script
+// still sets it, the trap is back.
+func TestSkillWarnsThatConformanceDisablesTheGate(t *testing.T) {
+	script, err := os.ReadFile("../conformance.sh")
+	if err != nil {
+		t.Fatalf("reading conformance.sh: %v", err)
+	}
+	const flag = "GC_NOMAD_SKIP_GC_CAPABILITY_GATE"
+	sets := strings.Contains(string(script), "export "+flag+"=1")
+	doc := readSkillDoc(t)
+	warns := strings.Contains(doc, flag) && strings.Contains(doc, "NOT evidence")
+
+	switch {
+	case sets && !warns:
+		t.Errorf("conformance.sh disables the capability gate and %s does not warn that a green\n"+
+			"conformance run is not evidence the lane can claim — the skill's own recommended\n"+
+			"check would hide the fault it exists to find", skillDoc)
+	case !sets && warns:
+		t.Errorf("%s warns that conformance.sh disables the capability gate, but it no longer does;\n"+
+			"the warning is now false", skillDoc)
+	}
+}
