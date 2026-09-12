@@ -203,16 +203,24 @@ func (l *lifecycle) lockSession(ctx context.Context, sessionName string) (func()
 // allocation, so a recursive sweep can never carry the session's staged
 // secrets (alloc/secrets/, tmp/) into a durable sink.
 //
-// The agent-capture trio is written inside the allocation by
-// the deployment bootstrap ops/nomad/agent-launch.sh:
+// The agent-capture trio is written inside the allocation. agent.exit is
+// written by the pane wrapper this pack composes (agentCaptureBody); the two
+// output channels are the `tmux pipe-pane` tap, which is not implemented yet.
 //
-//	alloc/logs/agent.exit   exit= started= ended= pane= argv0= alloc= — the
+// The paths are under alloc/DATA, not alloc/logs. Nomad mounts alloc/logs
+// read-only into the task, so the trio's documented home was unwritable by
+// anything in the box, for any writer, which is why none of the three has ever
+// existed here. The bootstrap this doc used to credit,
+// ops/nomad/agent-launch.sh, was deleted with the launch-script seam and could
+// not have written them either.
+//
+//	alloc/data/agent.exit   exit= started= ended= pane= argv0= alloc= — the
 //	                        agent command NAME and timestamps only, never env
 //	                        values (that is what makes this file safe to ship)
-//	alloc/logs/agent.stdout raw pane output, tapped with `tmux pipe-pane` so
+//	alloc/data/agent.stdout raw pane output, tapped with `tmux pipe-pane` so
 //	                        the agent keeps its tty (gc drives it as an
 //	                        interactive client: peek/nudge/interrupt)
-//	alloc/logs/agent.stderr the agent's stderr, appended
+//	alloc/data/agent.stderr the agent's stderr, appended
 //
 // All three must be copied before deregister. The pane dies with the session,
 // `nomad alloc logs` reads the *task's* streams (the pause shell — empty), and
@@ -226,9 +234,9 @@ var egressFiles = []struct {
 }{
 	{"alloc/logs/transcript.log", "transcript.log"},
 	{"alloc/data/evidence.json", "evidence.json"},
-	{"alloc/logs/agent.exit", "agent.exit"},
-	{"alloc/logs/agent.stdout", "agent.stdout"},
-	{"alloc/logs/agent.stderr", "agent.stderr"},
+	{"alloc/data/agent.exit", "agent.exit"},
+	{"alloc/data/agent.stdout", "agent.stdout"},
+	{"alloc/data/agent.stderr", "agent.stderr"},
 }
 
 // egressAllocFiles copies childJobID's per-allocation declared egress
@@ -386,6 +394,28 @@ func stripLeadingExec(cmd string) (string, bool) {
 //     and turn the box into a shell that looks healthy: the defect shape this
 //     pack exists to stop producing, reintroduced by its own diagnostics.
 //
+// THE PATH IS NOT alloc/logs, AND THAT IS THE WHOLE REASON THE RECORD HAS
+// NEVER EXISTED. Nomad bind-mounts alloc/logs READ-ONLY into the task — it
+// owns the files in there and its own rotation writes them — while the
+// directory still reports 0777, so the permission bits say yes and the mount
+// says no. Measured in a live box with stderr made visible:
+//
+//	/bin/sh: cannot create /alloc/logs/agent.exit.243: Read-only file system
+//	WRITABLE /alloc  /alloc/data  /local  /secrets  /tmp
+//	read-only /alloc/logs
+//
+// Nothing running in the box could ever have written that path: not this pack,
+// and not the deleted bootstrap the egress doc credits. alloc/data is writable
+// and is where this pack ALREADY reads a box-written file from
+// (alloc/data/evidence.json), so it is the path with precedent.
+//
+// The write does NOT discard its stderr. Swallowing it is what made
+// "Read-only file system" indistinguishable from "the pane never ran" — the
+// exact ambiguity this record exists to remove — and it cost a full
+// diagnosis pass. The pane's own output is where an operator already looks, so
+// the error goes there; `|| true` still keeps a failed write from failing the
+// launch.
+//
 // It carries NO environment values — the exit code, two timestamps, the pane
 // id, the command's first word and the alloc id. That is what makes the file
 // safe to ship, and it is the same field list the doc above egressFiles
@@ -414,7 +444,7 @@ func agentCaptureBody(paneCommand string) string {
 	if i := strings.IndexAny(argv0, " \t"); i >= 0 {
 		argv0 = argv0[:i]
 	}
-	return `__gc_logs="${NOMAD_ALLOC_DIR:-/tmp}/logs"; mkdir -p "$__gc_logs" 2>/dev/null || true; ` +
+	return `__gc_cap="${NOMAD_ALLOC_DIR:-/tmp}/data"; mkdir -p "$__gc_cap" 2>/dev/null || true; ` +
 		// THE REASON THE `exec` WAS THERE, and it is not process hygiene: with
 		// exec there is no outer shell for a signal to hit. Wrapping without
 		// this trap made `interrupt` — which sends SIGINT to the pane's
@@ -438,7 +468,7 @@ func agentCaptureBody(paneCommand string) string {
 		`{ printf 'exit=%s started=%s ended=%s pane=%s argv0=%s alloc=%s\n' ` +
 		`"$__gc_rc" "$__gc_started" "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)" ` +
 		`"${TMUX_PANE:-}" ` + shellQuote(argv0) + ` "${NOMAD_ALLOC_ID:-}" ` +
-		`> "$__gc_logs/agent.exit.$$" && mv -f "$__gc_logs/agent.exit.$$" "$__gc_logs/agent.exit"; } 2>/dev/null || true; ` +
+		`> "$__gc_cap/agent.exit.$$" && mv -f "$__gc_cap/agent.exit.$$" "$__gc_cap/agent.exit"; } || true; ` +
 		`exit $__gc_rc`
 }
 

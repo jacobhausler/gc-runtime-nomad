@@ -199,7 +199,7 @@ func TestParentJobSpecAddsLogShipperTask(t *testing.T) {
 	toml := shipper.Templates[0].EmbeddedTmpl
 	for _, want := range []string{
 		`include = ["{{ env "NOMAD_ALLOC_DIR" }}/data/*.jsonl", "$${HOME}/.claude/projects/**/*.jsonl"]`,
-		`include = ["{{ env "NOMAD_ALLOC_DIR" }}/logs/agent.stdout", "{{ env "NOMAD_ALLOC_DIR" }}/logs/agent.stdout.*"]`,
+		`include = ["{{ env "NOMAD_ALLOC_DIR" }}/data/agent.stdout", "{{ env "NOMAD_ALLOC_DIR" }}/data/agent.stdout.*"]`,
 		`uri = "{{ env "GC_LOG_SINK" }}"`,
 		`type = "prometheus_exporter"`,
 		`address = "0.0.0.0:{{ env "NOMAD_PORT_metrics" }}"`,
@@ -266,7 +266,7 @@ func TestVectorConfigRoutesTaskAndAllocValuesThroughNomadTemplate(t *testing.T) 
 	})
 	for _, want := range []string{
 		`{{ env "NOMAD_ALLOC_DIR" }}/data/*.jsonl`,
-		`{{ env "NOMAD_ALLOC_DIR" }}/logs/agent.stdout.*`,
+		`{{ env "NOMAD_ALLOC_DIR" }}/data/agent.stdout.*`,
 		`.session_name = "{{ env "NOMAD_META_GC_SESSION" }}"`,
 		`.alloc_id = "{{ env "NOMAD_ALLOC_ID" }}"`,
 		`.node = "{{ env "GC_LOG_NODE_NAME" }}"`,
@@ -453,13 +453,24 @@ func TestVectorConfigDisablesFileCheckpoints(t *testing.T) {
 	}
 }
 
-// shippedAgentStdoutRel is the path, relative to $NOMAD_ALLOC_DIR, of the file
-// the deployment bootstrap actually writes inside the allocation:
-// ops/nomad/agent-launch.sh taps the agent's pane with `tmux pipe-pane -o
-// "cat >> '$LOGS/agent.stdout'"` (LOGS = ${NOMAD_ALLOC_DIR}/logs) and
-// runtime/ops.go's egressFiles copies alloc/logs/agent.stdout out verbatim.
-// It is UNSUFFIXED — which is the whole of the defect below.
-const shippedAgentStdoutRel = "logs/agent.stdout"
+// shippedAgentStdoutRel is the path, relative to $NOMAD_ALLOC_DIR, of the pane
+// capture inside the allocation, which runtime/ops.go's egressFiles copies out
+// verbatim. It is UNSUFFIXED — which is the whole of the defect below.
+//
+// It moved from logs/ to data/: Nomad mounts alloc/logs READ-ONLY into the
+// task, so nothing running in the box can write there (measured live — see
+// runtime/capture_path_test.go). The bootstrap this comment used to cite,
+// ops/nomad/agent-launch.sh, was deleted with the launch-script seam, and its
+// `tmux pipe-pane` into $NOMAD_ALLOC_DIR/logs could not have worked either.
+const shippedAgentStdoutRel = "data/agent.stdout"
+
+// captureDirRel is the allocation-relative directory the capture channels live
+// in. The credential boundary the two tests below enforce is "a named file
+// inside the allocation, never the secrets dir, never recursive discovery" —
+// it was written as "inside logs/" when logs/ was the only candidate, and the
+// staged credentials are not in the allocation directory at all
+// (NOMAD_SECRETS_DIR is its own tmpfs at /secrets).
+const captureDirRel = "data/"
 
 // includePatternList is the `"..."` entries of one bracketed include list.
 var includePatternList = regexp.MustCompile(`"([^"]*)"`)
@@ -503,9 +514,9 @@ func sourceIncludes(t *testing.T, rendered, source string) []string {
 
 // TestVectorSessionStdoutSourceMatchesShippedCapture is a regression test:
 // [sources.session_stdout] declared only
-// "{{ env "NOMAD_ALLOC_DIR" }}/logs/agent.stdout.*". Vector's glob treats that
+// "{{ env "NOMAD_ALLOC_DIR" }}/data/agent.stdout.*". Vector's glob treats that
 // "." as a literal and "*" as not crossing "/", so the pattern REQUIRES a
-// suffix and never matched the unsuffixed logs/agent.stdout the launcher
+// suffix and never matched the unsuffixed data/agent.stdout the pane wrapper
 // writes and the stop-path egress names. The pane capture was therefore
 // written, egressed, and silently never shipped.
 //
@@ -527,10 +538,14 @@ func TestVectorSessionStdoutSourceMatchesShippedCapture(t *testing.T) {
 	}
 	for _, pattern := range sessionStdoutIncludes(t, rendered) {
 		// The credential boundary: the shipper may read nothing outside the
-		// allocation's logs dir (runtime/ops.go's egress allowlist is the same
-		// boundary, and must not be out-wide-listed here).
-		if !strings.HasPrefix(pattern, allocDir+"/logs/") {
-			t.Errorf("session_stdout pattern %q is outside %s/logs/ — the shipper must stay inside the allocation's logs dir", pattern, allocDir)
+		// allocation's capture dir (runtime/ops.go's egress allowlist is the
+		// same boundary, and must not be out-wide-listed here).
+		if !strings.HasPrefix(pattern, allocDir+"/"+captureDirRel) {
+			t.Errorf("session_stdout pattern %q is outside %s/%s — the shipper must stay inside the allocation's capture dir", pattern, allocDir, captureDirRel)
+			continue
+		}
+		if strings.Contains(pattern, "secrets") || strings.Contains(pattern, "**") {
+			t.Errorf("session_stdout pattern %q either reaches the secrets dir or is recursive discovery; the capture channels are named files inside the allocation", pattern)
 			continue
 		}
 		rel := strings.TrimPrefix(pattern, allocDir+"/")
@@ -553,10 +568,21 @@ func TestVectorSessionStdoutSourceMatchesShippedCapture(t *testing.T) {
 	// Canary: the pattern this bead fixed must NOT match the shipped file. If it
 	// ever does, the assertion above is a tautology and this test has stopped
 	// proving the bug it was written for.
-	if stale, err := path.Match("logs/agent.stdout.*", shippedAgentStdoutRel); err != nil {
+	//
+	// The stale pattern is built from captureDirRel, NOT written out as
+	// "logs/agent.stdout.*". When the capture channels moved from logs/ to
+	// data/, the hard-coded version stopped matching for the wrong reason — a
+	// different DIRECTORY rather than the missing suffix — which made the
+	// canary pass while proving nothing, the precise failure it was put here to
+	// detect. It must differ from the shipped path in the suffix alone.
+	stalePattern := captureDirRel + "agent.stdout.*"
+	if stale, err := path.Match(stalePattern, shippedAgentStdoutRel); err != nil {
 		t.Fatalf("canary glob: %v", err)
 	} else if stale {
-		t.Fatalf("canary broken: the suffix-only pattern logs/agent.stdout.* matches %q — this test no longer proves the regression", shippedAgentStdoutRel)
+		t.Fatalf("canary broken: the suffix-only pattern %s matches %q — this test no longer proves the regression", stalePattern, shippedAgentStdoutRel)
+	}
+	if !strings.HasPrefix(stalePattern, captureDirRel) || !strings.HasPrefix(shippedAgentStdoutRel, captureDirRel) {
+		t.Fatalf("canary broken: %q and %q are not in the same directory, so a non-match proves nothing about the suffix", stalePattern, shippedAgentStdoutRel)
 	}
 }
 
@@ -731,7 +757,7 @@ func quotedValuesInList(t *testing.T, block, key, what string) []string {
 // must not be wider than the copy-out it mirrors.
 func TestVectorSessionCaptureSources(t *testing.T) {
 	rendered, allocDir := renderedShipperConfig(t, "sess-capture-sources")
-	logsDir := allocDir + "/logs/"
+	captureDir := allocDir + "/" + captureDirRel
 
 	// The two names the launcher's own stream and Nomad's rotation can each
 	// produce, per source; agent.exit only ever has the final renamed name.
@@ -744,14 +770,18 @@ func TestVectorSessionCaptureSources(t *testing.T) {
 		patterns := sourceIncludes(t, rendered, source)
 		seen := map[string]bool{}
 		for _, pattern := range patterns {
-			if !strings.HasPrefix(pattern, logsDir) {
-				t.Errorf("sources.%s pattern %q is outside %s — the capture shipper must stay inside the allocation's logs dir", source, pattern, logsDir)
+			if !strings.HasPrefix(pattern, captureDir) {
+				t.Errorf("sources.%s pattern %q is outside %s — the capture shipper must stay inside the allocation's capture dir", source, pattern, captureDir)
+				continue
+			}
+			if strings.Contains(pattern, "secrets") {
+				t.Errorf("sources.%s pattern %q reaches the secrets dir", source, pattern)
 				continue
 			}
 			if strings.Contains(pattern, "**") {
 				t.Errorf("sources.%s pattern %q is recursive discovery; the capture channels are named files", source, pattern)
 			}
-			rel := strings.TrimPrefix(pattern, logsDir)
+			rel := strings.TrimPrefix(pattern, captureDir)
 			for _, candidate := range captureSources[source] {
 				matched, err := path.Match(rel, candidate)
 				if err != nil {
@@ -764,7 +794,7 @@ func TestVectorSessionCaptureSources(t *testing.T) {
 		}
 		for _, candidate := range captureSources[source] {
 			if !seen[candidate] {
-				t.Errorf("sources.%s has no pattern matching logs/%s (patterns: %v)", source, candidate, patterns)
+				t.Errorf("sources.%s has no pattern matching %s%s (patterns: %v)", source, captureDirRel, candidate, patterns)
 			}
 		}
 	}

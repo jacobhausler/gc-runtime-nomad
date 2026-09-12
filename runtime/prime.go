@@ -532,11 +532,11 @@ func (l *lifecycle) diagnosePaneGone(ctx context.Context, allocID string) string
 	if allocID == "" {
 		return ""
 	}
-	if rec, ok := l.readBoxFile(ctx, allocID, "alloc/logs/agent.exit"); ok && looksLikeAgentExitRecord(rec) {
+	if rec, ok := l.readBoxFile(ctx, allocID, "alloc/data/agent.exit"); ok && looksLikeAgentExitRecord(rec) {
 		out := " THE PANE'S COMMAND EXITED — a tmux server exits with its last session, and that " +
 			"session ends when its pane's command does, so the server being gone IS the agent having " +
 			"died. The box's own exit record says: " + execExcerpt([]byte(lastLine(rec)))
-		if errRec, ok := l.readBoxFile(ctx, allocID, "alloc/logs/agent.stderr"); ok {
+		if errRec, ok := l.readBoxFile(ctx, allocID, "alloc/data/agent.stderr"); ok {
 			if tail := strings.TrimSpace(lastLine(errRec)); tail != "" {
 				out += " Its stderr ended: " + execExcerpt([]byte(tail))
 			}
@@ -544,7 +544,7 @@ func (l *lifecycle) diagnosePaneGone(ctx context.Context, allocID string) string
 		return out
 	}
 	return " The pane's command has exited (a tmux server exits with its last session), but this box " +
-		"wrote NO usable agent-capture record at alloc/logs/agent.exit, so why it exited cannot be " +
+		"wrote NO usable agent-capture record at alloc/data/agent.exit, so why it exited cannot be " +
 		"recovered from here. In the prebaked-image shape that record is the IMAGE's responsibility: " +
 		"an image that does not write it makes this exact failure permanently unexplainable. Fix that " +
 		"in the image rather than looking further at tmux."

@@ -609,7 +609,9 @@ func (c logShipperConfig) artifactSource() string {
 //   - session_stderr — logs/agent.stderr, the launcher's `"$AGENT_CMD"
 //     2>>"$LOGS/agent.stderr"`, plus the same .N rotation pattern the stdout
 //     source uses for the task's own stream.
-//   - agent_exit — logs/agent.exit, the "exit= started= ended= ..." record.
+//   - agent_exit — data/agent.exit, the "exit= started= ended= ..." record.
+//     data/, not logs/: Nomad mounts alloc/logs read-only into the task, so
+//     nothing in the box can write there (measured).
 //     ONE exact name, no glob: the launcher writes it as agent.exit.$$ and
 //     renames it into place, so a wildcard would only ever widen the match
 //     onto the transient file. Every shipper path is a named file inside the
@@ -637,19 +639,19 @@ ignore_checkpoints = true
 
 [sources.session_stdout]
 type = "file"
-include = ["{{ env "NOMAD_ALLOC_DIR" }}/logs/agent.stdout", "{{ env "NOMAD_ALLOC_DIR" }}/logs/agent.stdout.*"]
+include = ["{{ env "NOMAD_ALLOC_DIR" }}/data/agent.stdout", "{{ env "NOMAD_ALLOC_DIR" }}/data/agent.stdout.*"]
 read_from = "beginning"
 ignore_checkpoints = true
 
 [sources.session_stderr]
 type = "file"
-include = ["{{ env "NOMAD_ALLOC_DIR" }}/logs/agent.stderr", "{{ env "NOMAD_ALLOC_DIR" }}/logs/agent.stderr.*"]
+include = ["{{ env "NOMAD_ALLOC_DIR" }}/data/agent.stderr", "{{ env "NOMAD_ALLOC_DIR" }}/data/agent.stderr.*"]
 read_from = "beginning"
 ignore_checkpoints = true
 
 [sources.agent_exit]
 type = "file"
-include = ["{{ env "NOMAD_ALLOC_DIR" }}/logs/agent.exit"]
+include = ["{{ env "NOMAD_ALLOC_DIR" }}/data/agent.exit"]
 read_from = "beginning"
 ignore_checkpoints = true
 
