@@ -465,8 +465,43 @@ func (l *lifecycle) opProvision(ctx context.Context, sessionName string) error {
 // silent in exactly the case it exists for. Found by asking what this fix
 // would look like if it had silently failed.
 func (l *lifecycle) warnDeclaredSecrets(sessionName string, cfg stageConfig) {
-	_, _, absent := mergeExtraSecretEnv(cfg.Env, extraSecretKeys)
+	merged, _, absent := mergeExtraSecretEnv(cfg.Env, extraSecretKeys)
 	warnAbsentSecretKeys(os.Stderr, sessionName, absent)
+	warnIncompleteCityTarget(os.Stderr, sessionName, merged)
+}
+
+// warnIncompleteCityTarget names a remote city target that is half-configured.
+//
+// buildRemoteContextFile stages a remote context only when BOTH GC_CITY_NAME
+// and GC_CITY_URL are present, and returns nil otherwise — correctly, because
+// neither half alone describes a city. But nil is also what a deployment that
+// never opted in returns, so the two were indistinguishable and the
+// half-configured case was dropped in silence: the box comes up, the agent
+// runs, and every gc call inside it that needs the city fails with nothing
+// anywhere explaining that the pack decided not to stage a context.
+//
+// That is the "unreachable city" symptom with a configuration cause, and the
+// stager is the layer that knows: it is holding both halves and can see that
+// exactly one arrived. Names the missing KEY, never the value of the present
+// one.
+func warnIncompleteCityTarget(w io.Writer, sessionName string, env map[string]string) {
+	name := strings.TrimSpace(env["GC_CITY_NAME"])
+	url := strings.TrimSpace(env["GC_CITY_URL"])
+	switch {
+	case name != "" && url != "":
+		return // complete
+	case name == "" && url == "":
+		return // never opted in; the common case
+	}
+	missing, present := "GC_CITY_NAME", "GC_CITY_URL"
+	if url == "" {
+		missing, present = "GC_CITY_URL", "GC_CITY_NAME"
+	}
+	fmt.Fprintf(w, "gc-runtime-nomad: warning: session %q sets %s but not %s, so NO remote city "+
+		"context was staged into the box. Both halves are required — neither alone describes a "+
+		"city. The box will come up and look healthy, and every in-box gc call that needs the "+
+		"city will fail as though the city were unreachable.\n",
+		sessionName, present, missing) //nolint:errcheck
 }
 
 func (l *lifecycle) opProvisionWithConfig(ctx context.Context, sessionName string, cfg stageConfig) error {

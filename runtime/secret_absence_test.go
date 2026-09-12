@@ -187,3 +187,47 @@ func TestForbiddenIsDetectedThroughBothClientPaths(t *testing.T) {
 		}
 	}
 }
+
+// TestIncompleteCityTargetIsNamed is gate 4's "unreachable city" with its real
+// cause: a half-configured target, not a network outage.
+//
+// buildRemoteContextFile stages a context only when BOTH GC_CITY_NAME and
+// GC_CITY_URL are present and returns nil otherwise — which is also what a
+// deployment that never opted in returns. The two were indistinguishable, so
+// the half-configured case was dropped in silence and presented downstream as
+// an unreachable city.
+func TestIncompleteCityTargetIsNamed(t *testing.T) {
+	const secretish = "https://city.example/very-specific-url"
+
+	// Exactly one half: warn, name the MISSING key, never the present value.
+	var missingName bytes.Buffer
+	warnIncompleteCityTarget(&missingName, "sess-a", map[string]string{"GC_CITY_URL": secretish})
+	got := missingName.String()
+	if !strings.Contains(got, "GC_CITY_NAME") || !strings.Contains(got, "NO remote city") {
+		t.Errorf("a URL without a name was not reported:\n%s", got)
+	}
+	if strings.Contains(got, secretish) {
+		t.Errorf("the warning echoed the configured value:\n%s", got)
+	}
+
+	var missingURL bytes.Buffer
+	warnIncompleteCityTarget(&missingURL, "sess-b", map[string]string{"GC_CITY_NAME": "westlands"})
+	if g := missingURL.String(); !strings.Contains(g, "GC_CITY_URL") {
+		t.Errorf("a name without a URL was not reported:\n%s", g)
+	}
+
+	// Both present, and neither present, are both silent — the second is the
+	// common case and must never warn.
+	for _, quiet := range []map[string]string{
+		{"GC_CITY_NAME": "westlands", "GC_CITY_URL": secretish},
+		{},
+		{"GC_CITY_NAME": "  ", "GC_CITY_URL": "  "},
+		nil,
+	} {
+		var out bytes.Buffer
+		warnIncompleteCityTarget(&out, "sess-c", quiet)
+		if out.Len() != 0 {
+			t.Errorf("warned on a coherent or absent target %v: %q", quiet, out.String())
+		}
+	}
+}
