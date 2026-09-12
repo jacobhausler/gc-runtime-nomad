@@ -1626,6 +1626,32 @@ func (l *lifecycle) verifyPaneRunsAgent(ctx context.Context, sessionName string)
 		sessionName, last, paneLaunchSettle, bareShellRefusalHint())
 }
 
+// warnIfBoxGCCannotClaim probes the `gc` INSIDE the box, once, at launch.
+//
+// The startup gate checks the gc on the supervisor's PATH. That is the gc
+// driving the pack, and it is not the gc that claims: a seat claims with the
+// binary baked into the agent image. A deployment can therefore pass the gate
+// and still produce healthy boxes whose seats never claim — the exact dark
+// lane the gate exists to prevent, moved one layer in. Found by an operator
+// following this pack's own skill against a staged fault.
+//
+// A warning rather than a refusal: the box already exists by the time this can
+// run, and tearing down a healthy allocation over a probe is a worse failure
+// than reporting it. Unknown says nothing at all.
+func (l *lifecycle) warnIfBoxGCCannotClaim(ctx context.Context, sessionName string) {
+	allocID, err := l.currentAlloc(ctx, sessionName)
+	if err != nil {
+		return
+	}
+	_, out, err := l.client.execAlloc(ctx, allocID, execTaskName, inBoxProbeCommand())
+	if err != nil {
+		return
+	}
+	if w := inBoxWorkerSurfaceWarning(string(out)); w != "" {
+		fmt.Fprintf(os.Stderr, "gc-runtime-nomad: %s (session %q)\n", w, sessionName) //nolint:errcheck
+	}
+}
+
 // boxRunsAnAgent reports whether the box holds any process that is not part of
 // the empty-box furniture.
 //
@@ -1799,6 +1825,7 @@ func (l *lifecycle) confirmLaunched(ctx context.Context, sessionName string, wor
 	// launch nothing has shelled out yet, which is the one moment the reading is
 	// unambiguous.
 	l.warnIfPaneRunsNoAgent(ctx, sessionName)
+	l.warnIfBoxGCCannotClaim(ctx, sessionName)
 	// Best-effort: a failure recording the pid does not fail the launch
 	// itself, since the tmux session already exists and answers exec — it
 	// just leaves the probe without a pid to kill -0 (falls back to a

@@ -142,3 +142,40 @@ func gcWorkerSurfaceForCheck(stderr io.Writer) gcWorkerSurface {
 	}
 	return probeGCWorkerSurface(context.Background())
 }
+
+// inBoxProbeCommand is the same capability probe, spelled for a box.
+//
+// THE HOST GATE IS NOT ENOUGH, and this was found by giving the shipped skill
+// and a staged fault to an operator with no context: they diagnosed it in one
+// command and then pointed out the hole. The gate probes only the `gc` on the
+// SUPERVISOR's PATH. A deployment with a compliant host `gc` and a
+// base-lineage `gc` baked into the agent image gets green boxes and dark
+// seats, and the gate is blind to it — which is the same dark lane it exists
+// to prevent, one layer in.
+//
+// The in-box `gc` is the one that actually claims, so it is the one that
+// matters most. It can only be probed once a box exists, so this is a launch
+// observation rather than a precondition.
+func inBoxProbeCommand() []string {
+	return []string{"/bin/sh", "-c",
+		"gc bd claim gc-runtime-nomad-capability-probe " +
+			"--city-url https://127.0.0.1:1 --city-name gc-runtime-nomad-probe 2>&1"}
+}
+
+// inBoxWorkerSurfaceWarning reports the warning owed for a box whose `gc`
+// cannot claim, or "" when it can or when the answer is unrecognisable.
+//
+// Unknown never warns, for the same reason the host gate never blocks on it:
+// a `gc` this probe does not recognise is not evidence of a missing family,
+// and a launch-time false alarm about the deepest dependency in the stack is
+// worse than silence.
+func inBoxWorkerSurfaceWarning(output string) string {
+	if classifyWorkerSurface(output) != gcWorkerSurfaceMissing {
+		return ""
+	}
+	return "warning: the `gc` INSIDE this box does not carry the remote-worker-lifecycle " +
+		"family. The box is healthy and the agent will start, but the seat cannot claim " +
+		"work through /v0/city/{city}/worker/* and will drain no_work while the city lists " +
+		"its work as ready. The host gate passed, so this is the AGENT IMAGE, not the " +
+		"supervisor: rebuild it against the same gc lineage (COMPATIBILITY.md, \"The agent image\")."
+}

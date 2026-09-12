@@ -197,3 +197,32 @@ func TestOptOutLetsBoxMintingOpsPastAMissingSurface(t *testing.T) {
 		t.Errorf("the capability gate refused despite the opt-out:\n%s", captured)
 	}
 }
+
+// TestInBoxWorkerSurfaceWarning pins the probe the HOST gate cannot make.
+//
+// The startup gate checks the gc on the supervisor's PATH — the one driving
+// the pack. The gc that CLAIMS is the one baked into the agent image, and a
+// deployment can pass the gate with a compliant host gc while every box
+// carries a base-lineage one. That combination yields healthy boxes and dark
+// seats, which is the gate's own failure mode moved one layer in.
+func TestInBoxWorkerSurfaceWarning(t *testing.T) {
+	if got := inBoxWorkerSurfaceWarning(baseRefusal); got == "" {
+		t.Error("a box whose gc lacks the family produced no warning")
+	} else {
+		for _, want := range []string{"INSIDE this box", "remote-worker-lifecycle", "no_work", "AGENT IMAGE"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("the in-box warning does not mention %q:\n%s", want, got)
+			}
+		}
+	}
+	if got := inBoxWorkerSurfaceWarning(edgeRefusal); got != "" {
+		t.Errorf("a compliant in-box gc warned anyway: %q", got)
+	}
+	// Unknown must stay silent: a launch-time false alarm about the deepest
+	// dependency in the stack is worse than silence.
+	for _, quiet := range []string{"", "sh: gc: not found", "some future rewording"} {
+		if got := inBoxWorkerSurfaceWarning(quiet); got != "" {
+			t.Errorf("an unrecognised probe answer %q warned: %q", quiet, got)
+		}
+	}
+}
