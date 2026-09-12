@@ -57,14 +57,31 @@ the documented path was actually followed and the symptom persists.
    this is an answer, not an obstacle. The refusal covers ONE dependency;
    `docs/PIN-DEPENDENCIES.md` tiers the rest, and the others still go dark.
 
+   **There are TWO `gc` binaries and only the second one claims.** The startup
+   gate probes the `gc` on the supervisor's PATH — the one driving the pack.
+   The one that actually claims work is baked into the agent image. A
+   deployment can pass the gate with a compliant host `gc` and still hand every
+   box a base-lineage one, which produces green boxes and dark seats with the
+   gate certifying them. The runtime probes the in-box `gc` once at launch and
+   warns when it cannot claim, naming the AGENT IMAGE rather than the
+   supervisor. If `check` passes and seats still drain `no_work`, that warning
+   — and `gc version --json` run INSIDE the image — is where to look.
+
 Exit-code contract: lifecycle ops return 0 success, 1 error, 2 unknown operation
 (the RPP forward-compatibility signal callers treat as no-op success). `exec` is
 the exception - it returns the remote command's own exit code.
 
 ## 1. Classify the symptom before collecting anything
 
+Run `gc-runtime-nomad check` before reading this table, and read its output
+bottom-up: a **FAIL supersedes every warning above it.** `check` warns about
+several unset keys that are each a real fault on their own, so a reader working
+top-down can fix the warning, feel progress, and still have the lane that does
+nothing. The FAIL is the answer; the warnings are a to-do list.
+
 | Symptom | Read first | Usual cause |
 |---|---|---|
+| **Seats drain `no_work` while the city lists work as ready** — box healthy, agent up, pane fine | `gc-runtime-nomad check` **first**, then `gc version --json` on the host AND inside the image | The driving `gc` lacks `remote-worker-lifecycle`, so the seat cannot claim at all. `check` names this and exits nonzero. If `check` passes, suspect the **in-box** `gc`: the gate probes the host's, the image's is the one that claims, and a launch-time warning names that case |
 | Every lifecycle op fails at once | `gc-runtime-nomad check` | `GC_NOMAD_AGENT_IMAGE` unset; the required image fails every op closed |
 | `parent job "gc-sessions" is stale - re-register with a management token` | parent `gc_jobspec_hash` vs current jobspec | Any task-spec, resolver, or placement change is a jobspec change; the runtime token cannot fix it |
 | Child job exists, never places, no error | placement keys and scheduler events | A placement selection with no eligible client stays pending forever; look at placement facts, not dispatch or liveness |
@@ -74,7 +91,7 @@ the exception - it returns the remote command's own exit code.
 | Allocation is terminal and not replaced | allocation events | Box/task-supervisor death is a different case from agent death; a terminal alloc must not be replaced |
 | Session names do not appear | `list-running [prefix]` exit code | It exits 1 on any lookup error rather than printing a partial list; a nonzero exit is a transport fault, not an empty fleet |
 | Nothing inside the box resolves a name | `GC_NOMAD_DNS_SERVERS` | Unset means no resolver stanza, so the allocation inherits the client host's resolver file - often a loopback stub unreachable from the allocation namespace. Every downstream failure then looks like an agent or network defect |
-| Work lands in a box that looks healthy and does nothing | `gc status`, session events, gc pin vs the fix that changed the claim gate | The identities the allocation sends must be a superset of the identities the claim gate matches; a shipped-but-unpinned fix is not in effect (`git merge-base --is-ancestor <fix-sha> <pin>`) |
+| Work lands in a box that looks healthy and does nothing, **and `check` passed** | `gc status`, session events, gc pin vs the fix that changed the claim gate | Second-line hypothesis only — rule out the first row above before spending time here. The identities the allocation sends must be a superset of the identities the claim gate matches, and a shipped-but-unpinned fix is not in effect. To test it you need a gascity checkout and both shas: `git -C <gascity-checkout> merge-base --is-ancestor <fix-sha> <pin-sha>` (exit 0 = the fix IS in the pin) |
 | The agent inside fails closed on its target | staged `env.sh`, the provider env | The city target must be named exactly once: a complete remote context and a URL together is the fail-closed case, and the local-target family is stripped before launch by design |
 | Session logs missing | `check` warning, `GC_NOMAD_LOG_SINK` | Unset, the shipper task is never added at all; disabling shipping is meant to be visible, not silent |
 | `evidence_lost` on a stop, or no egress at all | sidecar tombstone, `GC_NOMAD_EGRESS_DIR` | Stop order is agent stop, shipper flush, egress, deregister; up to three egress retries then an explicit loss marker |
@@ -101,14 +118,22 @@ questions across sessions. Fall back to raw event greps only where neither can
 answer. Trace state persists under the city's runtime directory and stays
 manageable even when the controller is offline.
 
-Pack side - the pack's own diagnostics answer its contract without touching a
-cluster:
+Pack side FIRST - the pack's own diagnostics answer its contract without
+touching a cluster, and when the fault IS the pack or the `gc` driving it, the
+city-side verbs above are ten commands spent interrogating a broken instrument:
 
 ```bash
-gc-runtime-nomad check                 # warns on unset sink and unset required image
+gc-runtime-nomad check                 # RUN THIS FIRST. See below - it can FAIL, not just warn
 gc-runtime-nomad protocol              # the advertised RPP version and capabilities
 gc-runtime-nomad is-running <session>  # and: list-running [prefix]
 ```
+
+`check` is not advisory. It **warns** on an unset log sink, an unset required
+image and an unset resolver list — each a real fault on its own — and it
+**FAILS, exiting nonzero**, when the `gc` on PATH cannot claim work from inside
+an allocation. That FAIL is the single most decisive line this pack produces
+and it supersedes every warning above it. Attach the whole output to any bug
+report.
 
 Cluster side, read-only, correlated by child job and allocation id:
 `nomad job status`, `nomad job allocations`, `nomad alloc status`,
@@ -156,7 +181,22 @@ stop when one of them dies.
 3. **Environment probe before code.** Every row of the key table has a failure
    mode that looks like a defect downstream (image, resolvers, egress, target
    naming, adopt age). Read the environment the supervisor actually started
-   with before reading source. Two entries in that environment are worth
+   with before reading source.
+
+   **The safe spelling, because §9 forbids every obvious one.** Test PRESENCE,
+   never value — `${VAR+x}` is set-or-not without expanding the value, so it
+   cannot print a token even by accident:
+
+   ```sh
+   for v in GC_NOMAD_AGENT_IMAGE GC_NOMAD_LOG_SINK GC_NOMAD_DNS_SERVERS \
+            GC_NOMAD_SKIP_GC_CAPABILITY_GATE NOMAD_SKIP_VERIFY; do
+     [ -n "${!v+x}" ] && echo "$v set" || echo "$v unset"
+   done
+   ```
+
+   Almost every key in the table is diagnosable from set-vs-unset alone. Where
+   a value genuinely matters (an image tag, a sink URL), read it from the
+   deployment record rather than from a live process environment. Two entries in that environment are worth
    naming here because neither is a documented key:
    - `NOMAD_SKIP_VERIFY` is read by the Nomad SDK, not by this pack, and it
      disables certificate verification for the API **and** for the alloc-exec

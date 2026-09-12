@@ -102,3 +102,47 @@ func TestSkillHasFrontmatter(t *testing.T) {
 		}
 	}
 }
+
+// TestSkillLeadsWithTheDarkLaneSymptom pins the ordering fix.
+//
+// An operator handed this skill and a staged fault reached the right answer in
+// one command — but via a law in the preamble, not via the symptom table. The
+// table's row for "a box that looks healthy and does nothing" sent them to
+// identity-superset theory instead, and had no row at all for the symptom the
+// pack's own docs name twice. A table that routes the commonest symptom to the
+// wrong hypothesis is worse than a table with a gap, because it is confident.
+func TestSkillLeadsWithTheDarkLaneSymptom(t *testing.T) {
+	doc := readSkillDoc(t)
+	drain := strings.Index(doc, "Seats drain `no_work`")
+	if drain < 0 {
+		t.Fatal("the symptom table has no row for seats draining no_work")
+	}
+	// It must come before the second-line hypothesis it replaces.
+	if second := strings.Index(doc, "Second-line hypothesis only"); second < 0 {
+		t.Error("the identity-superset row is not marked as a second-line hypothesis")
+	} else if drain > second {
+		t.Error("the second-line hypothesis is listed before the first-line symptom")
+	}
+}
+
+// TestSkillSaysCheckCanFail: the skill described `check` as warning-only, so a
+// reader who skimmed that line had been told its most decisive output does not
+// exist. `check` exits nonzero on a capability gate.
+func TestSkillSaysCheckCanFail(t *testing.T) {
+	doc := readSkillDoc(t)
+	for _, want := range []string{"not advisory", "FAIL"} {
+		if !strings.Contains(doc, want) {
+			t.Errorf("%s does not say `check` can %q — that is its most decisive output", skillDoc, want)
+		}
+	}
+}
+
+// TestSkillSuppliesASafeEnvironmentProbe: the skill demanded an environment
+// probe in one section and forbade echo/env/set/printenv in another, without
+// ever giving the safe spelling. An operator had to invent it.
+func TestSkillSuppliesASafeEnvironmentProbe(t *testing.T) {
+	doc := readSkillDoc(t)
+	if !strings.Contains(doc, "+x}") {
+		t.Errorf("%s demands an environment probe but supplies no presence-only spelling", skillDoc)
+	}
+}
