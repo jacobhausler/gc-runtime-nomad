@@ -55,6 +55,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -172,6 +173,9 @@ func run(args []string, stdin io.Reader, stdout, stderr *os.File) int {
 		}
 		if skipVerifyRequested() {
 			fmt.Fprintln(stderr, tlsVerificationDisabledWarning)
+		}
+		if code := checkAllocListCapability(stderr); code != exitOK {
+			return code
 		}
 		// Where this pack's own diagnostics live. An operator who needs
 		// diagnostics.log needs the directory first, and that directory is a
@@ -569,4 +573,91 @@ func boolText(b bool) string {
 		return "true"
 	}
 	return "false"
+}
+
+// checkAllocListCapability asks Nomad whether this deployment's token can still
+// LIST ALLOCATIONS, and fails the check when it cannot.
+//
+// This probe exists because of a live incident that `check` was blind to. A
+// token kept its submit-job capability and lost its allocation read. Every
+// lifecycle op that MINTS a box kept working, so nothing looked broken — while
+// is-running, whose only evidence is the allocation list, started answering
+// last-known-good on every call. The pack warned correctly and durably, and the
+// warning said the quiet part outright: an authorisation failure "will answer
+// the same way on every call until a credential changes, so every session will
+// keep reporting healthy until then."
+//
+// It did. 2016 of those warnings in twenty-seven minutes, an entire pool
+// reporting healthy, its demand probe seeing no starvation, and eighty-three
+// beads sitting ready for a lane that could not claim any of them. That is the
+// dark lane this pack exists to make impossible, reached through a capability
+// nobody thought to check.
+//
+// So it is a FAIL, not a warning. A deployment that cannot observe its own
+// boxes cannot be trusted to report on them, and the one thing worse than a
+// broken lane is a broken lane that reports healthy.
+//
+// Unreachable is deliberately NOT a failure: `check` must stay useful for
+// someone configuring the pack before their cluster is up, and "I could not
+// reach Nomad" is a different, self-announcing problem. Only a definitive
+// refusal fails.
+func checkAllocListCapability(stderr io.Writer) int {
+	if strings.TrimSpace(os.Getenv(envAddr)) == "" {
+		fmt.Fprintf(stderr, "warning: cannot check whether this deployment may list allocations (%s unset); "+
+			"a token that can dispatch but not list allocations makes every session report healthy forever\n",
+			envAddr)
+		return exitOK
+	}
+	l, err := newLifecycle()
+	if err != nil {
+		fmt.Fprintf(stderr, "warning: could not build a client to check the allocation-read capability: %v\n", err)
+		return exitOK
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), allocListProbeTimeout)
+	defer cancel()
+	// A job id that does not exist. A 404/empty answer proves the capability as
+	// well as a real job would, and the probe reads nothing it is not entitled
+	// to — the question is only whether the read is PERMITTED.
+	_, _, err = l.client.listAllocsForJob(ctx, allocListProbeJob, 0, 0)
+	switch {
+	case err == nil || errJobGoneOrEmpty(err):
+		return exitOK
+	case isForbiddenErr(err):
+		fmt.Fprint(stderr, allocReadForbiddenMessage(l.client.namespace))
+		return exitError
+	default:
+		fmt.Fprintf(stderr, "warning: could not confirm the allocation-read capability (%v); "+
+			"this check fails only on a definitive refusal, not on an unreachable cluster\n", err)
+		return exitOK
+	}
+}
+
+// allocReadForbiddenMessage is split out so a test can assert what it says
+// without a Nomad server. What it says is the point: "403" alone sends an
+// operator to the wrong layer.
+func allocReadForbiddenMessage(namespace string) string {
+	return fmt.Sprintf("FAIL: this deployment's Nomad credential may not list allocations (403). "+
+		"Minting a box would still work, so nothing would look broken — but is-running has no "+
+		"evidence except the allocation list, so it would answer last-known-good on every call and "+
+		"EVERY SESSION WOULD REPORT HEALTHY until the credential changes. A pool whose seats all "+
+		"report healthy sees no starvation and mints no replacement, so routed work sits unclaimed "+
+		"against a lane that looks alive. Grant this token read access to the job and allocation "+
+		"endpoints in namespace %q (Nomad policy: namespace \"%s\" { policy = \"read\" }, or "+
+		"capabilities including \"read-job\"), or supply a token that has it.\n",
+		namespace, namespace)
+}
+
+const (
+	allocListProbeTimeout = 10 * time.Second
+	// A name no real session produces, so the probe can never collide with one.
+	allocListProbeJob = "gc-runtime-nomad-capability-probe-no-such-job"
+)
+
+// errJobGoneOrEmpty treats "that job does not exist" as proof the read was
+// ALLOWED. The probe deliberately names a job that is not there.
+func errJobGoneOrEmpty(err error) bool {
+	if err == nil {
+		return true
+	}
+	return errors.Is(err, errJobGone) || strings.Contains(err.Error(), "404")
 }
