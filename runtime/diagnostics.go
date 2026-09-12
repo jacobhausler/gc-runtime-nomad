@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -67,4 +68,43 @@ func (d diagnosticsSink) write(op, line string) {
 		op = "-"
 	}
 	_, _ = fmt.Fprintf(f, "%s %s %s\n", stamp, op, strings.TrimRight(line, "\n"))
+}
+
+// durableWarnWriter tees a warning to stderr AND to diagnostics.log.
+//
+// WHY THIS EXISTS. An outside review of this pack observed that the durable
+// log recorded failures — fail() writes every one — but NOT the warnings, and
+// that the warnings are the half describing a lane that is alive and dark:
+// absent secret keys, a half-configured city target, an in-box gc that cannot
+// claim, and a liveness answer that is UNKNOWN rather than observed. Each of
+// those went to os.Stderr alone, which is the exact stderr this pack documents
+// gc as discarding. So the pack applied its own thesis everywhere except where
+// it mattered most: at 3am the session fails, and at 9am the file is silent on
+// every one of the four states that would have explained it.
+//
+// A failure that is loud and a dark lane that is quiet is the wrong way round.
+// The dark lane is the one nobody can reconstruct after the fact.
+//
+// It is a writer rather than a logf call so the warning functions keep taking
+// an io.Writer and stay unit-testable against a bytes.Buffer.
+type durableWarnWriter struct {
+	stderr io.Writer
+	sink   diagnosticsSink
+	op     string
+}
+
+func (d durableWarnWriter) Write(p []byte) (int, error) {
+	n, err := d.stderr.Write(p)
+	// The sink is line-oriented and timestamps each entry, so hand it trimmed
+	// text: the writer's own trailing newline would otherwise land as a blank
+	// line between every pair of records.
+	if line := strings.TrimRight(string(p), "\n"); line != "" {
+		d.sink.write(d.op, line)
+	}
+	return n, err
+}
+
+// durableWarn is the writer every warning in this package should use.
+func (l *lifecycle) durableWarn() io.Writer {
+	return durableWarnWriter{stderr: os.Stderr, sink: l.diagnostics, op: currentOp}
 }

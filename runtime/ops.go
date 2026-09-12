@@ -470,8 +470,12 @@ func (l *lifecycle) opProvision(ctx context.Context, sessionName string) error {
 // would look like if it had silently failed.
 func (l *lifecycle) warnDeclaredSecrets(sessionName string, cfg stageConfig) {
 	merged, _, absent := mergeExtraSecretEnv(cfg.Env, extraSecretKeys)
-	warnAbsentSecretKeys(os.Stderr, sessionName, absent)
-	warnIncompleteCityTarget(os.Stderr, sessionName, merged)
+	// l.durableWarn(), not os.Stderr: both of these describe a box that comes
+	// up healthy and cannot work, which is the state least reconstructable
+	// after the fact and the one gc's exec transport discards.
+	w := l.durableWarn()
+	warnAbsentSecretKeys(w, sessionName, absent)
+	warnIncompleteCityTarget(w, sessionName, merged)
 }
 
 // warnIncompleteCityTarget names a remote city target that is half-configured.
@@ -1708,10 +1712,17 @@ func (l *lifecycle) warnIfBoxGCCannotClaim(ctx context.Context, sessionName stri
 	}
 	_, out, err := l.client.execAlloc(ctx, allocID, execTaskName, inBoxProbeCommand())
 	if err != nil {
+		// A probe that could not RUN is not a probe that passed. Returning
+		// silently here made "the in-box gc cannot claim" and "I never asked"
+		// the same observation, which is the dark lane one layer in.
+		l.logDecision("in-box gc capability probe did not run for session %q: %v "+
+			"(so whether the gc INSIDE the box can claim is unverified; a compliant host "+
+			"gc with a base-lineage gc in the image gives green boxes and dark seats)",
+			sessionName, err)
 		return
 	}
 	if w := inBoxWorkerSurfaceWarning(string(out)); w != "" {
-		fmt.Fprintf(os.Stderr, "gc-runtime-nomad: %s (session %q)\n", w, sessionName) //nolint:errcheck
+		l.logDecision("%s (session %q)", w, sessionName)
 	}
 }
 
@@ -2656,7 +2667,7 @@ func (l *lifecycle) opIsRunning(ctx context.Context, sessionName string) (bool, 
 	}
 	allocs, _, err := l.client.listAllocsForJob(ctx, b.ChildJobID, 0, 0)
 	if err != nil {
-		warnUnknownLiveness(os.Stderr, sessionName, "listing allocations", err)
+		warnUnknownLiveness(l.durableWarn(), sessionName, "listing allocations", err)
 		return true, nil
 	}
 	allocID := ""
@@ -2673,7 +2684,7 @@ func (l *lifecycle) opIsRunning(ctx context.Context, sessionName string) (bool, 
 	if err != nil {
 		// Transport fault probing in-box liveness: unknown, not confirmed
 		// death — same honesty split as the alloc lookup above.
-		warnUnknownLiveness(os.Stderr, sessionName, "probing in-box liveness", err)
+		warnUnknownLiveness(l.durableWarn(), sessionName, "probing in-box liveness", err)
 		return true, nil
 	}
 	// Best-effort: pick up the detached prime window's marker files if this
