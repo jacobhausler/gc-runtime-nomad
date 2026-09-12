@@ -24,8 +24,13 @@ func TestDeadSeatCausesAreNamed(t *testing.T) {
 		{
 			name:  "OOM",
 			event: "Terminated: OOM Killed",
-			want:  []string{"never started", "OOM Killed"},
-			why:   "an out-of-memory kill is the most common silent box death and must be readable without leaving the city",
+			// OOM is its own named cause now, not a start failure. The
+			// assertion is on the INTENT this row always had — the cause is
+			// named and the driver's own text survives — rather than on the
+			// generic wording it used to borrow. "never started" was a proxy
+			// for "readable", and an OOM that says OOM is strictly more so.
+			want: []string{"OOM-killed", "sizing fault", "OOM Killed"},
+			why:  "an out-of-memory kill is the most common silent box death and must be readable without leaving the city",
 		},
 		{
 			name:  "image pull denied",

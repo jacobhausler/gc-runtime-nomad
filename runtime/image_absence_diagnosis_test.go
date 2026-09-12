@@ -45,7 +45,11 @@ func TestAllocFailureDiagnosisNamesTheCause(t *testing.T) {
 				ID: "a2", ClientStatus: "failed",
 				TaskStates: map[string]allocTaskState{"agent": {State: "dead", LastEvent: "OOM Killed"}},
 			}},
-			want: []string{"never started", "OOM Killed"},
+			// Same re-point as dead_seat_reason_test.go: this row exists to
+			// prove a non-image driver cause arrives with its own text, and it
+			// still does — under a name of its own instead of the generic
+			// start-failure wording.
+			want: []string{"OOM-killed", "OOM Killed"},
 			why:  "the fix is not an image special case — every driver cause must arrive with its own text",
 		},
 		{
