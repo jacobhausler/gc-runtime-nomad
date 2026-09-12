@@ -1572,6 +1572,14 @@ func (l *lifecycle) verifyPaneRunsAgent(ctx context.Context, sessionName string)
 	deadline := time.Now().Add(paneLaunchSettle)
 	last := ""
 	for {
+		// An agent PROCESS is the reliable signal; the pane's foreground command
+		// is not. A pane body that wraps the command in a shell keeps the SHELL
+		// in front while the agent runs beneath it, which made this warn on every
+		// healthy launch in the harness — and a warning that cries wolf every
+		// time teaches an operator to ignore the one that matters.
+		if l.boxRunsAnAgent(ctx, allocID) {
+			return nil
+		}
 		cmd, err := l.paneCurrentCommand(ctx, allocID)
 		if err == nil {
 			last = cmd
@@ -1594,6 +1602,42 @@ func (l *lifecycle) verifyPaneRunsAgent(ctx context.Context, sessionName string)
 	}
 	return fmt.Errorf("launching session %q: the pane is running %q and no agent after %s — %s",
 		sessionName, last, paneLaunchSettle, bareShellRefusalHint())
+}
+
+// boxRunsAnAgent reports whether the box holds any process that is not part of
+// the empty-box furniture.
+//
+// This is the check I actually used by hand to diagnose cr-8eagyh: a box with
+// nothing in it showed exactly `sleep` (the task's own idle process), a tmux
+// server and a shell, and NOTHING else. A box with a live agent showed codex
+// beside them. That distinction survives a wrapped pane, which the pane's
+// foreground command does not.
+//
+// Unreadable is NOT an answer: a failed probe returns true (do not warn), so an
+// unreachable box never produces a false alarm.
+func (l *lifecycle) boxRunsAnAgent(ctx context.Context, allocID string) bool {
+	exitCode, out, err := l.client.execAlloc(ctx, allocID, execTaskName,
+		[]string{"/bin/sh", "-c", "ps -eo comm 2>/dev/null || ps -o comm 2>/dev/null"})
+	if err != nil || exitCode != 0 {
+		return true
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		name := strings.TrimSpace(line)
+		if name == "" || name == "COMMAND" {
+			continue
+		}
+		name = filepath.Base(name)
+		switch {
+		case name == "sleep", name == "ps", name == "COMMAND":
+			continue
+		case strings.HasPrefix(name, "tmux"):
+			continue
+		case bareShellCommands[name]:
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 // paneCurrentCommand reads the foreground command tmux reports for the pane.
