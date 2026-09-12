@@ -1762,6 +1762,32 @@ func (l *lifecycle) warnIfBoxGCCannotClaim(ctx context.Context, sessionName stri
 	if w := inBoxWorkerSurfaceWarning(string(out)); w != "" {
 		l.logDecision("%s (session %q)", w, sessionName)
 	}
+
+	// Capability is not identity. A stale-but-capable gc passes the check
+	// above and still answers an older contract, which is the failure that
+	// actually happens here — see the stale-image comment in gc_capability.go.
+	l.warnIfBoxGCIsStale(ctx, sessionName, allocID)
+}
+
+// warnIfBoxGCIsStale compares the gc inside the box against the gc driving
+// this pack, by COMMIT.
+//
+// Every non-answer is silent on purpose. "Could not tell" must never render as
+// "they differ": a false staleness report on the deepest dependency in the
+// stack would send an operator to rebuild an image that was already correct,
+// and this warning is only worth having if it is never cried wolf.
+func (l *lifecycle) warnIfBoxGCIsStale(ctx context.Context, sessionName, allocID string) {
+	host := hostGCCommit(ctx)
+	if host == gcCommitUnknownText {
+		return
+	}
+	_, out, err := l.client.execAlloc(ctx, allocID, execTaskName, inBoxVersionCommand())
+	if err != nil {
+		return
+	}
+	if w := staleBoxGCWarning(host, gcCommitFromVersionJSON(string(out))); w != "" {
+		l.logDecision("%s (session %q)", w, sessionName)
+	}
 }
 
 // boxRunsAnAgent reports whether the box holds any process that is not part of

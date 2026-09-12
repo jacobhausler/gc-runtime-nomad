@@ -223,3 +223,113 @@ func inBoxWorkerSurfaceWarning(output string) string {
 		"its work as ready. The host gate passed, so this is the AGENT IMAGE, not the " +
 		"supervisor: rebuild it against the same gc lineage (COMPATIBILITY.md, \"The agent image\")."
 }
+
+// THE STALE-IMAGE PROBLEM, which the capability gate above cannot see.
+//
+// The capability probe answers "can the gc in this box claim at all". It says
+// nothing about WHICH gc, and a stale-but-capable gc is the failure that
+// actually happens: this estate rolls its gc pin about nine times a day, and
+// the agent image is rebuilt by hand, so the gc inside a box is routinely
+// several rolls behind the gc driving the pack. Measured 2026-09-12: the live
+// pin was e78e884c1b while the image carried 3a3dda06a, three rolls back.
+//
+// It has already cost a day. A box ran a gc one day behind the host and
+// answered "--drain-ack requires --claim" while the host pin documented both
+// modes — capability present, behaviour different, nothing reporting it. Every
+// gc fix was invisible inside every allocation while the host reported the new
+// pin.
+//
+// Version is useless for this: every build of this lineage reports the literal
+// string "dev". The commit is the only identity, which is why this compares
+// commits and not versions.
+const (
+	gcVersionProbe      = "gc version --json --long"
+	gcCommitUnknownText = ""
+)
+
+// inBoxVersionCommand reads the in-box gc's identity.
+func inBoxVersionCommand() []string {
+	return []string{"/bin/sh", "-c", gcVersionProbe + " 2>&1"}
+}
+
+// gcCommitFromVersionJSON pulls the commit out of `gc version --json --long`.
+//
+// Deliberately a substring scan rather than a JSON decode: this parses the
+// output of a DIFFERENT gc build than the one this pack was compiled against,
+// possibly an older or newer schema, and a strict decode would turn a schema
+// change into a parse failure that looks like an absent gc. An empty answer
+// means "could not tell", never "they differ".
+func gcCommitFromVersionJSON(out string) string {
+	const key = `"commit":"`
+	i := strings.Index(out, key)
+	if i < 0 {
+		return gcCommitUnknownText
+	}
+	rest := out[i+len(key):]
+	j := strings.IndexByte(rest, '"')
+	if j <= 0 {
+		return gcCommitUnknownText
+	}
+	return strings.TrimSpace(rest[:j])
+}
+
+// gcCommitsDiverge reports whether two commits are known AND different.
+//
+// Short and full shas of the same commit must NOT read as divergence: the host
+// may report 40 characters where the image reports 9. Compared by prefix on the
+// shorter of the two, which is how every other tool in this estate compares
+// them.
+func gcCommitsDiverge(host, box string) bool {
+	// Could-not-tell is never a finding. Note this guard is DEFENSIVE, not
+	// load-bearing: the prefix comparison below already returns false for an
+	// empty commit, because strings.HasPrefix(x, "") is true. I tried to
+	// red-prove this line by deleting it and the test stayed green, which is
+	// how I know. It stays because the comparison below could reasonably be
+	// tightened later (an exact-length match, say) and would then silently
+	// start reporting every unreadable probe as a divergent one.
+	if host == gcCommitUnknownText || box == gcCommitUnknownText {
+		return false
+	}
+	if host == box {
+		return false
+	}
+	short, long := host, box
+	if len(short) > len(long) {
+		short, long = long, short
+	}
+	return !strings.HasPrefix(long, short)
+}
+
+// staleBoxGCWarning is what an operator needs to read, which is not "they
+// differ" but what that costs them.
+func staleBoxGCWarning(host, box string) string {
+	if !gcCommitsDiverge(host, box) {
+		return ""
+	}
+	return fmt.Sprintf("the gc INSIDE the box is a different build from the gc driving this pack: "+
+		"box=%s host=%s. The box's gc is baked into the agent image, and the image is rebuilt "+
+		"separately from a pin roll, so every gc change since the image was built is invisible "+
+		"inside every allocation while the host reports the new pin. This is not a capability "+
+		"failure — the box may claim work perfectly well and still answer an older contract, which "+
+		"is the shape that cost a full day: a box answering \"--drain-ack requires --claim\" while "+
+		"the host pin documented both modes. Rebuild the agent image against %s and retarget %s, "+
+		"or stop baking gc into the image.",
+		box, host, host, envAgentImage)
+}
+
+// hostGCCommit reads the identity of the gc on this process's PATH — the gc
+// that is actually driving the pack, which is the only meaningful thing to
+// compare a box against.
+func hostGCCommit(ctx context.Context) string {
+	gc, err := exec.LookPath("gc")
+	if err != nil {
+		return gcCommitUnknownText
+	}
+	ctx, cancel := context.WithTimeout(ctx, gcProbeTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, gc, "version", "--json", "--long").CombinedOutput()
+	if err != nil {
+		return gcCommitUnknownText
+	}
+	return gcCommitFromVersionJSON(string(out))
+}
