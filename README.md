@@ -25,14 +25,27 @@ unset, this task is never added at all.
 
 ## Before you install
 
-> **Status: not installable outside the maintainer's own deployment yet.** Read
-> this before anything else.
+> **Status: installable from a published fork build. Not yet installable from
+> an upstream `gc`.** Read this before anything else.
 >
-> This pack requires a `gc` built from a private development lineage. The pin it
-> needs is **not a commit that exists on `gastownhall/gascity`**, so the
-> `go install ...@<pin>` in the install section below **cannot resolve for
-> you**. This repository's own CI says so in as many words
-> (`.github/workflows/ci.yml`).
+> This pack requires a `gc` carrying behaviour families that are not all
+> upstream yet, so **`go install github.com/gastownhall/gascity/cmd/gc@<pin>`
+> cannot resolve the pin for you** — and it never will, whatever the pin: the
+> module path is `github.com/gastownhall/gascity`, so a fork URL does not
+> resolve either. `go install` is the wrong door and this README used to send
+> you to it.
+>
+> **Install the published binary instead** (Part 1, step 1). Builds of the pin
+> this pack is tested against, for linux/amd64 and darwin/arm64, with sha256
+> sidecars, are published at
+> <https://github.com/jacobhausler/gascity/releases>.
+>
+> Be clear-eyed about what that is: **a fork build, not an upstream release.**
+> If you will not run a fork, this pack is not ready for you, and the honest
+> answer is to wait for the upstream PRs below. If you will, the binary is
+> real, reproducible from the fork's own source at that commit, and the pack
+> fails closed against a `gc` that lacks the families rather than running
+> half-broken.
 >
 > The blocking set is smaller than it used to look: **six families — two
 > with filed upstream PRs, three more now pushed onto one of them, and one
@@ -171,10 +184,32 @@ deployment fills in are not this pack's to carry.
 Provider-agnostic: what any deployment of this pack needs.
 
 1. **`gc`, installed at a pin that carries the remote-worker families.**
-   `go install github.com/gastownhall/gascity/cmd/gc@<pin>` — **but see the
-   status banner: there is no public value of `<pin>` that satisfies this
-   today.** The families a pin must carry are not all upstream, so this step
-   is currently completable only where that lineage is already built. `gc` is
+
+   Download the published build for your platform and verify it, e.g.:
+
+   ```sh
+   REL=https://github.com/jacobhausler/gascity/releases/download/gc-75fbc2cf5b
+   curl -fsSLO "$REL/gc-linux-amd64"  && curl -fsSLO "$REL/gc-linux-amd64.sha256"
+   shasum -a 256 -c gc-linux-amd64.sha256     # or sha256sum -c
+   install -m 0755 gc-linux-amd64 ~/.local/bin/gc
+   ```
+
+   `gc-darwin-arm64` is published alongside it. Verify the sha256 — the pack
+   asks you to run a 260 MB binary from someone else's release page, and you
+   should not do that on trust.
+
+   **NOT `go install`.** It cannot work: the module path is
+   `github.com/gastownhall/gascity`, so `go install` against the fork URL never
+   resolves, and the upstream URL has no commit carrying these families. If you
+   would rather build than download, clone the fork at that tag and
+   `make build` — the ICU note in
+   [`toolchain/TOOLCHAIN.md`](toolchain/README.md) applies to your own build
+   host too.
+
+   The families a pin must carry are not all upstream. Running an upstream `gc`
+   is not a degraded mode — `gc-runtime-nomad check` fails closed and names the
+   missing family, and a box whose seat cannot claim work is the failure this
+   pack exists to make loud. `gc` is
    a tool dependency of this pack, never a Go import — the pack keeps zero gascity
    Go dependencies. The families the pin must carry, their upstream twins, and
    the first pin that carried each are the checklist in
@@ -496,9 +531,8 @@ GC_BIN=$(command -v gc) ./conformance.sh
 server (`fakenomad`), then runs `gc runtime check` and `gc runtime
 conformance` through the full RPP lifecycle round-trip — no live Nomad
 cluster or network required. This is the pack's CI gate; `gc`
-itself is a tool dependency installed with a pinned
-`go install github.com/gastownhall/gascity/cmd/gc@<pin>`, never imported, so
-the pack keeps zero gascity Go dependencies. Optional-op requirements
+itself is a tool dependency — a published binary on PATH (Part 1, step 1),
+never a Go import — so the pack keeps zero gascity Go dependencies. Optional-op requirements
 (`exec`, `provision`, ...) report SKIP since this phase only implements the
 four lifecycle ops — later beads make them pass; this harness only runs
 them.
