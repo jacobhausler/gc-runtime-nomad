@@ -130,6 +130,16 @@ func TestSilentGCIsAbsentNotUnknown(t *testing.T) {
 // wrong-layer diagnosis this pack exists to stop making, so the refusal must
 // name the absence and must not name the family.
 func TestBoxMintingOpsRefuseAnAbsentGC(t *testing.T) {
+	// THE GATE MUST BE ACTIVE FOR THIS TEST TO MEAN ANYTHING. TestMain
+	// disables it suite-wide, because this suite is an offline harness and a
+	// dozen tests otherwise fail on a machine with no `gc` on PATH. That made
+	// THIS test vacuous the moment it was added — the ops stopped refusing and
+	// the test failed, which is the good outcome: it noticed.
+	//
+	// So the requirement is declared here rather than inherited from a default
+	// that another test can change underneath it.
+	t.Setenv(envSkipCapabilityGate, "")
+
 	t.Setenv("PATH", t.TempDir())
 	for _, op := range []string{"start", "provision", "relaunch"} {
 		t.Run(op, func(t *testing.T) {
@@ -182,6 +192,16 @@ func stubGCOnPath(t *testing.T, refusal string) {
 // that the gate is wired, not merely written. Without it the probe could
 // classify correctly and refuse nothing.
 func TestBoxMintingOpsRefuseAGCWithoutTheWorkerSurface(t *testing.T) {
+	// THE GATE MUST BE ACTIVE FOR THIS TEST TO MEAN ANYTHING. TestMain
+	// disables it suite-wide, because this suite is an offline harness and a
+	// dozen tests otherwise fail on a machine with no `gc` on PATH. That made
+	// THIS test vacuous the moment it was added — the ops stopped refusing and
+	// the test failed, which is the good outcome: it noticed.
+	//
+	// So the requirement is declared here rather than inherited from a default
+	// that another test can change underneath it.
+	t.Setenv(envSkipCapabilityGate, "")
+
 	stubGCOnPath(t, baseRefusal)
 	if got := probeGCWorkerSurface(context.Background()); got != gcWorkerSurfaceMissing {
 		t.Fatalf("probe against the stub = %v, want missing", got)

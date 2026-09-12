@@ -70,6 +70,20 @@ func New(cfg Config) (*Driver, error) {
 	if os.Getenv(EnvAgentImage) == "" {
 		env = append(env, EnvAgentImage+"="+defaultAgentImg)
 	}
+	// The gc capability gate is skipped here for the reason the gate's own
+	// refusal names: "set GC_NOMAD_SKIP_GC_CAPABILITY_GATE=1 if you are running
+	// an offline harness that mints no real sessions." This harness is exactly
+	// that — a fake Nomad API and no real seat — so the gate has nothing it
+	// could usefully measure.
+	//
+	// MEASURED on a clean machine (a golang container, no gc on PATH): three
+	// drills failed with that refusal, and the suite reported FAIL for the
+	// drills module. That is a suite that cannot run where it has no gc, in a
+	// module whose whole point is running offline. An operator-set value still
+	// wins, so anyone who wants the gate exercised can have it.
+	if os.Getenv(EnvSkipGCCapabilityGate) == "" {
+		env = append(env, EnvSkipGCCapabilityGate+"=1")
+	}
 
 	return &Driver{binPath: cfg.RuntimeBin, env: env, Observer: observer, proxy: proxy}, nil
 }

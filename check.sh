@@ -46,6 +46,40 @@ for mod in "${mods[@]}"; do
   fi
   rm -f /tmp/check-vet.$$
 
+  # THE SUITE'S OWN DEPENDENCIES, named before they become 64 failures.
+  #
+  # MEASURED on a clean machine (a golang container, no tmux): `go test ./...`
+  # in runtime/ produced 64 failures, every single one
+  # "exec: tmux: not found", from tests that drive the real launch path. Two
+  # tests guard for tmux and skip; the other sixty-four do not and fail. A
+  # reader seeing that wall has to learn which failures are "expected", which
+  # is exactly what gate 7 forbids and exactly how a suite stops being read.
+  #
+  # So the dependency is stated once, up front, with the count and the remedy,
+  # and the suite is not run in a state where its verdict would be noise.
+  # Refusing here is honest; printing PASS after skipping the driver tests
+  # would be the dark-lane shape one layer up.
+  # BOTH modules that drive the real launch path, not just runtime. Scoping
+  # this to runtime alone was the third "guard narrower than the thing it
+  # guards" mistake of the day: the drills module execs the same launch and
+  # failed with the identical cause, so a clean machine still got a wall of
+  # failures under a guard that claimed to have named them.
+  case "$mod" in
+  runtime | drills) needs_tmux=1 ;;
+  *) needs_tmux=0 ;;
+  esac
+  if [ "$needs_tmux" = 1 ] && ! command -v tmux >/dev/null 2>&1; then
+    fail "go test — tmux is not on PATH"
+    echo "        This module drives the real launch path, which execs tmux:"
+    echo "        64 tests fail with 'exec: tmux: not found' on a machine without it,"
+    echo "        all from that one cause. That is a missing TEST DEPENDENCY, not 64"
+    echo "        defects, and this refuses rather than hand you a wall of failures"
+    echo "        to triage."
+    echo "        Install tmux (apt-get install tmux / brew install tmux) and re-run."
+    echo "        conformance.sh needs no tmux and is unaffected."
+    continue
+  fi
+
   # -v so skips are visible. A suite that quietly skips its driver tests on a
   # machine without tmux reports "ok" while asserting nothing — the same
   # dark-lane shape the runtime itself is built to refuse, one layer up.

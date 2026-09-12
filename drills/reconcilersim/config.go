@@ -26,9 +26,14 @@ const (
 	// these scenarios run against the in-memory fake, which models no driver
 	// and no image: the value is a label the fake never reads. A live drill
 	// still names its own real image through the environment, which wins.
-	EnvAgentImage  = "GC_NOMAD_AGENT_IMAGE"
-	defaultParentJ = "gc-sessions"
-	defaultBin     = "gc-runtime-nomad"
+	EnvAgentImage = "GC_NOMAD_AGENT_IMAGE"
+	// EnvSkipGCCapabilityGate is the pack's own documented escape for an
+	// offline harness — its refusal names this variable by name. Set by
+	// newDriver because this harness mints no real sessions, so the gate has
+	// nothing it could usefully measure.
+	EnvSkipGCCapabilityGate = "GC_NOMAD_SKIP_GC_CAPABILITY_GATE"
+	defaultParentJ          = "gc-sessions"
+	defaultBin              = "gc-runtime-nomad"
 	// Deliberately not a plausible registry reference: if this ever reaches a
 	// real Docker driver, the pull must fail loudly rather than resolve.
 	defaultAgentImg = "gc-runtime-nomad-drill-placeholder:offline"
