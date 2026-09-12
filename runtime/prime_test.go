@@ -352,7 +352,9 @@ func TestTmuxArgumentCapMakesFilePasteTheOnlyNudgeDelivery(t *testing.T) {
 	requireTmuxForDriverTest(t)
 
 	dir := t.TempDir()
-	paneOut := filepath.Join(dir, "landed.txt")
+	// One reader per arm; see the comment at new-session below.
+	capOut := filepath.Join(dir, "landed-cap.txt")
+	paneOut := filepath.Join(dir, "landed-paste.txt")
 
 	// The socket does NOT live in t.TempDir(). A unix socket path is capped at
 	// ~104 bytes on macOS (108 on Linux) and t.TempDir() embeds the test's own
@@ -385,7 +387,22 @@ func TestTmuxArgumentCapMakesFilePasteTheOnlyNudgeDelivery(t *testing.T) {
 	}
 	t.Cleanup(func() { _, _ = tmux("kill-server") })
 
-	if out, err := tmux("new-session", "-d", "-s", "gc-nudge-probe", "cat > "+paneOut); err != nil {
+	// EACH ARM GETS ITS OWN PANE, and that is load-bearing rather than tidy.
+	//
+	// The argument-cap probe below types 16,000 bytes with NO trailing newline.
+	// That overflows the tty line discipline's canonical buffer (MAX_CANON),
+	// which then DISCARDS everything that follows until the line is consumed -
+	// and `cat` never consumes it, because it has no newline to read. Measured
+	// 2026-09-12 on macOS: after that probe the reader pane wrote 0 bytes, and
+	// the paste that followed into the SAME pane also landed 0 bytes, while the
+	// identical paste into a FRESH pane landed all 16,429 with its tail intact.
+	//
+	// So a shared reader made this test assert that paste-buffer delivers
+	// nothing - a false red against working delivery. Truncating the shared
+	// file between arms does not fix it either: `cat` holds the file open and
+	// its offset survives truncation, leaving a sparse hole rather than a clean
+	// reader.
+	if out, err := tmux("new-session", "-d", "-s", "gc-nudge-cap", "cat > "+capOut); err != nil {
 		t.Fatalf("new-session on the private socket: %v (%s)", err, out)
 	}
 
@@ -395,20 +412,21 @@ func TestTmuxArgumentCapMakesFilePasteTheOnlyNudgeDelivery(t *testing.T) {
 	// hold on every version is the one below it - the file path delivers the
 	// whole payload. On gc-agent:b55e229e1 (tmux 3.7b, the box this pack runs
 	// on) the argument form is refused and that observation is the defect.
-	if out, err := tmux("send-keys", "-t", "gc-nudge-probe", "-l", "--", strings.Repeat("x", 16000)); err != nil {
+	if out, err := tmux("send-keys", "-t", "gc-nudge-cap", "-l", "--", strings.Repeat("x", 16000)); err != nil {
 		t.Fatalf("a 16000-byte send-keys argument should land on any tmux: %v (%s)", err, out)
 	}
-	if out, err := tmux("send-keys", "-t", "gc-nudge-probe", "-l", "--", nudge); err != nil {
-		t.Logf("this tmux refuses a %d-byte send-keys argument (%s) - the cr-liv6ac shape; the pane must hold only the 16000 x's", len(nudge), strings.TrimSpace(out))
-		if probe, rerr := os.ReadFile(paneOut); rerr == nil && strings.Contains(string(probe), "TAILMARKER") {
+	if out, err := tmux("send-keys", "-t", "gc-nudge-cap", "-l", "--", nudge); err != nil {
+		t.Logf("this tmux refuses a %d-byte send-keys argument (%s) - the cr-liv6ac shape", len(nudge), strings.TrimSpace(out))
+		if probe, rerr := os.ReadFile(capOut); rerr == nil && strings.Contains(string(probe), "TAILMARKER") {
 			t.Fatal("the refused send-keys still delivered its tail")
 		}
 	} else {
 		t.Logf("this tmux accepts a %d-byte send-keys argument - the ceiling landed after this version; the file path below is still the required form", len(nudge))
-		// Keep the fixture honest for the byte-exact assertion that follows.
-		if err := os.Truncate(paneOut, 0); err != nil {
-			t.Fatalf("reset the reader pane: %v", err)
-		}
+	}
+
+	// The delivery arm, on a reader the probe above has not touched.
+	if out, err := tmux("new-session", "-d", "-s", "gc-nudge-probe", "cat > "+paneOut); err != nil {
+		t.Fatalf("new-session for the delivery arm: %v (%s)", err, out)
 	}
 
 	if out, err := tmux("load-buffer", "-b", "gc-prime-nudge", nudgeFile); err != nil {

@@ -38,7 +38,7 @@ func LifecycleRoundtripSteps(session, parentJob string) []Step {
 		{
 			Name: "start",
 			Do: func(ctx context.Context, d *Driver) error {
-				res, err := d.RunOp(ctx, "start", nil, session)
+				res, err := d.RunOp(ctx, "start", StartPayload(""), session)
 				if err != nil {
 					return err
 				}

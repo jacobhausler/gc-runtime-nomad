@@ -3,6 +3,7 @@ package reconcilersim
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -62,6 +63,13 @@ func New(cfg Config) (*Driver, error) {
 		EnvNamespace+"="+cfg.Namespace,
 		EnvParentJob+"="+cfg.ParentJob,
 	)
+	// The agent image is REQUIRED by the pack since v1.0.7 and is not one of
+	// the four this Driver controls, so an operator-set value passes through
+	// untouched above. Supply the offline placeholder only when nothing set
+	// one, or every drill fails closed before it measures anything.
+	if os.Getenv(EnvAgentImage) == "" {
+		env = append(env, EnvAgentImage+"="+defaultAgentImg)
+	}
 
 	return &Driver{binPath: cfg.RuntimeBin, env: env, Observer: observer, proxy: proxy}, nil
 }
@@ -108,6 +116,28 @@ type OpResult struct {
 	Stdout   []byte
 	Stderr   []byte
 	ExitCode int
+}
+
+// StartPayload is the minimal `start` stdin the pack requires since v1.0.7.
+//
+// The prebaked-image shape (cr-3vvnb5) deleted the deployment-owned bootstrap
+// the pack used to substitute when gc sent no rendered command, so a start
+// with an empty payload now fails closed with "GC_NOMAD_AGENT_IMAGE is set but
+// gc sent no rendered launch command". Every drill passed stdin=nil and so
+// every drill broke on that release — silently, because nothing runs this
+// module. The command below stands in for gc's rendered launch line the same
+// way the harness's reader panes stand in for an agent.
+func StartPayload(command string) []byte {
+	if command == "" {
+		command = "sleep 86400"
+	}
+	b, err := json.Marshal(struct {
+		Command string `json:"command"`
+	}{Command: command})
+	if err != nil {
+		panic("reconcilersim: marshalling the start payload: " + err.Error())
+	}
+	return b
 }
 
 // RunOp execs the pack CLI as `<bin> <op> [args...]`, feeding stdin and

@@ -66,7 +66,7 @@ func newTestDriver(t *testing.T) (*reconcilersim.Driver, *fakenomad.Server) {
 // (never derivable from the session name itself, e2a-job-id-charset-gap).
 func startSession(t *testing.T, ctx context.Context, d *reconcilersim.Driver, session string) string {
 	t.Helper()
-	res, err := d.RunOp(ctx, "start", nil, session)
+	res, err := d.RunOp(ctx, "start", reconcilersim.StartPayload(""), session)
 	if err != nil || res.ExitCode != 0 {
 		t.Fatalf("start %s: err=%v exit=%d stderr=%s", session, err, res.ExitCode, res.Stderr)
 	}

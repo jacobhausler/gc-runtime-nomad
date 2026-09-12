@@ -200,8 +200,14 @@ func TestImageModePaneKeepsTheImageToolchain(t *testing.T) {
 	env := imageModeProviderEnv()
 	// The orchestrator PATH, rewritten to a directory this builder certainly
 	// does not have: whatever the pane inherits after sourcing env.sh names it.
+	// Every entry here is a marker this test INJECTS, and none of them may
+	// survive into the pane. They must not be plausible host PATH entries: the
+	// fake runs a box command as a local subprocess, so the pane's PATH is the
+	// host's, and an assertion on something the host might legitimately carry
+	// fails on the developer's machine rather than on the defect.
 	const foreignBin = "/nonexistent/orchestrator-toolchain/bin"
-	env[pathEnvName] = foreignBin + ":/Users/home/scratch/p62/bin:/usr/bin:/bin"
+	const foreignSecond = "/nonexistent/orchestrator-scratch/bin"
+	env[pathEnvName] = foreignBin + ":" + foreignSecond + ":/usr/bin:/bin"
 
 	dir := t.TempDir()
 	pathMarker := filepath.Join(dir, "pane-path")
@@ -219,8 +225,17 @@ func TestImageModePaneKeepsTheImageToolchain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read the pane PATH: %v", err)
 	}
-	if strings.Contains(string(panePath), foreignBin) || strings.Contains(string(panePath), "/Users/home") {
-		t.Fatalf("the pane ran with the orchestrator PATH: %q", string(panePath))
+	// Assert on the injected markers, not on a home-directory substring. The
+	// original guard here was `strings.Contains(panePath, "/Users/home")`,
+	// which is the orchestrator's path ONLY on a machine whose home happens to
+	// be /Users/home — and on that machine the host's own /Users/home/.local/bin
+	// matched it, so this test failed for the developer's $HOME rather than for
+	// any inherited orchestrator PATH. Measured 2026-09-12: the injected
+	// markers were correctly absent while the bare substring matched.
+	for _, marker := range []string{foreignBin, foreignSecond} {
+		if strings.Contains(string(panePath), marker) {
+			t.Fatalf("the pane inherited the orchestrator PATH entry %q: %q", marker, string(panePath))
+		}
 	}
 	paneShell, err := os.ReadFile(shellMarker)
 	if err != nil {

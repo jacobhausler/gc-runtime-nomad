@@ -11,16 +11,27 @@ import "os"
 // excludes TLS config (NRT-P1-04/NRT-P2-05), and the pack never needs to
 // name its own binary path to itself.
 const (
-	EnvAddr        = "GC_NOMAD_ADDR"
-	EnvToken       = "GC_NOMAD_TOKEN"
-	EnvNamespace   = "GC_NOMAD_NAMESPACE"
-	EnvParentJob   = "GC_NOMAD_PARENT_JOB"
-	EnvTLSCACert   = "GC_NOMAD_TLS_CACERT"
-	EnvTLSCert     = "GC_NOMAD_TLS_CERT"
-	EnvTLSKey      = "GC_NOMAD_TLS_KEY"
-	EnvRuntimeBin  = "GC_RUNTIME_NOMAD_BIN"
+	EnvAddr       = "GC_NOMAD_ADDR"
+	EnvToken      = "GC_NOMAD_TOKEN"
+	EnvNamespace  = "GC_NOMAD_NAMESPACE"
+	EnvParentJob  = "GC_NOMAD_PARENT_JOB"
+	EnvTLSCACert  = "GC_NOMAD_TLS_CACERT"
+	EnvTLSCert    = "GC_NOMAD_TLS_CERT"
+	EnvTLSKey     = "GC_NOMAD_TLS_KEY"
+	EnvRuntimeBin = "GC_RUNTIME_NOMAD_BIN"
+	// EnvAgentImage is the pack's required agent image. v1.0.7 (cr-3vvnb5.2)
+	// made it required and deleted the fallback session shape, so every
+	// lifecycle op now fails closed without it — including every drill. The
+	// harness supplies defaultAgentImg when the operator has not, because
+	// these scenarios run against the in-memory fake, which models no driver
+	// and no image: the value is a label the fake never reads. A live drill
+	// still names its own real image through the environment, which wins.
+	EnvAgentImage  = "GC_NOMAD_AGENT_IMAGE"
 	defaultParentJ = "gc-sessions"
 	defaultBin     = "gc-runtime-nomad"
+	// Deliberately not a plausible registry reference: if this ever reaches a
+	// real Docker driver, the pull must fail loudly rather than resolve.
+	defaultAgentImg = "gc-runtime-nomad-drill-placeholder:offline"
 )
 
 // Config is the harness's full environment-derived configuration: the
