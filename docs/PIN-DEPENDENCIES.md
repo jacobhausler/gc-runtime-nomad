@@ -10,6 +10,11 @@ ways that look like pack bugs.
 This file is the checklist: for each family, the upstream twin, its live merge
 state, what the runtime loses without it, and the first pin that carried it.
 
+**But start with the tiers below.** Carrying a family is not the same as
+requiring it, and reading this table as a flat requirement list overstates the
+blocking set by roughly four to one. The measured blocking set is **two filed
+PRs plus four unfiled follow-ups that all stack on one of them**.
+
 **Pin line** (verified, not remembered — `git merge-base --is-ancestor <sha> <pin>`
 in the maintainer's pin-candidate worktree, HEAD `857ed398a` — these shas are
 in the private lineage and will not resolve against `gastownhall/gascity`):
@@ -27,6 +32,91 @@ in the private lineage and will not resolve against `gastownhall/gascity`):
 referenced below is `OPEN` with `mergedAt: null` and `isDraft: false`.** Only
 #5629 and #5735 report `mergeable=CONFLICTING`; the rest report `MERGEABLE`.
 Nothing on this list can be retired on "merged" grounds today.
+
+## What actually blocks a stranger — read this before the table
+
+The table below lists every family **this estate's pin carries**. That is not
+the same question as **what this pack requires**, and conflating the two made
+the dependency look four times larger than it is. The distinction matters
+because it changes the upstream ask from "nineteen families, seven unfiled"
+into something a person could actually finish.
+
+The pack itself imports **zero** gascity code — its only production dependency
+is `hashicorp/nomad/api`. So it cannot depend on gc internals. What depends on
+them is *a seat running inside an allocation, doing gc work*. Sorting by that
+question, measured against a worktree at `6ba434271` (the upstream base):
+
+### Tier 1 — the pack genuinely cannot function without these
+
+A seat in a box cannot claim, stamp or close work. This is the real blocker.
+
+| family | upstream |
+|---|---|
+| `remote-worker` / `remote-worker-lifecycle` | [#6146](https://github.com/gastownhall/gascity/pull/6146) |
+| `remote-worker-env-city-target` | [#5864](https://github.com/gastownhall/gascity/pull/5864) — filed, MERGEABLE |
+| `remote-step-accept-list` | **unfiled** — stacks on #6146 |
+| `remote-worker-session-identity` | **unfiled** — stacks on #6146 |
+| `remote-worker-claim-dispatch` | **unfiled** — stacks on #6146 |
+| `policy-conditional-writer-forwarding` | **unfiled** — stacks on #6146 |
+
+**That is the whole blocking set: two filed PRs, plus four follow-ups that all
+stack on one of them.** Not nineteen families.
+
+### Tier 2 — required only for particular usage patterns
+
+Real dependencies *if you use the pattern*, and invisible if you do not. A
+deployment routing plain task beads to a pool hits none of them.
+
+- `workrecord-step-gate` ([#6133](https://github.com/gastownhall/gascity/pull/6133)) — only if you close **workflow steps**. The estate runs every unit of work as a `mol-do-work` step; a plain task bead does not take this path.
+- `remote-template-route` (unfiled; issue [#5737](https://github.com/gastownhall/gascity/issues/5737)) — only if work is routed to a **pool template** rather than to a seat.
+- `tmux-hooks-claim` ([#5599](https://github.com/gastownhall/gascity/pull/5599)) — `gc hook --claim` under tmux. Not box-specific in mechanism: a worker-local seat runs under tmux and makes the same call, so an upstream deployment gets upstream's behaviour on **every** lane, not just this one.
+- `beads-v65-5518` ([#5518](https://github.com/gastownhall/gascity/pull/5518)) — a `bd` schema version contract between the city and the `bd` baked into your agent image. Match them and it is moot.
+
+### Tier 3 — not pack dependencies at all
+
+These change pool, dispatch and routing behaviour **identically for a local
+lane and a Nomad lane**. Running upstream gc means running upstream's pool
+behaviour everywhere; that is an upstream question, not something this pack
+requires. Listed so nobody re-derives them as blockers:
+
+`graphroute-one-shot-independence`, `pool-oneshot-asleep-holder-reuse`,
+`pool-stranded-holder`, `dispatch-retry-routing`, `seat-identity`,
+`builtinpacks-pack-validation-memo`.
+
+### Tier 4 — performance, or this estate's own features
+
+- `sessionlog-pi-transcript-header-cache` ([#6089](https://github.com/gastownhall/gascity/pull/6089)) — the row's own description: *"it shows up as a slow session/dashboard log surface, not as a failure."*
+- `workquery-prefetch` ([#5629](https://github.com/gastownhall/gascity/pull/5629)) — its own description: *"the work query takes the un-prefetched path — dispatch latency."*
+- `agent-groups` — group-qualified routing. An estate routing feature; a deployment that declares no `[[agent_groups]]` never exercises it.
+- `runtime-provider` — **not required to select this pack.** See the correction below.
+
+### Correction: `runtime-provider` is not a blocker
+
+This file previously said a pin without the `runtime_provider` seam **drops
+`[runtimes.nomad]` from config**, so "the runtime disappears instead of
+failing loudly." Measured at `6ba434271`, that is wrong in a way that matters:
+
+- The pack-runtime registry is **fully present upstream**. `internal/config/
+  pack.go` carries `Runtimes map[string]PackRuntimeEntry` and
+  `mergeCityRuntimes`, byte-identical to the pin, and `cfg.Runtimes` is read
+  upstream by `gc doctor`, `gc runtime check` and `runtime_registry.go`.
+- Upstream selection already supports pack runtimes explicitly.
+  `newSessionProviderForCityByName` documents `"<pack runtime>" → exec proxy
+  bound to the pack's declared command`, resolved through `WorkerSpec.Runtime`
+  by **session provider name** — which is what this pack's own `pack.toml`
+  has always said: *gc resolves `session = "nomad"` to this executable through
+  the per-city runtime registry.*
+
+What upstream lacks is the per-agent `runtime_provider` TOML key (zero
+occurrences at base; present in `config.go`, `patch.go` and the agent struct
+at the pin). That key exists to **separate the runtime axis from the provider
+axis** — a better design, and one upstream's own comments say is mid-flight
+("the single place the Transport/Upstream axes will be honored as the
+de-conflation completes"). But a deployment willing to write `session =
+"nomad"` selects this pack on stock gc today. The seam is an improvement to
+upstream, not a precondition for this pack.
+
+## Every family the pin carries
 
 | family | upstream PR | state | why the runtime needs it | first pin carrying it |
 |---|---|---|---|---|
@@ -55,7 +145,15 @@ Nothing on this list can be retired on "merged" grounds today.
 ## Not yet filed upstream
 
 Several rows have **no PR at all**, and one is a duplicate by adjudication. These are
-the ones that cannot be tracked from an upstream PR list:
+the ones that cannot be tracked from an upstream PR list.
+
+**Four of these block; three do not.** The blocking four are
+`policy-conditional-writer-forwarding`, `remote-worker-session-identity`,
+`remote-step-accept-list` and `remote-worker-claim-dispatch` — all Tier 1, and
+all stacking on #6146. `remote-template-route` is Tier 2 (only for
+template-routed work); `runtime-provider` and `agent-groups` are Tier 4 and
+are improvements to upstream rather than preconditions for this pack. Filing
+effort belongs on the four.
 
 - `policy-conditional-writer-forwarding` — no PR; #6146 does not contain the file it changes.
 - `remote-worker-session-identity` — no PR; a content follow-up on #6146's own surface.

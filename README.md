@@ -35,9 +35,13 @@ unset, this task is never added at all.
 > needs is **not a commit that exists on `gastownhall/gascity`**, so the
 > `go install ...@<pin>` in the install section below **cannot resolve for
 > you**. This repository's own CI says so in as many words
-> (`.github/workflows/ci.yml`). Nineteen behaviour families are involved and
-> seven of them have no upstream PR at all — the full table is
-> [`docs/PIN-DEPENDENCIES.md`](docs/PIN-DEPENDENCIES.md).
+> (`.github/workflows/ci.yml`).
+>
+> The blocking set is smaller than it used to look: **six families — two
+> with filed upstream PRs, and four unfiled follow-ups that all stack on
+> one of them.** The other thirteen the pin carries are not requirements of
+> this pack. [`docs/PIN-DEPENDENCIES.md`](docs/PIN-DEPENDENCIES.md) tiers
+> them and shows the work.
 >
 > The pack now **refuses to start** on a `gc` missing the decisive family
 > (`remote-worker-lifecycle`) rather than going dark, and `gc-runtime-nomad

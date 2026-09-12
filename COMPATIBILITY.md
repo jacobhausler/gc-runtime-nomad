@@ -16,12 +16,23 @@ released upstream `gc`.
 upstream `gc` can run this pack.**
 
 This is not a version floor that a newer release will eventually clear on
-its own. The pack depends on ~19 behaviour families that live in a local
-lineage and ride a *city pin*. Twelve of them have an open upstream PR;
-**seven have no upstream PR at all.** The full table — family, upstream
-PR, live merge state, what breaks without it, and the first pin that
-carried it — is `docs/PIN-DEPENDENCIES.md`. That file is the authority;
-this section is the summary.
+its own. The pack rides a *city pin* carrying ~19 behaviour families.
+
+**Carrying is not requiring**, and the difference is large enough to
+state up front. Sorted by whether the pack can function without them
+(measured against the upstream base commit, `6ba434271`), the blocking
+set is **six families: two with filed PRs, and four unfiled follow-ups
+that all stack on one of those two.** The rest are either needed only for
+particular usage patterns, or change pool and dispatch behaviour
+identically for a local lane and a Nomad lane — which makes them upstream
+questions rather than requirements of this pack. Two are performance rows
+by their own description, and one, `runtime-provider`, turns out not to
+be required to select this pack at all: upstream already resolves
+`session = "nomad"` through its pack-runtime registry.
+
+`docs/PIN-DEPENDENCIES.md` carries the tiering, the reasoning for each
+placement, and the full table. That file is the authority; this is the
+summary.
 
 The failure mode when the dependency is missing is the reason this
 section is first: **the pack does not refuse, it goes dark.** Two
