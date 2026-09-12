@@ -1716,13 +1716,27 @@ func TestAwaitExecAllocReadyTimeoutNamesTheAllocsOwnState(t *testing.T) {
 // carries NO task states at all is the API declining to answer (a stub read;
 // fakenomad's own PlaceAlloc for a job whose tasks it never modelled), not an
 // answer that the task is down.
+//
+// ITS PREMISE WAS WRONG IN ONE RESPECT AND I CHANGED IT, 2026-09-12. It placed
+// the alloc with client status "pending", and required READY. "No task states"
+// alone does not mean the API is declining: on real Nomad a freshly created
+// allocation has no task states yet AND is pending, so this shape is exactly
+// the live race that cost every start on the nomad lane once the fetched gc
+// artifact made the task's pre-start work long ("the agent task never started
+// (state pending): Downloading Artifacts ... reading exec frame: EOF"). The
+// test had encoded a FAKE'S CHOICE of status as a semantic.
+//
+// A stub saying "ready, I do not model tasks" reports the ALLOC running, which
+// is what it now does here, so the stall this test exists to prevent is still
+// prevented. The pending-and-stateless case is guarded as not-ready in
+// alloc_ready_test.go.
 func TestAwaitExecAllocReadyWithoutTaskStatesDoesNotStall(t *testing.T) {
 	l, srv := newTestLifecycle(t)
 	ctx := context.Background()
 	const session = "sess-unmodelled-tasks"
 	const childJob = "gc-sessions/sess-unmodelled-tasks"
 
-	allocID := srv.PlaceAlloc(childJob, "pending")
+	allocID := srv.PlaceAlloc(childJob, "running")
 	if err := l.sidecar.save(binding{SessionName: session, ChildJobID: childJob}); err != nil {
 		t.Fatalf("seed sidecar binding: %v", err)
 	}

@@ -2638,6 +2638,31 @@ func (l *lifecycle) currentAllocRecord(ctx context.Context, sessionName string) 
 // API declining to answer (a stub read; the pack's own fake for a job whose
 // tasks it does not model), not an answer that the task is down, and treating
 // it as one would turn every existing caller into a 180 s stall.
+// allocExecReady decides whether one observation of an allocation means the
+// task we are about to exec into is up.
+//
+// The subtle case, and the one that cost every start on this lane once the
+// fetched gc artifact made the task's pre-start work long: an allocation
+// carrying NO task states at all. Answering "ready" there was written for a
+// STUB read — the API declining to answer is not an answer that the task is
+// down — and it is right about a stub. It is wrong about a real allocation
+// Nomad has just created and not yet filled in, and a 261 MB download widened
+// that instant into a window every staging exec fell into:
+//
+//	the "agent" task never started (state "pending"): Downloading Artifacts:
+//	Client is downloading artifacts: reading exec frame: EOF
+//
+// ClientStatus separates the two, and Nomad always supplies it: an alloc whose
+// ClientStatus is not yet "running" has no running task BY DEFINITION,
+// whatever its task states say or fail to say. A stub that models no tasks
+// reports the alloc running, so it keeps its immediate answer.
+func allocExecReady(rec allocRecord) bool {
+	if state, ok := rec.TaskStates[execTaskName]; ok {
+		return state.State == allocStateRunning
+	}
+	return rec.ClientStatus == allocStateRunning
+}
+
 func (l *lifecycle) awaitExecAllocReady(ctx context.Context, sessionName string) (string, error) {
 	return l.awaitExecAllocReadyWithin(ctx, sessionName, allocTaskRunningTimeout, allocTaskRunningPoll)
 }
@@ -2651,14 +2676,14 @@ func (l *lifecycle) awaitExecAllocReadyWithin(ctx context.Context, sessionName s
 		rec, err := l.currentAllocRecord(ctx, sessionName)
 		switch {
 		case err == nil:
-			state, hasState := rec.TaskStates[execTaskName]
-			if !hasState {
+			if allocExecReady(rec) {
 				return rec.ID, nil
 			}
-			if state.State == allocStateRunning {
-				return rec.ID, nil
+			if state, ok := rec.TaskStates[execTaskName]; ok {
+				observed = describeTaskState(rec.ID, state)
+			} else {
+				observed = fmt.Sprintf("alloc %s client status %q with no task states yet", rec.ID, rec.ClientStatus)
 			}
-			observed = describeTaskState(rec.ID, state)
 		case errors.Is(err, errAllocNotReady):
 			// The alloc is not visible yet -- the window the short exec retry
 			// used to stand in for on its own. Keep polling inside the budget.
