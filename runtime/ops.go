@@ -336,6 +336,112 @@ const paneStagedEnvPrelude = `if [ -f "$NOMAD_SECRETS_DIR/env.sh" ]; then . "$NO
 	boxGCPathPrelude +
 	`unset GC_CITY GC_CITY_PATH GC_RIG; `
 
+// stripLeadingExec removes a leading `exec ` from a rendered pane command,
+// reporting whether it did. Only the exact word: a command that merely BEGINS
+// with those letters (execute-something) must be left alone.
+func stripLeadingExec(cmd string) (string, bool) {
+	const word = "exec"
+	if !strings.HasPrefix(cmd, word) {
+		return cmd, false
+	}
+	rest := cmd[len(word):]
+	if rest == "" || (rest[0] != ' ' && rest[0] != '\t') {
+		return cmd, false
+	}
+	return strings.TrimLeft(rest, " \t"), true
+}
+
+// agentCaptureBody wraps the pane's agent command so the allocation keeps a
+// record of how it ended.
+//
+// The pack ALREADY depends on this record in four places: egressFiles copies
+// alloc/logs/agent.exit before deregister, jobspec.go declares a vector source
+// for that exact filename, prime.go reads it, and prime.go's error text tells
+// the operator to go look at it. Nothing wrote it. The doc above egressFiles
+// attributes the capture trio to "the deployment bootstrap
+// ops/nomad/agent-launch.sh" — a script deleted with the launch-script seam,
+// which leaves the readers pointed at a file that is never created.
+//
+// The cost, measured six times in one supervisor era on 2026-09-12: the pane's
+// command exited at once, tmux's server went with it, and the pack could only
+// report that the reason "cannot be recovered from here" — a box that starts
+// and never claims, permanently unexplained, with the pack blaming the image
+// for a record the pack itself is the only thing positioned to write.
+//
+// Three properties are load-bearing:
+//
+//   - the agent's stderr is NOT redirected. The first version appended it to
+//     alloc/logs/agent.stderr, which is what the egress doc describes — and it
+//     broke the agent: taking stderr off the pane's tty changed the agent's own
+//     behaviour, and TestRunDrivingVerbsOverTmux went red one verb after
+//     `interrupt`, the pane having died. An agent driven as an interactive tty
+//     client must keep its tty on every stream. Both output channels are
+//     `tmux pipe-pane`'s job, which is exactly why the egress doc specifies
+//     pipe-pane for them, and that tap is not implemented yet: agent.exit is.
+//   - the record is written to agent.exit.$$ and renamed. jobspec.go's vector
+//     source declares one exact filename with no glob precisely so that the
+//     transient file is never shipped, and a reader never sees a half-line.
+//   - the wrapper re-exits with the agent's own status. A capture that exited
+//     0 after a failed command would make every failed launch report success
+//     and turn the box into a shell that looks healthy: the defect shape this
+//     pack exists to stop producing, reintroduced by its own diagnostics.
+//
+// It carries NO environment values — the exit code, two timestamps, the pane
+// id, the command's first word and the alloc id. That is what makes the file
+// safe to ship, and it is the same field list the doc above egressFiles
+// already promised.
+//
+// stdout is deliberately not redirected here: the agent is an interactive tty
+// client (gc drives it with peek/nudge/interrupt), so its output is tapped
+// with `tmux pipe-pane` rather than piped, which would take its tty away.
+func agentCaptureBody(paneCommand string) string {
+	// gc's rendered command STARTS WITH `exec` — measured: the body was
+	// `exec codex`. A wrapper around an exec'd command is not a wrapper: exec
+	// replaces the shell, so nothing after it ever runs and the exit record is
+	// never written. (The stderr redirect does survive, since redirections
+	// apply to the exec'd process; only the record is lost.) It also made
+	// argv0 the literal word "exec".
+	//
+	// So the exec is dropped. It exists to avoid leaving a shell process in
+	// the pane, and that shell is now load-bearing: it is what survives the
+	// agent to write down how the agent ended. One shell per pane is the price
+	// of a failure that can be explained at all.
+	paneCommand = strings.TrimSpace(paneCommand)
+	if rest, ok := stripLeadingExec(paneCommand); ok {
+		paneCommand = rest
+	}
+	argv0 := paneCommand
+	if i := strings.IndexAny(argv0, " \t"); i >= 0 {
+		argv0 = argv0[:i]
+	}
+	return `__gc_logs="${NOMAD_ALLOC_DIR:-/tmp}/logs"; mkdir -p "$__gc_logs" 2>/dev/null || true; ` +
+		// THE REASON THE `exec` WAS THERE, and it is not process hygiene: with
+		// exec there is no outer shell for a signal to hit. Wrapping without
+		// this trap made `interrupt` — which sends SIGINT to the pane's
+		// foreground group — kill the WRAPPER, so interrupting the agent tore
+		// down the pane, the tmux server and the box. Caught by
+		// No test exercises this, and the reason is worth writing down: the
+		// suite's pane command is /bin/sh, an INTERACTIVE shell, which takes
+		// job control and makes its own process group the tty's foreground —
+		// so the outer shell is not in the group SIGINT is delivered to and
+		// survives without help. A real agent is not a shell, does not take
+		// job control, and leaves the outer shell in that group. The trap is
+		// therefore reasoned, not measured.
+		//
+		// A no-op handler, not `trap "" INT`: an IGNORED signal is inherited
+		// by children, which would make the agent un-interruptible. A handler
+		// keeps the shell alive while the child still receives SIGINT
+		// normally, and the trap body runs only once the child has exited.
+		`trap : INT; ` +
+		`__gc_started=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown); ` +
+		`{ ` + paneCommand + `; }; __gc_rc=$?; ` +
+		`{ printf 'exit=%s started=%s ended=%s pane=%s argv0=%s alloc=%s\n' ` +
+		`"$__gc_rc" "$__gc_started" "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)" ` +
+		`"${TMUX_PANE:-}" ` + shellQuote(argv0) + ` "${NOMAD_ALLOC_ID:-}" ` +
+		`> "$__gc_logs/agent.exit.$$" && mv -f "$__gc_logs/agent.exit.$$" "$__gc_logs/agent.exit"; } 2>/dev/null || true; ` +
+		`exit $__gc_rc`
+}
+
 // paneCwdPrelude is the shell the launched pane runs to choose its working
 // directory. Nothing cd'd the pane before, so
 // it inherited the exec driver's cwd - "/" on the D3 attempt-3 canary, which
@@ -439,7 +545,7 @@ func buildLaunchCommandForTmuxWithPaneCommand(env map[string]string, tmuxArgs []
 	// starts in a directory the alloc actually has (paneCwdPrelude). There is no
 	// placeholder-pane shape left to fall back to: launch() has
 	// already failed closed on an empty rendered command.
-	cmd = append(cmd, "/bin/sh", "-c", paneStagedEnvPrelude+paneCwdPrelude(workDir)+paneCommand)
+	cmd = append(cmd, "/bin/sh", "-c", paneStagedEnvPrelude+paneCwdPrelude(workDir)+agentCaptureBody(paneCommand))
 	return cmd
 }
 

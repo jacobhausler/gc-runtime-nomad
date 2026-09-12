@@ -32,6 +32,14 @@ import (
 // paths, never inline bodies. The bodies are read here and archived onto
 // the pack's one file transport, so the probe below is unchanged — same
 // paths, same expected content.
+// renderedWithoutExec is what a rendered pane command looks like once
+// agentCaptureBody has dropped its leading `exec` — which it must, or the
+// capture wrapper never runs.
+func renderedWithoutExec(cmd string) string {
+	out, _ := stripLeadingExec(cmd)
+	return out
+}
+
 func TestM3StagingReceiptWorkspaceProbe(t *testing.T) {
 	l, _ := newTestLifecycle(t)
 	ctx := context.Background()
@@ -746,8 +754,21 @@ func TestLaunchCommandPaneSourcesStagedEnv(t *testing.T) {
 		if !strings.Contains(pane, `. "$NOMAD_SECRETS_DIR/env.sh"`) {
 			t.Errorf("%s: pane body does not source the staged environment: %q", tmuxArgs[0], pane)
 		}
-		if !strings.HasSuffix(pane, rendered) {
-			t.Errorf("%s: pane body %q no longer ends with gc's rendered command", tmuxArgs[0], pane)
+		// The property is ORDER, not position: the preludes must run BEFORE
+		// gc's rendered command. It used to be asserted as "ends with", which
+		// was true only while nothing followed the command — and what follows
+		// it now is the agent-exit capture, which by construction cannot
+		// precede the command whose exit it records. `exec` is dropped from
+		// the rendered command for that same reason (agentCaptureBody), so the
+		// body it must contain is the command without it.
+		body := renderedWithoutExec(rendered)
+		idx := strings.Index(pane, body)
+		if idx < 0 {
+			t.Errorf("%s: pane body %q no longer contains gc's rendered command", tmuxArgs[0], pane)
+			continue
+		}
+		if idx < strings.Index(pane, `. "$NOMAD_SECRETS_DIR/env.sh"`) {
+			t.Errorf("%s: pane body %q runs gc's command before sourcing the staged environment", tmuxArgs[0], pane)
 		}
 	}
 }
@@ -807,8 +828,13 @@ func TestLaunchCommandPaneCdToStagedWorkDir(t *testing.T) {
 	if strings.Index(body, scratch) < idxCd {
 		t.Fatalf("pane body %q tries the scratch directory before the staged work dir", body)
 	}
-	if !strings.HasSuffix(body, rendered) {
-		t.Fatalf("pane body %q no longer ends with the rendered command the cd must precede", body)
+	// Order, not position — see the note in TestLaunchCommandPaneSourcesStagedEnv.
+	idxCmd := strings.Index(body, renderedWithoutExec(rendered))
+	if idxCmd < 0 {
+		t.Fatalf("pane body %q no longer contains the rendered command the cd must precede", body)
+	}
+	if idxCmd < idxCd {
+		t.Fatalf("pane body %q runs the rendered command before cd-ing to the staged work dir", body)
 	}
 }
 
