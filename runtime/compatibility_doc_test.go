@@ -178,3 +178,38 @@ func TestCompatibilityDocStatesTheCapabilityGate(t *testing.T) {
 			"pin dependency fails closed, when exactly one does", compatibilityDoc)
 	}
 }
+
+// TestCompatibilityDocStatesTheCredentialControl pins the one decision an
+// adopter makes about a credential: the KEY NAME decides whether its value
+// becomes a file the environment points at, or a literal in the environment
+// itself. Nothing else in the pack states that plainly, and it is not
+// reversible after the fact.
+func TestCompatibilityDocStatesTheCredentialControl(t *testing.T) {
+	doc := readCompatibilityDoc(t)
+	for _, want := range []string{
+		pemPointerSuffix,             // the suffix that is the control
+		"NOMAD_SECRETS_DIR",          // where the file lands
+		"GC_NOMAD_EXTRA_SECRET_KEYS", // how a value gets supplied at all
+		"GC_INSTANCE_TOKEN",          // the argv exclusion worth knowing
+	} {
+		if !strings.Contains(doc, want) {
+			t.Errorf("%s does not mention %q in the credential story", compatibilityDoc, want)
+		}
+	}
+}
+
+// TestArgvAllowListStillPresumesCredential guards the claim above against the
+// code: the document tells adopters that anything not on the allow-list is
+// presumed credential and stays out of argv. If GC_INSTANCE_TOKEN were ever
+// added to that list the document would be false, and a capability would be
+// world-readable via /proc/<pid>/cmdline.
+func TestArgvAllowListStillPresumesCredential(t *testing.T) {
+	if envArgvSafeNames["GC_INSTANCE_TOKEN"] {
+		t.Error("GC_INSTANCE_TOKEN is now argv-safe; it is a capability, and COMPATIBILITY.md tells readers it is excluded")
+	}
+	for _, credentialish := range []string{"CODEX_AUTH_JSON", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "FOO_PEM"} {
+		if envArgvSafeNames[credentialish] {
+			t.Errorf("%q is argv-safe; the allow-list is supposed to presume credential", credentialish)
+		}
+	}
+}

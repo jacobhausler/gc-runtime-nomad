@@ -400,6 +400,45 @@ the secret channel every time a client is built, and `check` reports it
 in the pre-flight. It is still not something the pack can refuse on your
 behalf — but it will no longer happen quietly.
 
+### Getting a credential to a seat, if we did not write your secrets file
+
+Three routes exist, and **the name you choose decides which one you get.**
+That is the whole decision, and it is not reversible after the fact:
+
+| You name the key | The value travels | It comes to rest as | The agent sees |
+|---|---|---|---|
+| `FOO_PEM` (any `_PEM` suffix) | tar over exec-stdin | a **file** at `$NOMAD_SECRETS_DIR/FOO_PEM` | `FOO` — a **path**, never the bytes |
+| anything else | tar over exec-stdin | a literal `export FOO='…'` in the sourced `env.sh` | `FOO` — the **value**, in its process environment |
+| a name on the argv allow-list | the launch command line | nothing staged | the value, and so does anything that can read `/proc/<pid>/cmdline` |
+
+**So: give a credential a `_PEM`-suffixed name and its bytes never enter an
+environment.** That is the only form here that keeps a secret out of
+`/proc/<pid>/environ` for the agent and every process it spawns. It is
+named for PEM material but nothing checks the contents — any credential
+you are willing to read from a file can use it.
+
+Two ways to supply the value in the first place:
+
+- **Your provider's env map**, if `gc` can interpolate it there.
+- **`GC_NOMAD_EXTRA_SECRET_KEYS`** — a comma-separated list of names the
+  pack bridges out of the *supervisor's own process environment* into the
+  session. This exists for values `gc`'s config cannot interpolate. Naming
+  a key is what stages it; an unnamed key is never staged. A name you
+  declare that the supervisor does not carry is now reported by name at
+  session start rather than skipped in silence.
+
+**What the pack will not do with a credential**, by construction rather
+than by care:
+
+- It never rides the **launch argv**. Only an explicit allow-list of
+  names may — locale, terminal, city/rig/agent identity, session identity
+  and derived paths — and anything unlisted is *presumed credential*.
+  `GC_INSTANCE_TOKEN` is deliberately excluded even though it looks like
+  identity, because it is a capability, and argv is world-readable.
+- It never rides Nomad **dispatch metadata**. That carries session
+  attribution only.
+- It is never written into the **jobspec**.
+
 ### Where credentials actually end up
 
 The staging channel itself is value-blind and does not log secret
