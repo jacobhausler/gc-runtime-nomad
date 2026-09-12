@@ -78,13 +78,17 @@ const (
 	envLogTokFile = "GC_NOMAD_LOG_SINK_TOKEN_FILE"
 	// envACLFile names a FILE holding the Nomad ACL token, and its name is
 	// chosen the way it is on purpose. See resolveNomadToken.
-	envACLFile        = "GC_NOMAD_ACL_FILE"
-	envLogLabels      = "GC_NOMAD_LOG_LABELS"
-	envLogArtifact    = "GC_NOMAD_LOG_SHIPPER_ARTIFACT"
-	envAgentImage     = "GC_NOMAD_AGENT_IMAGE"
-	envAdoptMaxAge    = "GC_NOMAD_ADOPT_MAX_AGE"
-	envDNSServers     = "GC_NOMAD_DNS_SERVERS"
-	envNodeConstraint = "GC_NOMAD_NODE_CONSTRAINT"
+	envACLFile = "GC_NOMAD_ACL_FILE"
+	// envGCArtifactTemplate is a URL template with a {commit} placeholder.
+	// Empty keeps the gc baked into the agent image. See the derived-artifact
+	// comment in jobspec.go for why this is a template and not a URL.
+	envGCArtifactTemplate = "GC_NOMAD_GC_ARTIFACT_URL"
+	envLogLabels          = "GC_NOMAD_LOG_LABELS"
+	envLogArtifact        = "GC_NOMAD_LOG_SHIPPER_ARTIFACT"
+	envAgentImage         = "GC_NOMAD_AGENT_IMAGE"
+	envAdoptMaxAge        = "GC_NOMAD_ADOPT_MAX_AGE"
+	envDNSServers         = "GC_NOMAD_DNS_SERVERS"
+	envNodeConstraint     = "GC_NOMAD_NODE_CONSTRAINT"
 
 	defaultParentJob = "gc-sessions"
 

@@ -1396,7 +1396,24 @@ func (l *lifecycle) ensureParentRegistered(ctx context.Context) error {
 func (l *lifecycle) parentJobSpec() nomadJob {
 	// One shape: the Docker task the configured image describes. There is no
 	// legacy exec variant left to choose between.
-	return parentJobSpec(l.client.namespace, l.nodePool, l.parentJobID, l.logShipper, l.agentImage, l.placement)
+	return parentJobSpec(l.client.namespace, l.nodePool, l.parentJobID, l.logShipper, l.agentImage,
+		l.placement, l.gcArtifact())
+}
+
+// gcArtifact resolves the per-box gc download from the gc that is ACTUALLY
+// driving this pack, which is the whole point: nobody configures the URL, so
+// nobody can forget to update it on a pin roll.
+//
+// Resolved fresh on each call rather than cached at construction, because the
+// pack is exec'd per operation and the pin can roll between two of them. A
+// value captured once would be exactly the stale copy this design exists to
+// abolish.
+func (l *lifecycle) gcArtifact() gcArtifactConfig {
+	tmpl := strings.TrimSpace(os.Getenv(envGCArtifactTemplate))
+	if tmpl == "" {
+		return gcArtifactConfig{} // off: the image's own gc stands
+	}
+	return resolveGCArtifact(tmpl, hostGCCommit(context.Background()))
 }
 
 // recoverBinding reconstructs the part of a sidecar binding that Nomad's

@@ -84,7 +84,12 @@ const (
 // binary to it). With no second shape left to fall back to, newLifecycle
 // refuses to build a lifecycle at all without an image rather than
 // register a parent whose boxes can never run an agent.
-func parentJobSpec(namespace, nodePool, parentID string, logShipper logShipperConfig, agentImage string, dep placementConfig) nomadJob {
+func parentJobSpec(namespace, nodePool, parentID string, logShipper logShipperConfig, agentImage string, dep placementConfig, artOpt ...gcArtifactConfig) nomadJob {
+	// Variadic because the feature is OPTIONAL and off is the safe default:
+	// every existing caller keeps today's jobspec byte-for-byte. The one
+	// production call site passes it explicitly, and a test asserts that, so
+	// "a caller forgot" cannot silently disable it where it matters.
+	art := firstArtifact(artOpt)
 	job := nomadJob{
 		ID:        parentID,
 		Namespace: namespace,
@@ -136,10 +141,11 @@ func parentJobSpec(namespace, nodePool, parentID string, logShipper logShipperCo
 			// boxes started on the 0a35596 pack until this list matched what the
 			// dispatcher actually sends. Still non-secret attribution only - the
 			// instance token/capability NEVER rides Meta.
-			MetaOptional: []string{"gc_session", "gc_nonce", "gc_created_at", agentImageMetaKey},
-			Payload:      "forbidden",
+			MetaOptional: []string{"gc_session", "gc_nonce", "gc_created_at", agentImageMetaKey,
+				gcArtifactMetaKey, gcArtifactSumMetaKey},
+			Payload: "forbidden",
 		},
-		TaskGroups: []nomadTaskGroup{sessionTaskGroup(logShipper, agentImage, dep)},
+		TaskGroups: []nomadTaskGroup{sessionTaskGroup(logShipper, agentImage, dep, art)},
 	}
 	// Stamp the jobspec's own fingerprint into its Meta: a
 	// registered parent that still exists and still matches on NodePool can
@@ -156,7 +162,15 @@ func parentJobSpec(namespace, nodePool, parentID string, logShipper logShipperCo
 	// job, so changing the default is drift-visible exactly as changing the
 	// baked image used to be. A per-dispatch override never touches the parent,
 	// which is the whole point: one parent, many images.
-	job.Meta = map[string]string{agentImageMetaKey: agentImage}
+	job.Meta = map[string]string{
+		agentImageMetaKey: agentImage,
+		// Declared even when empty: a key absent from the job's meta cannot be
+		// supplied by a dispatch either — Nomad refuses an undeclared key
+		// outright — so the DEFAULT has to exist for the per-session override
+		// to be possible at all.
+		gcArtifactMetaKey:    art.Source,
+		gcArtifactSumMetaKey: art.Checksum,
+	}
 	job.Meta[jobspecHashMetaKey] = jobspecHash(job)
 	return job
 }
@@ -253,8 +267,9 @@ var nomadConstraintOperands = map[string]bool{
 	"in": true, "not": true, "is": true, "bitset": true,
 }
 
-func sessionTaskGroup(logShipper logShipperConfig, agentImage string, dep placementConfig) nomadTaskGroup {
-	agent := sessionTask(agentImage)
+func sessionTaskGroup(logShipper logShipperConfig, agentImage string, dep placementConfig, artOpt ...gcArtifactConfig) nomadTaskGroup {
+	art := firstArtifact(artOpt)
+	agent := sessionTask(agentImage, art)
 	tasks := []nomadTask{agent}
 	// bridge networking so the host-network fatal-rule constraint above
 	// has a placement to fail closed against.
@@ -307,7 +322,8 @@ func sessionTaskGroup(logShipper logShipperConfig, agentImage string, dep placem
 	return group
 }
 
-func sessionTask(agentImage string) nomadTask {
+func sessionTask(agentImage string, artOpt ...gcArtifactConfig) nomadTask {
+	art := firstArtifact(artOpt)
 	// The image owns the agent toolchain. Keep the task alive with a
 	// signal-aware native sleep process; GC's rendered command and runtime
 	// environment still arrive later through alloc-exec/staging. This Docker
@@ -347,6 +363,33 @@ func sessionTask(agentImage string) nomadTask {
 		// default workload identity is fail-closed already, and this design
 		// keeps it that way as a named control — so nothing
 		// is declared here.
+	}
+
+	if art.enabled() {
+		// Nomad downloads and CHECKSUMS this before the task starts, so the
+		// integrity of the gc a seat runs does not depend on this pack being
+		// correct — a corrupted or substituted binary fails placement rather
+		// than running.
+		//
+		// The source and checksum are interpolated from meta rather than
+		// baked in, so a dispatch can override them per session exactly as it
+		// can override the image. That is what lets one deployment run two
+		// lanes on different gc builds.
+		task.Artifacts = append(task.Artifacts, nomadArtifact{
+			GetterSource:  "${NOMAD_META_" + gcArtifactMetaKey + "}",
+			GetterOptions: map[string]string{"checksum": "${NOMAD_META_" + gcArtifactSumMetaKey + "}"},
+			RelativeDest:  gcArtifactDest,
+		})
+		// PATH PRECEDENCE IS THE WHOLE CONTRACT. The image may still carry a
+		// gc — older images do, and an adopter's may too — and a fetched gc
+		// that loses a PATH race to a baked one would reintroduce the exact
+		// staleness this removes, silently, with the artifact downloading
+		// successfully every time. Nomad expands NOMAD_TASK_DIR inside the
+		// container, and the fetched copy goes FIRST.
+		if task.Env == nil {
+			task.Env = map[string]string{}
+		}
+		task.Env[pathEnvName] = "${NOMAD_TASK_DIR}/" + gcArtifactDest + ":${PATH}"
 	}
 	return task
 }
@@ -760,4 +803,86 @@ type nomadTemplate struct {
 	EmbeddedTmpl string `json:"EmbeddedTmpl"`
 	DestPath     string `json:"DestPath"`
 	ChangeMode   string `json:"ChangeMode,omitempty"`
+}
+
+// THE DERIVED GC ARTIFACT — the mechanism that keeps the box's gc fresh
+// without anyone remembering to make it fresh.
+//
+// The problem it replaces: gc was baked into the agent image. This estate rolls
+// its pin about nine times a day and rebuilds the image by hand, so the gc
+// inside a box was routinely several rolls behind the gc driving the pack —
+// measured 2026-09-12, live pin e78e884c1b against an image carrying
+// 3a3dda06a. The coupling was maintained by a comment telling a human to
+// rebuild and retarget on every roll, and three separate places (the pin, the
+// image, and the staged linux build directory) were out of sync in three
+// different directions at the same time.
+//
+// Moving the URL into configuration would not have fixed that. It would have
+// swapped "rebuild an image on every roll" for "edit a URL on every roll",
+// which is the same coupling at a lower price and still a human in the loop.
+//
+// So the URL is DERIVED, never configured. The pack already knows which gc is
+// driving it (hostGCCommit). The artifact source is computed from that commit,
+// which means a pin roll propagates on its own: swap the pin, and the next box
+// fetches the gc matching whatever is now running. Nothing to edit, nothing to
+// remember, and no state that can drift because there is no second copy of the
+// answer.
+//
+// It rides the exact path the agent image already uses — declared in
+// MetaOptional, defaulted in job.Meta, interpolated into the task, overridable
+// per dispatch — so this adds a second tenant to a proven mechanism rather than
+// a new one. Nomad verifies the checksum itself before the task starts.
+//
+// OPT-IN, and deliberately so: an empty template keeps today's behaviour (the
+// gc baked into the image), because the releases this fetches do not exist for
+// every historical pin. A deployment turns it on when its release pipeline is
+// producing them, and the in-box staleness check stays the backstop either way.
+const (
+	// gcArtifactMetaKey carries the resolved download URL.
+	gcArtifactMetaKey = "gc_artifact"
+	// gcArtifactSumMetaKey carries the checksum Nomad verifies.
+	gcArtifactSumMetaKey = "gc_artifact_sha"
+	// gcCommitPlaceholder is what the template substitutes.
+	gcCommitPlaceholder = "{commit}"
+	// gcArtifactDest is the task-dir subdirectory the binary lands in.
+	gcArtifactDest = "gcbin"
+)
+
+// firstArtifact collapses the optional argument to a value.
+func firstArtifact(opt []gcArtifactConfig) gcArtifactConfig {
+	if len(opt) == 0 {
+		return gcArtifactConfig{}
+	}
+	return opt[0]
+}
+
+// gcArtifactConfig is the resolved artifact, passed as one value because these
+// two strings are meaningless apart: a source without its checksum would be an
+// unverified download, and the zero value means the feature is off.
+type gcArtifactConfig struct {
+	Source   string
+	Checksum string
+}
+
+// enabled reports whether an artifact fetch should be declared at all.
+func (a gcArtifactConfig) enabled() bool {
+	return strings.TrimSpace(a.Source) != "" && strings.TrimSpace(a.Checksum) != ""
+}
+
+// resolveGCArtifact turns a template and a commit into a source and a checksum
+// reference.
+//
+// The checksum is a go-getter `file:` reference to a sidecar published beside
+// the binary, not a literal. A literal would have to be configured per pin,
+// which puts the human back in the loop this exists to remove; a sidecar URL is
+// derivable from the same commit. Nomad fetches both and refuses the artifact
+// on a mismatch, so integrity does not depend on this pack being correct.
+func resolveGCArtifact(template, commit string) gcArtifactConfig {
+	template = strings.TrimSpace(template)
+	commit = strings.TrimSpace(commit)
+	if template == "" || commit == "" {
+		return gcArtifactConfig{}
+	}
+	source := strings.ReplaceAll(template, gcCommitPlaceholder, commit)
+	return gcArtifactConfig{Source: source, Checksum: "file:" + source + ".sha256"}
 }
