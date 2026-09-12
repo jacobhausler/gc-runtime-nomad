@@ -188,6 +188,14 @@ keeps everything else. Two consequences worth knowing before you debug one:
 
 - An op you expected to work being a silent no-op is this contract, not a
   fault. `gc-runtime-nomad help` lists exactly what this build serves.
+- **An OLDER or differently-versioned `gc` is not covered**, and a reader was
+  right to notice that only the newer direction was discussed. The pack
+  declares v0 unconditionally; it does not inspect what `gc` asked for. If your
+  `gc` speaks a protocol whose v0 means something else, nothing here will
+  detect that — the handshake is a declaration, not a negotiation, and the
+  failure would surface as an op behaving unexpectedly rather than as a version
+  error. There is no version of `gc` known to be in that position, which is why
+  it is untested rather than unsupported.
 - The pack does **not** negotiate downward. It declares v0 and two
   capabilities; it does not inspect what `gc` asked for and adapt. If a future
   `gc` requires a capability listed below as deliberately undeclared, the honest
@@ -208,6 +216,28 @@ wire first.
 **Exercised against Nomad v2.0.5** (`nomad version`, 2026-09-12). No
 lower bound has been tested, so none is claimed. The features the pack
 requires, if you want to reason about an older cluster yourself:
+
+**No floor is claimed, but here is what a floor would be made of.** "You would
+be the first tester" is a true statement and a useless one, so instead: the
+pack's entire Nomad surface is listed below, newest feature first. Check the
+ones you care about against your own version's changelog rather than taking a
+number from us.
+
+| What the pack uses | Where |
+|---|---|
+| **`NodePool` on the job** — by a wide margin the newest thing here, and the likely binding constraint. A Nomad without node pools cannot register the parent at all | parent jobspec |
+| `ParameterizedJob` + `MetaOptional`, and the behaviour that an **undeclared** dispatch meta key is refused outright | parent jobspec, every dispatch |
+| `artifact` with `GetterMode` and `GetterOptions` (`checksum`, `archive`) | the fetched `gc`, the optional image tarball, the log shipper |
+| the docker driver's `load` | optional, registry-free image delivery |
+| `template` stanzas as static file delivery | log shipper config |
+| alloc **exec** (the websocket endpoint) | every staging and in-box probe |
+| `X-Nomad-Index` on write responses — the pack tolerates a proxy that strips it | dispatch bookkeeping |
+| `/v1/jobs`, `/v1/job/…`, `/v1/client/allocation/…`, `/v1/client/fs/cat/…` | everything |
+
+Everything on that list except `NodePool` has been in Nomad for years. If your
+version has node pools and refuses undeclared dispatch meta, the pack has no
+other known reason to object — but "no known reason" is not "tested", and the
+only version anyone has actually run it against is the one above.
 
 | feature | used for |
 |---|---|
@@ -600,6 +630,51 @@ than by care:
 - It never rides Nomad **dispatch metadata**. That carries session
   attribution only.
 - It is never written into the **jobspec**.
+
+### Getting the value into the supervisor's environment
+
+Every reader who tried to deliver a credential stopped in the same place, and
+one put it exactly: *"the bridge from my own non-conforming secrets file into
+the supervisor's own process environment is entirely outside this pack's
+documented scope."* True, and "however your deployment composes it" is honest
+and useless. The pack cannot own your secrets manager — but it can tell you
+what the supervisor's environment has to contain and what the two usual ways of
+getting it there cost you.
+
+**What the pack requires, and all it requires:** the process running
+`gc supervisor` must have the value in its own environment under the name you
+listed in `GC_NOMAD_EXTRA_SECRET_KEYS`. Nothing else. The pack reads that
+environment and stages from it; it never reads your secrets file, and there is
+no config key pointing at one.
+
+**Route A — a file your process manager reads.** systemd's
+`EnvironmentFile=`, or a plist/wrapper that sources a file before exec'ing the
+supervisor.
+
+- Works with any secrets manager that can *render a file*, which is most.
+- The file is on disk for as long as the supervisor runs. `0600`, owned by the
+  supervisor's user, and **not** in a directory your backups sweep.
+- Rotation is: rewrite the file, restart the supervisor. That restart is the
+  step the rotation runbook below depends on.
+
+**Route B — a wrapper that fetches at exec time.** A small script that asks your
+secrets manager and `exec`s the supervisor with the value exported.
+
+- Nothing is written to disk, which is the reason to prefer it.
+- The supervisor cannot start when your secrets manager is unreachable. That is
+  usually correct — a seat with no credential fails anyway — but it couples
+  your session fleet's boot to another service's availability, which is worth
+  knowing before a power cut rather than during one.
+- Do **not** pass the value on the supervisor's command line. Argv is world
+  readable on every OS this runs on, and that is the one mistake in this area
+  the pack cannot detect or undo.
+
+**What neither route fixes:** a value in the supervisor's environment is
+inherited by everything the supervisor spawns on that host, not only by boxes.
+The pack strips its own credential-shaped keys from what it stages into a
+session, but the supervisor's own children are not its business. If that
+matters to you, the value should reach the supervisor and nothing else — which
+argues for Route B and a narrow wrapper.
 
 ### Rotating a credential, when one has leaked
 
