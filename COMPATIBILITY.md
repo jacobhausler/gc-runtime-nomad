@@ -222,6 +222,20 @@ seat on the process list, never on the pane's foreground command — a pane
 body that wraps the command keeps the shell in front while the agent runs
 beneath it, so `pane_current_command` reads `sh` on healthy seats too.
 
+**Two traps that build clean and fail later.** Both are enforced by
+`toolchain/build-image.sh`, which refuses a staged `gc` rather than
+baking it, because both are silent at build time:
+
+- **The VCS stamp.** A `gc` built from a source *archive* rather than a
+  checkout has no `.git` for the Makefile's ldflags to read, so it
+  stamps its commit as the literal string `unknown`. It builds, runs,
+  and ships — and the image can never be traced to a revision, which is
+  the whole of what "reproducible" means. The build refuses a commit
+  that is not a hex sha.
+- **The architecture.** A darwin or arm64 `gc` builds green and dies at
+  the first seat command. The build refuses anything that is not an
+  x86-64 ELF.
+
 **ABI, not just version.** A `gc` compiled on Debian bookworm (ICU 72)
 links cleanly and then dies at runtime inside an Ubuntu noble image (ICU
 74). Build the in-box `gc` against the image you will actually run it

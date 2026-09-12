@@ -254,6 +254,23 @@ case "$cmd" in
     long="$("$art" version --json --long 2>/dev/null || true)"
     pin="$(printf '%s' "$long" | { command -v jq >/dev/null 2>&1 && jq -r '.commit // empty' || sed -n 's/.*"commit":"\([^\"]*\)".*/\1/p'; } 2>/dev/null || true)"
     [ -n "$pin" ] || die "could not read a gc commit from ${art}: '$art version --json --long' printed ${long:-nothing}"
+    # THE VCS-STAMP TRAP. Non-empty is not enough: a gc built from a source
+    # ARCHIVE rather than a checkout has no .git for the Makefile's ldflags to
+    # read, so it stamps the literal string "unknown" — which sails through an
+    # is-it-empty check and pins an image to a binary that cannot say what it
+    # was built from. An image whose gc cannot name its own revision is not
+    # reproducible in any sense worth the word, and the failure is silent:
+    # everything builds, runs, and ships.
+    #
+    # A real stamp is a hex sha. Reject anything that is not.
+    case "$pin" in
+      *[!0-9a-fA-F]*|"")
+        die "refusing to pin ${art}: its gc reports commit '${pin}', which is not a hex sha. A gc built from a source ARCHIVE stamps 'unknown' because there is no .git to read — rebuild it from a real checkout, or the image cannot be traced to a revision." ;;
+    esac
+    case "${#pin}" in
+      7|8|9|10|11|12|40) : ;;
+      *) die "refusing to pin ${art}: its gc reports commit '${pin}' (${#pin} chars), which is not a short or full sha length." ;;
+    esac
     sha="$(file_sha256 "$art")"
     was="$(lock_get gc_local_artifact) sha256=$(lock_attr gc_local_artifact sha256)"
     tmp="$(mktemp)"
