@@ -352,8 +352,20 @@ func TestTmuxArgumentCapMakesFilePasteTheOnlyNudgeDelivery(t *testing.T) {
 	requireTmuxForDriverTest(t)
 
 	dir := t.TempDir()
-	sock := filepath.Join(dir, "probe.sock")
 	paneOut := filepath.Join(dir, "landed.txt")
+
+	// The socket does NOT live in t.TempDir(). A unix socket path is capped at
+	// ~104 bytes on macOS (108 on Linux) and t.TempDir() embeds the test's own
+	// name, which for this test is long enough to blow the cap by itself:
+	//     error connecting to /var/folders/.../TestTmuxArgumentCapMakesFilePasteTheOn...
+	// so on macOS this failed at new-session before measuring anything. This is
+	// purely a path-length fix; it changes nothing about what the test asserts.
+	sockDir, err := os.MkdirTemp("", "gcp")
+	if err != nil {
+		t.Fatalf("socket dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(sockDir) })
+	sock := filepath.Join(sockDir, "p.sock")
 
 	// The measured worker-local prompt size (ops/receipts/nrt-d3/
 	// 2026-09-11-d3-cutover-landed-gate-unmet.md), newline terminated.
