@@ -32,8 +32,12 @@ const (
 	tmpEnvName    = "TMP"
 	tempEnvName   = "TEMP"
 	tmpdirEnvName = "TMPDIR"
-	gcHomeEnvName = "GC_HOME"
-	xdgEnvPrefix  = "XDG_"
+	// tmuxTmpdirEnvName decides WHERE TMUX LOOKS FOR ITS SOCKET, so an
+	// orchestrator value for it is not a preference that crosses harmlessly —
+	// it repoints the box at a directory chosen for another machine.
+	tmuxTmpdirEnvName = "TMUX_TMPDIR"
+	gcHomeEnvName     = "GC_HOME"
+	xdgEnvPrefix      = "XDG_"
 )
 
 // boxFilesystemEnvNames are the names that describe the machine's filesystem rather
@@ -51,7 +55,26 @@ var boxFilesystemEnvNames = map[string]bool{
 	tmpEnvName:    true,
 	tempEnvName:   true,
 	tmpdirEnvName: true,
-	gcHomeEnvName: true,
+	// TMUX_TMPDIR belongs here and the VALUE RULE BELOW DOES NOT CATCH IT.
+	//
+	// This estate's supervisor sets TMUX_TMPDIR=/tmp deliberately (its own
+	// header calls that a hard requirement), while a Mac's TMPDIR is under
+	// /var/folders — so "/tmp" is not under any orchestrator root, survives
+	// the value filter, and crosses into the box. tmux inside then resolves
+	// $TMUX_TMPDIR/tmux-<uid>/default against a path the orchestrator chose.
+	//
+	// Observed 2026-09-12 in this pack's own diagnostics, on a launch that
+	// failed with the empty-output error this runtime is worst at explaining:
+	//   exec ... exited 1: stderr="error connecting to /tmp/tmux-0/default
+	//   (No such file or directory)"
+	//   exec FAILED: spawning prime window: tmux new-window exited 1:
+	// The second line is what an operator sees; the first is the cause.
+	//
+	// The image owns its own socket directory, exactly as it owns PATH, HOME
+	// and TMPDIR. Nothing here needs to know what the right value IS — only
+	// that the orchestrator's is wrong in a box.
+	tmuxTmpdirEnvName: true,
+	gcHomeEnvName:     true,
 }
 
 // boxFilesystemEnvInput returns env with the orchestrator's filesystem removed from

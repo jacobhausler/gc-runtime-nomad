@@ -245,3 +245,38 @@ func TestImageModePaneKeepsTheImageToolchain(t *testing.T) {
 		t.Fatalf("the pane could not resolve a shell on its PATH (%q): the toolchain is hidden", string(panePath))
 	}
 }
+
+// TestOrchestratorTmuxSocketDirDoesNotCrossIntoTheBox pins the one filesystem
+// name the value rule could never catch.
+//
+// TMUX_TMPDIR decides where tmux looks for its socket. This estate's
+// supervisor sets it to /tmp on purpose, while a Mac's TMPDIR is under
+// /var/folders — so "/tmp" sits under no orchestrator root, survives the
+// value filter, and crosses into the box, pointing tmux at a directory chosen
+// for another machine.
+//
+// Observed in this pack's own diagnostics on a failed launch:
+//
+//	exec ... exited 1: stderr="error connecting to /tmp/tmux-0/default
+//	(No such file or directory)"
+//	exec FAILED: spawning prime window: tmux new-window exited 1:
+//
+// The second line is what an operator sees. The first is the cause.
+func TestOrchestratorTmuxSocketDirDoesNotCrossIntoTheBox(t *testing.T) {
+	// The exact shape that defeats the value rule: a Mac TMPDIR, and a
+	// TMUX_TMPDIR that is not underneath it.
+	env := map[string]string{
+		"HOME":        "/Users/home",
+		"TMPDIR":      "/var/folders/2t/abc/T/",
+		"TMUX_TMPDIR": "/tmp",
+		"GC_MODEL":    "qwen38-next",
+	}
+	got := boxFilesystemEnvInput(env)
+	if v, present := got["TMUX_TMPDIR"]; present {
+		t.Errorf("TMUX_TMPDIR=%q crossed into the box; the image owns its own socket directory", v)
+	}
+	// A non-path seat value must still cross — this filter is not a blanket.
+	if got["GC_MODEL"] != "qwen38-next" {
+		t.Errorf("a non-path seat value was dropped: %v", got)
+	}
+}
