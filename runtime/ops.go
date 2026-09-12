@@ -628,12 +628,22 @@ func (l *lifecycle) confirmDispatchPlaced(ctx context.Context, sessionName strin
 			// from, and "the node constraints cannot be satisfied" sends an
 			// operator to go find out which. The pack built the jobspec; it
 			// knows exactly which rules it asked for.
+			// Ask the SCHEDULER before blaming the constraints. The
+			// constraint story is right for a filtered placement and wrong
+			// for an empty node pool, and the two are indistinguishable from
+			// here without reading the evaluation.
+			pf := l.client.jobPlacementFailure(ctx, b.ChildJobID)
+			if sched := describePlacementFailure(pf); pf.emptyNodePool() && sched != "" {
+				return fmt.Errorf("provision %q: child %s was dispatched but NO allocation was placed within %s.%s",
+					sessionName, b.ChildJobID, allocPlacementTimeout, sched)
+			}
 			return fmt.Errorf("provision %q: child %s was dispatched but NO allocation was placed within %s — "+
 				"no client satisfied the job's constraints. This job requires %s. Compare them against "+
 				"`nomad node status -verbose <node>`; an image that is merely missing would have PLACED "+
 				"and then failed, so a placement that never happens is a constraint or capacity fault, "+
-				"not an image one",
-				sessionName, b.ChildJobID, allocPlacementTimeout, describeConstraints(l.parentJobSpec().Constraints))
+				"not an image one.%s",
+				sessionName, b.ChildJobID, allocPlacementTimeout,
+				describeConstraints(l.parentJobSpec().Constraints), describePlacementFailure(pf))
 		}
 		select {
 		case <-ctx.Done():

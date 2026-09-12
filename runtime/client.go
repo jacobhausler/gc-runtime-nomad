@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -1062,4 +1063,116 @@ func statusText(status int, data []byte) string {
 		return text
 	}
 	return http.StatusText(status)
+}
+
+// placementFailure is what the SCHEDULER said about a job it could not place.
+//
+// The pack already names the constraints it asked for when nothing places, and
+// that is usually the right answer. It is the wrong answer for one case that
+// looks identical from the outside: a target node pool with NO NODES IN IT.
+// There is nothing to compare a constraint against, no capacity to exhaust, and
+// the remedy is neither — it is configuration. Sending an operator to
+// `nomad node status` to check constraints when the pool is empty is the
+// wrong-layer diagnosis this pack exists to stop making.
+//
+// Measured 2026-09-12 on a live cluster: three ready, eligible nodes, all in
+// pools `prod-services` and `prod-partial`, and a parent job registered into
+// `default`. Every dispatch sat pending forever with NodesInPool=0,
+// NodesEvaluated=0 and every filter counter nil.
+type placementFailure struct {
+	NodePool         string
+	NodesInPool      int
+	NodesEvaluated   int
+	NodesFiltered    int
+	NodesExhausted   int
+	ClassFiltered    map[string]int
+	ConstraintFilt   map[string]int
+	DimensionExhaust map[string]int
+	Found            bool
+}
+
+// emptyNodePool reports the case worth its own message: the scheduler saw no
+// nodes at all in the pool this job targets.
+func (p placementFailure) emptyNodePool() bool {
+	return p.Found && p.NodesInPool == 0 && p.NodesEvaluated == 0
+}
+
+// jobPlacementFailure reads the job's evaluations and returns what the
+// scheduler recorded about the task group it could not place.
+//
+// A read failure is NOT an error here: this only ever runs to ENRICH a message
+// the caller is already returning, and losing the enrichment must never replace
+// a real diagnosis with a transport complaint.
+func (c *client) jobPlacementFailure(ctx context.Context, jobID string) placementFailure {
+	var evals []struct {
+		Status         string `json:"Status"`
+		FailedTGAllocs map[string]struct {
+			NodePool         string         `json:"NodePool"`
+			NodesInPool      int            `json:"NodesInPool"`
+			NodesEvaluated   int            `json:"NodesEvaluated"`
+			NodesFiltered    int            `json:"NodesFiltered"`
+			NodesExhausted   int            `json:"NodesExhausted"`
+			ClassFiltered    map[string]int `json:"ClassFiltered"`
+			ConstraintFilt   map[string]int `json:"ConstraintFiltered"`
+			DimensionExhaust map[string]int `json:"DimensionExhausted"`
+		} `json:"FailedTGAllocs"`
+	}
+	if err := c.do(ctx, defaultTimeout, http.MethodGet,
+		[]string{"job", jobID, "evaluations"}, nil, &evals); err != nil {
+		return placementFailure{}
+	}
+	for _, e := range evals {
+		for _, tg := range e.FailedTGAllocs {
+			return placementFailure{
+				NodePool:         tg.NodePool,
+				NodesInPool:      tg.NodesInPool,
+				NodesEvaluated:   tg.NodesEvaluated,
+				NodesFiltered:    tg.NodesFiltered,
+				NodesExhausted:   tg.NodesExhausted,
+				ClassFiltered:    tg.ClassFiltered,
+				ConstraintFilt:   tg.ConstraintFilt,
+				DimensionExhaust: tg.DimensionExhaust,
+				Found:            true,
+			}
+		}
+	}
+	return placementFailure{}
+}
+
+// describePlacementFailure turns the scheduler's own counters into the sentence
+// an operator can act on. Empty when there is nothing useful to add.
+func describePlacementFailure(p placementFailure) string {
+	if !p.Found {
+		return ""
+	}
+	if p.emptyNodePool() {
+		return fmt.Sprintf(" THE SCHEDULER SAW NO NODES AT ALL: node pool %q contains %d nodes "+
+			"(NodesInPool=0, NodesEvaluated=0, every filter counter empty). This is NOT a constraint "+
+			"or capacity fault and no constraint change will fix it — there is nothing to filter. "+
+			"Either point this deployment at a pool that has nodes (%s) or move nodes into %q. "+
+			"Note the pool is a property of the PARENT job, so changing it is a jobspec change and "+
+			"the parent must be re-registered, not just restarted.",
+			p.NodePool, p.NodesInPool, envNodePool, p.NodePool)
+	}
+	return fmt.Sprintf(" The scheduler evaluated %d node(s) in pool %q: %d filtered, %d exhausted"+
+		"%s%s%s.", p.NodesEvaluated, p.NodePool, p.NodesFiltered, p.NodesExhausted,
+		describeCounter("constraints", p.ConstraintFilt),
+		describeCounter("classes", p.ClassFiltered),
+		describeCounter("dimensions", p.DimensionExhaust))
+}
+
+func describeCounter(label string, m map[string]int) string {
+	if len(m) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%d", k, m[k]))
+	}
+	return "; " + label + ": " + strings.Join(parts, ", ")
 }
