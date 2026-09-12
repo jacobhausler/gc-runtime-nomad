@@ -101,3 +101,57 @@ func TestSkillDoesNotOverpromiseTheCheckFailure(t *testing.T) {
 		t.Error("SKILL.md does not tell the reader to distinguish the FAIL from the WARN")
 	}
 }
+
+// TestSkillExecRecipeMatchesTheCallingConvention pins a defect this repo
+// shipped in the skill for about an hour.
+//
+// `exec` reads the command from STDIN (main.go, the exec case); argv after the
+// session name is ignored. The skill's recipe was written as
+// `exec <session> ps -eo pid,comm`, which does not run anything — on a
+// terminal it blocks reading stdin, which reads exactly like an unreachable
+// box. An outside SRE working a staged 3am page called it a blocker and said
+// they would have escalated on a false premise.
+func TestSkillExecRecipeMatchesTheCallingConvention(t *testing.T) {
+	src := readSourceFile(t, "main.go")
+	execCase := src[strings.Index(src, `case "exec":`):]
+	if end := strings.Index(execCase, "\n\tcase "); end > 0 {
+		execCase = execCase[:end]
+	}
+	if !strings.Contains(execCase, "io.ReadAll(stdin)") {
+		t.Fatal("exec no longer reads its command from stdin; the skill's recipe is now wrong " +
+			"in the other direction")
+	}
+
+	doc := skillBody(t)
+	// The recipe must PIPE the command in.
+	if !strings.Contains(doc, "| gc-runtime-nomad exec") {
+		t.Error("SKILL.md does not show the command being piped into exec. Written as argv it runs " +
+			"nothing and blocks on a tty, which is indistinguishable from an unreachable box.")
+	}
+	// And it must warn, because the argv spelling is the one people reach for.
+	if !strings.Contains(doc, "not argv") {
+		t.Error("SKILL.md does not warn that argv after the session name is ignored")
+	}
+}
+
+// TestCheckPrintsDiagnosticsPathBeforeFailing guards an ordering that was
+// circular.
+//
+// The skill says the only sanctioned way to learn GC_NOMAD_SIDECAR_DIR is the
+// `diagnostics: <path>` line `check` prints, and then sends the reader to
+// diagnostics.log on the credential-failure row. The allocation-read probe used
+// to run BEFORE that line, so a FAIL returned without ever printing the address
+// of the evidence about the failure.
+func TestCheckPrintsDiagnosticsPathBeforeFailing(t *testing.T) {
+	src := readSourceFile(t, "main.go")
+	diag := strings.Index(src, `fmt.Fprintf(stderr, "diagnostics: %s\n", path)`)
+	probe := strings.Index(src, "checkAllocListCapability(stderr)")
+	if diag < 0 || probe < 0 {
+		t.Fatal("could not locate both the diagnostics print and the capability probe")
+	}
+	if probe < diag {
+		t.Error("the allocation-read probe runs BEFORE check prints the diagnostics path, so a FAIL " +
+			"suppresses the only documented way to find diagnostics.log — and the shipped skill " +
+			"sends the reader there for exactly this failure")
+	}
+}

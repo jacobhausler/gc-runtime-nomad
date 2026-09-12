@@ -224,12 +224,22 @@ someone already:
 the session's current allocation for you and needs no alloc id:
 
 ```
-gc-runtime-nomad exec <session> ps -eo pid,comm
-gc-runtime-nomad peek <session>
+printf 'ps -eo pid,comm' | gc-runtime-nomad exec <session>
+gc-runtime-nomad peek <session> [lines]
 ```
 
-`exec`'s exit code is the remote command's own. Note this streams the box's
-stdout verbatim, so never run a command there that prints the environment.
+**The command rides on STDIN, not argv.** `exec <session> ps -eo pid,comm`
+does not work: everything after the session name is ignored, and on a
+terminal it simply blocks waiting for stdin — which reads exactly like an
+unreachable box, and would send you to escalate on a false premise.
+
+`exec`'s exit code is the remote command's own, not a lifecycle 0/1/2. It
+streams the box's stdout verbatim, so never run a command there that prints
+the environment.
+
+`peek` is useless once the tmux server is gone — if the pane died, the server
+died with it, and there is no scrollback left to read. That is the case where
+`diagnostics.log` is the only remaining evidence.
 
 ## 3. Bounded checks
 

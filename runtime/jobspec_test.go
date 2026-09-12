@@ -368,7 +368,7 @@ func TestVectorConfigPromExporterAddressRendersThroughFakenomad(t *testing.T) {
 // parentJobSpec through fakenomad's own Template-stanza rendering and reads
 // the rendered file back off disk, then asserts the sink URI is the real,
 // literal GC_NOMAD_LOG_SINK value rather than an unresolved placeholder —
-// exactly what the live-Nomad lab proof (ops/receipts/nrt-t4l-20-lab-proof.md)
+// exactly what the live-Nomad lab proof (ops/receipts/)
 // showed failing as "invalid uri character" (Exit 78, allocation killed). It
 // also confirms the alloc-scoped values (.alloc_id, .session_name) resolved
 // to fakenomad's real values, and that no Nomad template expression in the
@@ -561,7 +561,7 @@ func TestVectorSessionStdoutSourceMatchesShippedCapture(t *testing.T) {
 }
 
 func TestParentJobSpecUsesConfiguredLogShipperArtifact(t *testing.T) {
-	const artifact = "/var/lib/nrt-p3-02/vector-http/vector-0.58.0-x86_64-unknown-linux-gnu.tar.gz"
+	const artifact = "/var/lib//vector-http/vector-0.58.0-x86_64-unknown-linux-gnu.tar.gz"
 	spec := parentJobSpec("default", "", "gc-sessions", logShipperConfig{
 		Sink:     "http://127.0.0.1:18081/ingest",
 		Artifact: artifact,

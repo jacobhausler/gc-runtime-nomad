@@ -35,8 +35,8 @@ func leakageClasses() []leakageClass {
 	return []leakageClass{
 		{
 			"bead identifier",
-			regexp.MustCompile(`\b(cr-[a-z0-9]+(\.[0-9]+)*|gcg--[a-z0-9]+|fnrt-[a-z0-9.]+|NRT-P[0-9]-[0-9]+)\b`),
-			"a ticket id in this estate's tracker; an outsider cannot resolve it, and several " +
+			regexp.MustCompile(`(?i)\b(cr-[a-z0-9]+(\.[0-9]+)*|gcg--[a-z0-9]+|fnrt-[a-z0-9.]+|nrt-[a-z0-9._-]+)\b`),
+			"a ticket id in this estate's tracker. The nrt- arm was WIDENED after an outside install review found 13 survivors the first pattern missed — it required NRT-P<n>-<n>, so lowercase nrt-p1-90, nrt-d3 and NRT-OBS-001 all slipped through, including into CONFORMANCE-RECEIPT.json, a SHIPPED artifact. A guard with a pattern narrower than the thing it guards reports clean and means nothing; an outsider cannot resolve it, and several " +
 				"sit inside error messages and doc claims as the only justification given",
 		},
 		{

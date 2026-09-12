@@ -160,7 +160,7 @@ func TestNewLifecycleReadsLogShipperArtifact(t *testing.T) {
 	t.Setenv(envAddr, srv.URL())
 	t.Setenv(envSidecarDir, t.TempDir())
 	t.Setenv(envLogSink, "http://127.0.0.1:18081/ingest")
-	const artifact = "/var/lib/nrt-p3-02/vector-http/vector.tar.gz"
+	const artifact = "/var/lib//vector-http/vector.tar.gz"
 	t.Setenv(envLogArtifact, artifact)
 
 	l, err := newLifecycle()

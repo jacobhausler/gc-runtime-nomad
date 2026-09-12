@@ -72,7 +72,7 @@ func ClassifyDeath(before, after AllocRecord, isRunningAfter bool) DeathClass {
 // HonestyVerdict is the result of checking the observation-honesty
 // split during a fault window: is-running/list-running must never flip to
 // a false "not running"/empty answer on mere API unavailability — they
-// answer last-known-good instead (NRT-OBS-001..004).
+// answer last-known-good instead.
 type HonestyVerdict struct {
 	// Honest is true iff the observed answer matched the last-known-good
 	// expectation rather than reporting a false negative.

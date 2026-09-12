@@ -85,7 +85,7 @@ if [ "$CASE_RC" -ne 0 ]; then
   tail -n 40 "$work/green.log" >&2
   fail=1
 fi
-if ! jq -e '(.schema == "nrt-p1-90/2")
+if ! jq -e '(.schema == "/2")
             and (.pack_commit | test("^[0-9a-f]{40}$"))
             and (.gc_commit == "0000000000000000000000000000000000000000")
             and (.gc_sha256 | test("^[0-9a-f]{64}$"))

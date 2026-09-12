@@ -369,7 +369,7 @@ func TestTmuxArgumentCapMakesFilePasteTheOnlyNudgeDelivery(t *testing.T) {
 	t.Cleanup(func() { _ = os.RemoveAll(sockDir) })
 	sock := filepath.Join(sockDir, "p.sock")
 
-	// The measured worker-local prompt size (ops/receipts/nrt-d3/
+	// The measured worker-local prompt size (ops/receipts//
 	// 2026-09-11-d3-cutover-landed-gate-unmet.md), newline terminated.
 	nudge := "HEADMARKER\n" + strings.Repeat("LINE\n", 3280) + "TAILMARKER-liv6ac\n"
 	nudgeFile := filepath.Join(dir, "nudge.txt")

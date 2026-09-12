@@ -195,6 +195,9 @@ apt_field() { # apt_field <index-file> <package> <field-with-colon> — one valu
 }
 
 cmd="${1:-help}"; shift || true
+# --help and -h are what people type, and rejecting them with "unknown command"
+# made the README's own claim false. Aliased rather than documented around.
+case "$cmd" in --help|-h|-help) cmd=help ;; esac
 DRY=0; RECEIPT=""; CITY=""; OUT_TAG=""; ARTIFACT=""; PUBLISHED=0
 for a in "$@"; do
   case "$a" in

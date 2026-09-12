@@ -181,9 +181,6 @@ func run(args []string, stdin io.Reader, stdout, stderr *os.File) int {
 		if skipVerifyRequested() {
 			fmt.Fprintln(stderr, tlsVerificationDisabledWarning)
 		}
-		if code := checkAllocListCapability(stderr); code != exitOK {
-			return code
-		}
 		// Where this pack's own diagnostics live. An operator who needs
 		// diagnostics.log needs the directory first, and that directory is a
 		// deployment choice carried in the supervisor's environment — which
@@ -201,6 +198,17 @@ func run(args []string, stdin io.Reader, stdout, stderr *os.File) int {
 			} else {
 				fmt.Fprintf(stderr, "diagnostics: %s (nothing recorded yet)\n", path)
 			}
+		}
+		// The allocation-read probe runs AFTER the diagnostics path is printed,
+		// and the order is load-bearing. It used to run before, so a FAIL here
+		// returned without ever printing where diagnostics.log lives — and that
+		// line is the only sanctioned way to learn GC_NOMAD_SIDECAR_DIR, which
+		// the shipped debug skill then tells the reader to go read. An outside
+		// SRE working a staged page hit the resulting circle in exactly the row
+		// that sends them there: the failure suppressed the address of the
+		// evidence about the failure.
+		if code := checkAllocListCapability(stderr); code != exitOK {
+			return code
 		}
 		surface := gcWorkerSurfaceForCheck(stderr)
 		reportGCRequirements(stderr, surface)

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -87,5 +89,52 @@ func TestCompatibilityDocStatesTheRegistryRequirement(t *testing.T) {
 	if registrylessImageWarning("gc-agent:1") == "" {
 		t.Error("COMPATIBILITY.md tells adopters check warns on a registry-less image, but the " +
 			"warning function returns nothing — the page would be promising a check that does not exist")
+	}
+}
+
+// TestCompatibilityDocDoesNotContradictPerRoleImages guards a self-contradiction
+// that an outside install review caught.
+//
+// COMPATIBILITY.md's known-limitations list claimed there was no per-lane image
+// override and that "a codex lane and a claude lane cannot coexist", while
+// README documented per-role images and the code implemented them. Of the two
+// possible errors, the stale LIMITATION is the expensive one: an adopter who
+// believes it stands up a second deployment they do not need.
+func TestCompatibilityDocDoesNotContradictPerRoleImages(t *testing.T) {
+	doc := compatibilityDocBody(t)
+	for _, stale := range []string{
+		"cannot\n   coexist on one deployment",
+		"There is no per-lane, per-provider or\n   per-agent override",
+	} {
+		if strings.Contains(doc, stale) {
+			t.Errorf("COMPATIBILITY.md still asserts there is no per-role image override:\n  %q\n"+
+				"The code supports it (sessionAgentImage) and README documents it. A stale "+
+				"limitation costs an adopter a second deployment they do not need.", stale)
+		}
+	}
+	// The live mechanism must still be there, or the retraction is the lie.
+	if got := sessionAgentImage(stageConfig{Env: map[string]string{envAgentImage: "r/x:1"}}); got != "r/x:1" {
+		t.Fatalf("sessionAgentImage = %q; COMPATIBILITY.md now says the limitation is RESOLVED, so "+
+			"the per-session read must exist", got)
+	}
+}
+
+// TestBuildImageHelpFlagWorks pins the README's own claim. The script rejected
+// --help with "unknown command" while the README said it "lists every verb".
+func TestBuildImageHelpFlagWorks(t *testing.T) {
+	body, err := os.ReadFile(filepath.Join("..", "toolchain", "build-image.sh"))
+	if err != nil {
+		t.Fatalf("reading build-image.sh: %v", err)
+	}
+	if !strings.Contains(string(body), "--help|-h") {
+		t.Error("build-image.sh does not accept --help/-h, but README claims " +
+			"`toolchain/build-image.sh --help` lists every verb")
+	}
+	readme, err := os.ReadFile(filepath.Join("..", "README.md"))
+	if err != nil {
+		t.Fatalf("reading README.md: %v", err)
+	}
+	if !strings.Contains(string(readme), "build-image.sh --help") {
+		t.Skip("README no longer claims --help; nothing to keep honest")
 	}
 }

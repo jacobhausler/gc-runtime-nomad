@@ -2,9 +2,9 @@ module github.com/gastownhall/gc-runtime-nomad
 
 go 1.25.9
 
-// fakenomad is this pack's own in-memory Nomad API fake (NRT-P1-02), used
+// fakenomad is this pack's own in-memory Nomad API fake, used
 // only by _test.go files (`gc runtime check` offline lifecycle round-trip,
-// NRT-P1-03). The production client uses the pinned Nomad API module below;
+//). The production client uses the pinned Nomad API module below;
 // the pack still keeps its zero-gascity-imports contract.
 require github.com/gastownhall/gc-runtime-nomad/fakenomad v0.0.0
 

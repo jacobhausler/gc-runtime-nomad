@@ -376,12 +376,17 @@ independently of the `gc` binary.
 These are measured, open, and tracked. They are listed here rather than
 discovered later.
 
-1. **One agent image per deployment.** `GC_NOMAD_AGENT_IMAGE` is read
-   once at startup and baked into the *parent* job spec, which every
-   dispatched child inherits. There is no per-lane, per-provider or
-   per-agent override, so **a codex lane and a claude lane cannot
-   coexist on one deployment of this runtime.** Tracked in the
-   maintainer's issue list; open.
+1. ~~**One agent image per deployment.**~~ **RESOLVED.** This said there
+   was no per-lane override, so a codex lane and a claude lane could not
+   coexist on one deployment. That is no longer true, and leaving the
+   claim here would have been the more expensive error: an adopter would
+   have stood up a second deployment they did not need. The pack reads
+   `GC_NOMAD_AGENT_IMAGE` from each session's own start payload
+   (`sessionAgentImage`), carries it as Nomad meta `gc_image`, and
+   interpolates it into the child job's image; empty means inherit the
+   deployment default. Set it in a provider's `runtime_env.nomad` and that
+   role gets its own toolchain while every other lane is untouched. See
+   README §"Per-role images".
 
 2. **amd64 only.** No arm64 path exists — the image build, the `gc`
    inside it, and the log-shipper binary are all x86_64. The placement

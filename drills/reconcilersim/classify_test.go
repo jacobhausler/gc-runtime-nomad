@@ -67,8 +67,8 @@ func TestClassifyDeath(t *testing.T) {
 	}
 }
 
-// TestCheckIsRunningHonesty exercises the observation-honesty split
-// (NRT-OBS-001..004): is-running must never flip to a false negative on
+// TestCheckIsRunningHonesty exercises the observation-honesty split:
+// is-running must never flip to a false negative on
 // mere API unavailability for a session last known running.
 func TestCheckIsRunningHonesty(t *testing.T) {
 	errUnavailable := errors.New("nomad: unavailable")

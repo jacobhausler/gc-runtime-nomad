@@ -341,7 +341,7 @@ log "receipt written to $out"
 [ "$json_stdout" = 1 ] || cat "$out"
 
 json="$(jq -cn \
-  --arg schema 'nrt-p1-90/2' \
+  --arg schema '/2' \
   --arg generated "$ts" \
   --arg pack_commit "$commit" \
   --arg gc_bin "${gc_path:-}" \
