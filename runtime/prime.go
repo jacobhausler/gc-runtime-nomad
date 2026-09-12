@@ -395,11 +395,20 @@ func (l *lifecycle) startupPrimeDetached(ctx context.Context, sessionName string
 		// reach it is not "the box is not ready yet" — it means the session
 		// went away, or this exec is looking at a different tmux socket than
 		// the launch used.
-		return fmt.Errorf("spawning prime window for %q: tmux new-window exited %d: stdout=%s stderr=%s "+
-			"(the launch of this session was already confirmed, so tmux was reachable moments ago — "+
-			"a socket path difference between the launch env and this exec, or a server that exited, "+
-			"are the two shapes that produce this)",
-			sessionName, exitCode, execExcerpt(out), execExcerpt(boxErr))
+		// The old message named the two shapes and left the operator to
+		// pick. When tmux itself says the server is gone, the answer is
+		// knowable from inside the box, so ask instead of offering a choice.
+		cause := ""
+		if paneGone(string(boxErr)) {
+			cause = l.diagnosePaneGone(ctx, allocID)
+		}
+		if cause == "" {
+			cause = " (the launch of this session was already confirmed, so tmux was reachable moments " +
+				"ago — a socket path difference between the launch env and this exec, or a server that " +
+				"exited, are the two shapes that produce this)"
+		}
+		return fmt.Errorf("spawning prime window for %q: tmux new-window exited %d: stdout=%s stderr=%s%s",
+			sessionName, exitCode, execExcerpt(out), execExcerpt(boxErr), cause)
 	}
 	l.logDecision("startup-prime session=%s window=spawned", sessionName)
 	return nil
@@ -483,4 +492,73 @@ func (l *lifecycle) syncPromptedMarker(ctx context.Context, sessionName string) 
 	if err := l.sidecar.save(*b); err != nil {
 		l.logDecision("startup-prime session=%s marker sync could not save: %v", sessionName, err)
 	}
+}
+
+// paneGoneMarkers are what tmux says when the server it is asked to reach is
+// not there. Both spellings occur: the socket file is absent, or the socket is
+// present and nothing is listening.
+var paneGoneMarkers = []string{"no server running", "error connecting to"}
+
+// paneGone reports whether tmux's own stderr says the server is not there.
+func paneGone(stderr string) bool {
+	s := strings.ToLower(stderr)
+	for _, m := range paneGoneMarkers {
+		if strings.Contains(s, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// diagnosePaneGone answers the question the prime-window failure raises and
+// could not previously answer: the launch of this session was CONFIRMED, so
+// tmux was reachable moments ago — where did the server go?
+//
+// A tmux server exits when its last session ends, and that session ends when
+// its pane's command exits. So "no server running" a moment after a confirmed
+// launch is not a tmux fault, it is the AGENT COMMAND having died immediately,
+// and the layer that knows is the box's own agent-capture record. The pack
+// already ships alloc/logs/agent.exit on egress — an "exit= started= ended=
+// pane= argv0=" line carrying the command name and timestamps but never any env
+// value, which is what makes it safe to quote — and until now never read it for
+// diagnosis. The operator got a socket path and no cause.
+//
+// An absent record is itself an answer and is reported as one: in the prebaked
+// image shape the capture block is the IMAGE's job, and an image that does not
+// write it leaves this failure permanently unexplainable. Saying so is better
+// than silence, because it names what to fix in the image rather than sending
+// someone back to tmux.
+func (l *lifecycle) diagnosePaneGone(ctx context.Context, allocID string) string {
+	if allocID == "" {
+		return ""
+	}
+	exitRec, exitErr := l.client.readAllocFile(ctx, allocID, "alloc/logs/agent.exit")
+	if exitErr == nil && len(strings.TrimSpace(string(exitRec))) > 0 {
+		out := " THE PANE'S COMMAND EXITED — a tmux server exits with its last session, and that " +
+			"session ends when its pane's command does, so the server being gone IS the agent having " +
+			"died. The box's own exit record says: " + execExcerpt([]byte(lastLine(string(exitRec))))
+		if errRec, err := l.client.readAllocFile(ctx, allocID, "alloc/logs/agent.stderr"); err == nil {
+			if tail := strings.TrimSpace(lastLine(string(errRec))); tail != "" {
+				out += " Its stderr ended: " + execExcerpt([]byte(tail))
+			}
+		}
+		return out
+	}
+	return " The pane's command has exited (a tmux server exits with its last session), but this box " +
+		"wrote NO agent-capture record at alloc/logs/agent.exit, so why it exited cannot be recovered " +
+		"from here. In the prebaked-image shape that record is the IMAGE's responsibility: an image " +
+		"that does not write it makes this exact failure permanently unexplainable. Fix that in the " +
+		"image rather than looking further at tmux."
+}
+
+// lastLine returns the final non-empty line, which is where an exit record and
+// a dying command's last words both live.
+func lastLine(s string) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.TrimSpace(lines[i]) != "" {
+			return lines[i]
+		}
+	}
+	return ""
 }
