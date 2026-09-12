@@ -16,6 +16,8 @@ owner-unit: runtime-nomad
 - Co-maintainers: Jacob Hausler (fork owner) and Fable (Westlands executive).
 - Scope: one session = one child job under a single parameterized parent job; lifecycle `provision`/launch/`exec`/`stop` plus `is-running`/`list-running`, all over the Nomad API.
 
+- Compatibility and supported matrix: `COMPATIBILITY.md` (gc lineage, Nomad, client arch/OS, agent image contract, build toolchain, known limitations). Like the config table, it lives in one place and is not copied here.
+
 ## Interfaces
 
 - Ops: `protocol` (RPP v0 handshake), `start`, `stop`, `is-running`, `list-running [prefix]`, `provision`, `relaunch`, `exec`, `nudge`, `peek`, `interrupt`, `send-keys`, `clear-scrollback`, `check`. Exit codes: 0 = success, 1 = error, 2 = unknown op — the RPP forward-compat signal callers treat as no-op success; `exec` is the exception (it exits with the remote command's own code).

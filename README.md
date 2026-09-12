@@ -26,6 +26,17 @@ JSONL and captured stdout to that HTTP JSON-lines sink and exposing
 vector's own metrics via `prometheus_exporter` on a group-local port —
 unset, this task is never added at all.
 
+## Before you install
+
+**[`COMPATIBILITY.md`](COMPATIBILITY.md) first.** It states what this pack
+needs — Gas City, Nomad, clients, image, host, toolchain — and what it does
+not support yet, with the measurement behind each claim.
+
+The one line worth reading here: this pack requires a `gc` built from the
+Westlands EDGE lineage and **does not run on a released upstream `gc`**. When
+that dependency is missing the pack does not refuse — it goes dark. See
+`COMPATIBILITY.md` and `docs/PIN-DEPENDENCIES.md`.
+
 ## Layout
 
 ```
