@@ -403,6 +403,25 @@ or allowlist table fails in a way that is indistinguishable from a broken
 runtime. The runtime cannot tell you the difference, because from inside the
 alloc the two look identical.
 
+## Debugging
+
+The pack ships its own diagnostic skill at
+[`skills/gc-nomad-debug/SKILL.md`](skills/gc-nomad-debug/SKILL.md). `gc`
+discovers a pack's skills by convention from `<packDir>/skills/`, so it needs
+no declaration and arrives with the pack — an adopter gets the diagnosis, not
+just the runtime.
+
+It exists because the failure this runtime produces is almost never a crash:
+it is a box that comes up, looks healthy, and does nothing. The first
+instruction is `gc-runtime-nomad check`.
+
+Its checkable claims are guarded by tests (`runtime/skill_doc_test.go`): the
+fatal placement rules it names are read off the live jobspec, and the probe and
+entry point off the runtime. A skill is documentation that gets *followed*
+rather than read, so a line that has quietly become false is worse than one
+that is missing — a line in this pack's estate-side sibling was falsified by a
+change in this very repo and went unnoticed until it was graded by hand.
+
 ## Conformance
 
 ```bash

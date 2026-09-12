@@ -47,6 +47,16 @@ the documented path was actually followed and the symptom persists.
    runtime token and can never repair parent drift. A missing or drifted parent
    is a re-registration condition, not a reason to widen the runtime token.
 
+5. **The `gc` driving the pack is a dependency, and one half of it now fails
+   closed.** A seat inside an allocation claims work through the remote-worker
+   API. Driven by a `gc` without that family it cannot claim at all: the box
+   comes up, the agent launches, the pane looks healthy, and the seat drains
+   `no_work` while the city lists its work as ready. The pack refuses to mint a
+   box on such a `gc` and names the family
+   (`remote-worker-lifecycle`) — so `gc-runtime-nomad check` exiting nonzero on
+   this is an answer, not an obstacle. The refusal covers ONE dependency;
+   `docs/PIN-DEPENDENCIES.md` tiers the rest, and the others still go dark.
+
 Exit-code contract: lifecycle ops return 0 success, 1 error, 2 unknown operation
 (the RPP forward-compatibility signal callers treat as no-op success). `exec` is
 the exception - it returns the remote command's own exit code.
@@ -60,6 +70,7 @@ the exception - it returns the remote command's own exit code.
 | Child job exists, never places, no error | placement keys and scheduler events | A placement selection with no eligible client stays pending forever; look at placement facts, not dispatch or liveness |
 | `provision` succeeded but `is-running` is false | launched marker, then allocation state | Provisioned-never-launched reads false by contract; relaunch into the same alloc, do not dispatch a second child |
 | Agent died inside a live box | in-box probe result (`tmux has-session`, `kill -0 <pane pid>`) | Agent death, not box death: the allocation stays non-terminal and `ClientStatus` never shows it |
+| Box up, nothing running in it | the PROCESS LIST (`ps -eo comm`), never the pane's foreground command | a pane body that wraps the command keeps the shell in front while the agent runs beneath it, so `pane_current_command` reads `sh`/`bash` on healthy seats too. An empty box is `sleep` + a tmux server + a shell and **nothing else**. This requires `ps` in the image: without it the probe cannot run, and the runtime now refuses the launch and says so rather than reporting health it cannot measure |
 | Allocation is terminal and not replaced | allocation events | Box/task-supervisor death is a different case from agent death; a terminal alloc must not be replaced |
 | Session names do not appear | `list-running [prefix]` exit code | It exits 1 on any lookup error rather than printing a partial list; a nonzero exit is a transport fault, not an empty fleet |
 | Nothing inside the box resolves a name | `GC_NOMAD_DNS_SERVERS` | Unset means no resolver stanza, so the allocation inherits the client host's resolver file - often a loopback stub unreachable from the allocation namespace. Every downstream failure then looks like an agent or network defect |
@@ -103,6 +114,22 @@ Cluster side, read-only, correlated by child job and allocation id:
 `nomad job status`, `nomad job allocations`, `nomad alloc status`,
 `nomad alloc logs`, `nomad evaluation status`, `nomad node status`.
 
+**The sidecar binding is the only layer that can tell two faults apart.** Law 3
+names it as one of the five signals; this is what is in it. Under
+`GC_NOMAD_SIDECAR_DIR`, per session, it holds `ChildJobID`, `Launched`,
+`AgentPID` and `StagePending`. Every other layer is inferring:
+
+- `StagePending` set with no `Launched` → **provisioned but never launched.**
+  The allocation can be running and healthy; nothing was ever started in it.
+- `Launched` set with a dead `AgentPID` → **launched, then the agent died**
+  inside a live allocation. `ClientStatus` will never show this, because the
+  box is fine.
+
+`is-running` answers `false` for BOTH, which is why reading the binding is the
+step that splits them. Note also that a deleted binding strands a child job:
+`stop` has no orphan reaper, so a scratch sidecar directory removed by hand
+leaves the dispatch behind.
+
 Write configuration down as **names and pointers, never values**: key names, the
 parent fingerprint, pack and Nomad versions, the fact that a TLS or custody
 check passed, and custody-file paths. Allocation and child-job ids only when
@@ -129,10 +156,26 @@ stop when one of them dies.
 3. **Environment probe before code.** Every row of the key table has a failure
    mode that looks like a defect downstream (image, resolvers, egress, target
    naming, adopt age). Read the environment the supervisor actually started
-   with before reading source.
-4. **Read-only cluster inspection** is bounded by default: status, logs,
+   with before reading source. Two entries in that environment are worth
+   naming here because neither is a documented key:
+   - `NOMAD_SKIP_VERIFY` is read by the Nomad SDK, not by this pack, and it
+     disables certificate verification for the API **and** for the alloc-exec
+     channel every staged secret travels over. The runtime warns on it at
+     every client construction and in `check`.
+   - `GC_NOMAD_SKIP_GC_CAPABILITY_GATE` disables law 5's refusal. It exists for
+     the offline ladder. Set in a real deployment it restores the dark lane,
+     and the runtime says so on every op.
+4. **Placement is two fatal rules, not one.** The parent job constrains
+   `${attr.kernel.name} = linux` AND `${attr.cpu.arch} = amd64`. Both are
+   deliberate: bridge/CNI is Linux-only, and everything this pack can run is
+   amd64 by construction — the image build refuses a non-x86-64 `gc`, and the
+   log-shipper's binary is pinned to x86_64. A cluster whose only free clients
+   are arm64 places nothing and reports a scheduler outcome, not a pack error.
+   Before the arch rule existed, such a client placed the group and ran an
+   agent whose logs silently never shipped.
+5. **Read-only cluster inspection** is bounded by default: status, logs,
    evaluations, node state. Nothing here mutates the estate.
-5. **A live fault drill is not a debugging step.** It is a gated activity with
+6. **A live fault drill is not a debugging step.** It is a gated activity with
    its own owner bead, isolated target, snapshot, credential custody, and
    rollback path. Absent all of those, stop and escalate instead.
 
