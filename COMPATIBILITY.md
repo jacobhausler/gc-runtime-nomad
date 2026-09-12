@@ -240,9 +240,15 @@ The `gc-runtime-nomad` executable runs wherever `gc` runs — it is a
 client of the Nomad HTTP API and needs no Nomad agent locally. It is
 exercised on **macOS (darwin/arm64)** and **Linux**.
 
-The test suite runs on both. Note that only the *conformance and unit*
-suites are portable; they run offline against this pack's own in-memory
-Nomad fake (`fakenomad/`), never against a live cluster.
+The test suite runs green on both, with no expected failures: all
+three modules — `runtime/`, `fakenomad/` and `drills/` — pass `gofmt`,
+`go vet` and `go test`. If you see a failure, it is a defect, not a
+known quirk of your machine; `receipt.sh` runs every module and fails if
+the tree ever grows one it does not run.
+
+Note that only the *conformance and unit* suites are portable; they run
+offline against this pack's own in-memory Nomad fake (`fakenomad/`),
+never against a live cluster.
 
 ---
 

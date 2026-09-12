@@ -177,7 +177,39 @@ else
   l0l2_fakenomad=FAIL
 fi
 
-if [ "$l0l2_runtime" = PASS ] && [ "$l0l2_fakenomad" = PASS ]; then
+log "receipt: L0-L2 — drills module (go vet + go test)"
+if run_step "$tmp/drills.log" bash -c 'cd drills && go vet ./... && go test -count=1 ./...'; then
+  l0l2_drills=PASS
+else
+  l0l2_drills=FAIL
+fi
+
+# EVERY MODULE IN THE TREE MUST HAVE A LEG ABOVE.
+#
+# The drills module sat broken from v1.0.7 until 2026-09-12 -- GC_NOMAD_AGENT_IMAGE
+# became required and the harness never set it, so every drill failed closed --
+# and it stayed broken because this receipt ran two modules out of three. A
+# suite that is smaller than the tree it certifies will always eventually
+# certify something it never ran, so the mismatch is now itself a failure.
+log "receipt: module coverage — every go.mod has a leg"
+covered="runtime fakenomad drills"
+uncovered=""
+for modfile in */go.mod; do
+  [ -e "$modfile" ] || continue
+  mod=${modfile%/go.mod}
+  case " $covered " in
+    *" $mod "*) ;;
+    *) uncovered="$uncovered $mod" ;;
+  esac
+done
+if [ -n "$uncovered" ]; then
+  log "receipt: FAIL — module(s) with no receipt leg:$uncovered"
+  status_modcover=FAIL
+else
+  status_modcover=PASS
+fi
+
+if [ "$l0l2_runtime" = PASS ] && [ "$l0l2_fakenomad" = PASS ] && [ "$l0l2_drills" = PASS ] && [ "$status_modcover" = PASS ]; then
   status_l0l2=PASS
 else
   status_l0l2=FAIL
@@ -299,7 +331,7 @@ out="$here/CONFORMANCE-RECEIPT.md"
   echo "| golden suite | $status_golden | \`gc runtime conformance\` — ${golden_line:-did not run} |"
   echo "| retry idempotency | $status_retry | provision/start re-drive rung — ${retry_line:-did not run} |"
   echo "| env probes | $status_env | \`go test -run TestM3StagingReceiptWorkspaceProbe ./runtime\` |"
-  echo "| L0-L2 | $status_l0l2 | \`go vet ./... && go test ./...\` — runtime + fakenomad modules |"
+  echo "| L0-L2 | $status_l0l2 | \`go vet ./... && go test ./...\` — runtime + fakenomad + drills modules, plus a check that every go.mod has a leg |"
   echo "| secrets-grep | $status_secrets | \`go test -run TestM3StagingReceiptNoCanaryLeak ./runtime\` |"
   echo "| provenance | $status_provenance | \`gc version --json\` + sha256 of the resolved GC_BIN |"
 } >"$out"
