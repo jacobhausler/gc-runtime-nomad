@@ -149,8 +149,28 @@ requires, if you want to reason about an older cluster yourself:
 | `X-Nomad-Index` on write responses | the pack tolerates a proxy that strips it, but native Nomad supplies it |
 | namespaces | `GC_NOMAD_NAMESPACE`, defaulting to `default` (`newClient`, runtime/client.go) — the pack creates no namespace, so if you set one it must already exist |
 
-**ACLs.** A token is optional (`GC_NOMAD_TOKEN`, sent as
-`X-Nomad-Token`). If your cluster has ACLs on, the pack expects **two**
+**ACLs.** A token is optional ONLY if your cluster has ACLs off
+(`GC_NOMAD_TOKEN`, sent as `X-Nomad-Token`). With ACLs on it is required,
+and its absence is the most expensive misconfiguration this pack has:
+
+> A deployment ran with no `GC_NOMAD_TOKEN` reaching the runtime. Every op
+> that MINTS a box kept working, so nothing looked broken. `is-running` has
+> no evidence except the allocation list, could not read it, and so answered
+> last-known-good on every call — which means **every session reported
+> healthy**. A pool whose seats all report healthy sees no starvation and
+> mints no replacement, so routed work sat unclaimed against a lane that
+> looked alive. It was invisible until the warnings were made durable.
+
+`gc-runtime-nomad check` now fails outright when the credential cannot list
+allocations, precisely so this cannot be discovered the slow way. Run it
+before you trust a deployment. The failure names the capability you need:
+read access to the job and allocation endpoints in your namespace.
+
+The token is read from the environment of the process running this pack —
+**the supervisor's environment**, not your interactive shell's. A token you
+can see in your terminal is not a token the runtime has.
+
+If your cluster has ACLs on, the pack expects **two**
 tokens, not one: a management token holding `submit-job`, used exactly
 once to register the parent job, and a narrowed runtime token used for
 every session-path op (dispatch, launch, peek, stop, is-running,
@@ -163,6 +183,17 @@ running on the wrong parent.
 Vault integration, no Consul integration, and no declared workload
 identity. Nomad's default workload identity is fail-closed and the
 design keeps it that way on purpose.
+
+**Node assumptions, stated so you can check them against your fleet.**
+
+| assumption | detail |
+|---|---|
+| CPU architecture | `amd64` only, enforced as a hard constraint on `${attr.cpu.arch}`. There is no arm64 path; on an all-arm64 fleet every dispatch stays pending with a constraint failure, and the pack names that rather than waiting silently. |
+| task driver | `docker` for the session task. The session agent task IS a docker task and there is no other session shape to fall back to, so a fleet without the docker driver cannot run this pack at all. |
+| second driver | `exec` is additionally required when log shipping is enabled. |
+| GPUs | **not brokered, and not required.** The pack declares no `device` stanza and asks for no GPU. It has been exercised on a fleet with **no `nomad-device-nvidia` plugin installed**, so a GPU-bearing node is scheduled as an ordinary node and nothing in a session jobspec requests, reserves or fences a GPU. If your agents need a GPU, that is work this pack does not do for you: add the device plugin and the stanza yourself, and note that nothing here will stop two sessions landing on one card. |
+| memory | sized by the deployment. An under-sized task is OOM-killed by the kernel, and the pack names OOM as a sizing fault rather than a start fault — but it cannot size it for you. |
+| networking | bridge mode. An allocation cannot reach the supervisor's loopback listeners, which is why a reachable city endpoint is a separate requirement rather than an inherited one. |
 
 **Priority.** The parent job registers at priority 40, below a typical
 system job. This is a documented starting point for a lab cluster with
