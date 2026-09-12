@@ -41,13 +41,26 @@ func TestSkillNamesEveryFatalPlacementRule(t *testing.T) {
 }
 
 // TestSkillNamesTheBindingFields: layer 6 is the only layer holding these, and
-// the skill says so by name. If the binding grows or loses a field the skill
-// stops describing the instrument it points at.
+// the skill says so. If the binding grows or loses one the skill stops
+// describing the instrument it points at.
+//
+// It asserts the ON-DISK keys, and that correction is the point. This guard
+// used to require the Go field names — ChildJobID, StagePending — which is what
+// the skill then told a reader to grep for. Those strings do not appear in the
+// file: the JSON tags are snake_case. An outside SRE working a staged 3am page
+// stopped dead there, and so had I, twice. A guard that pins the wrong spelling
+// does not protect a runbook, it certifies it.
+//
+// TestSkillNamesTheRealBindingKeys (skill_binding_recipe_test.go) derives the
+// same keys by MARSHALLING a binding, so the doc is checked against the
+// serialiser rather than against this list. This test keeps the coverage
+// question — does the skill still describe every field layer 6 reads — while
+// that one keeps the spelling honest.
 func TestSkillNamesTheBindingFields(t *testing.T) {
 	doc := readSkillDoc(t)
-	for _, field := range []string{"ChildJobID", "Launched", "AgentPID", "StagePending"} {
-		if !strings.Contains(doc, field) {
-			t.Errorf("%s does not name the binding field %q that layer 6 reads", skillDoc, field)
+	for _, key := range []string{"child_job_id", "launched", "agent_pid", "stage_pending"} {
+		if !strings.Contains(doc, key) {
+			t.Errorf("%s does not name the binding key %q that layer 6 reads", skillDoc, key)
 		}
 	}
 }
