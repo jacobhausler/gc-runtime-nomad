@@ -456,7 +456,21 @@ func (l *lifecycle) opProvision(ctx context.Context, sessionName string) error {
 // returns — staging does not wait for launch, since a provisioned-but-not-
 // launched box already answers exec and the agent bootstrap command started
 // at launch time expects its workspace and secrets to already be in place.
+// warnDeclaredSecrets reports declared-but-absent secret keys once per session
+// op, independent of whether anything is staged.
+//
+// It sits here rather than on the staging path because staging is CONDITIONAL:
+// stage() runs only when there is something to materialize, and a session
+// whose only declared keys are all missing has nothing — so the warning was
+// silent in exactly the case it exists for. Found by asking what this fix
+// would look like if it had silently failed.
+func (l *lifecycle) warnDeclaredSecrets(sessionName string, cfg stageConfig) {
+	_, _, absent := mergeExtraSecretEnv(cfg.Env, extraSecretKeys)
+	warnAbsentSecretKeys(os.Stderr, sessionName, absent)
+}
+
 func (l *lifecycle) opProvisionWithConfig(ctx context.Context, sessionName string, cfg stageConfig) error {
+	l.warnDeclaredSecrets(sessionName, cfg)
 	unlock, err := l.lockSession(ctx, sessionName)
 	if err != nil {
 		return err
@@ -604,6 +618,7 @@ func (l *lifecycle) opStart(ctx context.Context, sessionName string) error {
 // launch execs finds its workspace and secrets already in place. cfg.Env's argvSafe subset also rides launch's tmux
 // argv (buildLaunchCommandForPane) — never the secrets dir.
 func (l *lifecycle) opStartWithConfig(ctx context.Context, sessionName string, cfg stageConfig) error {
+	l.warnDeclaredSecrets(sessionName, cfg)
 	unlock, err := l.lockSession(ctx, sessionName)
 	if err != nil {
 		return err
@@ -1967,8 +1982,13 @@ func (l *lifecycle) stage(ctx context.Context, sessionName string, cfg stageConf
 		}
 	}
 
-	secretEnv, extraKeys, absentSecrets := mergeExtraSecretEnv(cfg.Env, extraSecretKeys)
-	warnAbsentSecretKeys(os.Stderr, sessionName, absentSecrets)
+	// The declared-but-absent report does NOT live here. stage() runs only when
+	// stagesAnything() says there is something to materialize, and a session
+	// whose ONLY declared secret keys are all absent stages nothing — measured:
+	// stagesAnything is false for an empty cfg with one absent declaration. So
+	// attaching the warning here silenced it in precisely the case that needs
+	// it. It is reported once per session op instead, in warnDeclaredSecrets.
+	secretEnv, extraKeys, _ := mergeExtraSecretEnv(cfg.Env, extraSecretKeys)
 	secretEnv = stripLocalCityStoreEnv(secretEnv)
 	secretEnv = mergeLaunchOptionEnv(secretEnv, cfg.Command)
 

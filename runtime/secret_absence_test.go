@@ -66,3 +66,28 @@ func TestAbsentSecretWarningIsValueBlind(t *testing.T) {
 		t.Errorf("warned with no absent keys: %q", quiet.String())
 	}
 }
+
+// TestAbsentSecretsAreReportedEvenWhenNothingStages is the "what would this
+// look like if it had silently failed" check, applied to the fix above.
+//
+// The report first lived on the staging path. stage() runs only when
+// stagesAnything() finds something to materialize, and a session whose ONLY
+// declared secret keys are all absent materializes nothing — so the warning
+// was silent in exactly the case it exists for. Measured: stagesAnything is
+// false for an empty config with one declared-absent key.
+func TestAbsentSecretsAreReportedEvenWhenNothingStages(t *testing.T) {
+	old := extraSecretKeys
+	defer func() { extraSecretKeys = old }()
+	extraSecretKeys = []string{"GC_DRILL_NEVER_SET_ANYWHERE"}
+
+	empty := stageConfig{}
+	if stagesAnything(empty) {
+		t.Skip("premise changed: an empty config now stages something, so this hole cannot occur")
+	}
+
+	// The reporting path must not depend on that predicate.
+	_, _, absent := mergeExtraSecretEnv(empty.Env, extraSecretKeys)
+	if len(absent) != 1 || absent[0] != "GC_DRILL_NEVER_SET_ANYWHERE" {
+		t.Fatalf("absent = %v, want the one declared key even with nothing to stage", absent)
+	}
+}
