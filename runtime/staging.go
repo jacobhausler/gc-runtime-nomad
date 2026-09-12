@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -362,6 +363,27 @@ const (
 	envPrimeLoadingMarker = "GC_PRIME_LOADING_MARKER"
 	envPrimeBusyMarker    = "GC_PRIME_BUSY_MARKER"
 
+	// The readiness pair, by the same argument and for a sharper reason.
+	//
+	// A provider can run a DIFFERENT INTERACTION MODE depending on where its
+	// session runs. Measured case (cr-8eagyh): one estate's codex provider runs
+	// `codex exec` locally — non-interactive, driven by argv, no prompt ever
+	// printed — and the same provider under this runtime runs the interactive
+	// TUI, which must be primed by typing into a pane and therefore needs the
+	// prompt string to wait for. The provider's own ready_prompt_prefix cannot
+	// express both: set for the TUI it makes the local exec lane wait forever
+	// for a prompt that never appears, and unset it makes the box type into a
+	// TUI that is not ready.
+	//
+	// That forced a WRAPPER PROVIDER — a second provider block whose only job
+	// was to restate one provider's facts in box shape — which is exactly what
+	// "any lane onboards by naming its runtime" is supposed to remove. These
+	// keys let the per-runtime half ride [providers.<name>.runtime_env.<runtime>]
+	// or [session.runtime_env.<runtime>] instead, with the wire value as the
+	// default, so an existing deployment is unchanged.
+	envPrimeReadyPrefix  = "GC_PRIME_READY_PREFIX"
+	envPrimeReadyDelayMs = "GC_PRIME_READY_DELAY_MS"
+
 	defaultLoadingMarker = "loading"
 	defaultBusyMarker    = "esc to interrupt"
 )
@@ -382,6 +404,33 @@ func (c stageConfig) busyMarker() string {
 		return v
 	}
 	return defaultBusyMarker
+}
+
+// readyPromptPrefix is the prompt this pane must show before it is safe to
+// type. The session env wins over the launch wire, so a provider that runs a
+// different interaction mode here than it does locally can say so without a
+// wrapper provider; absent the override the wire value is used unchanged.
+func (c stageConfig) readyPromptPrefix() string {
+	if v := strings.TrimSpace(c.Env[envPrimeReadyPrefix]); v != "" {
+		return v
+	}
+	return c.ReadyPromptPrefix
+}
+
+// readyDelayMs is the post-ready settle. Same precedence as the prefix. A
+// value that is not a non-negative integer is ignored rather than guessed at:
+// a malformed override must not silently become zero, which would type into a
+// TUI the instant it claims readiness.
+func (c stageConfig) readyDelayMs() int {
+	raw := strings.TrimSpace(c.Env[envPrimeReadyDelayMs])
+	if raw == "" {
+		return c.ReadyDelayMs
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		return c.ReadyDelayMs
+	}
+	return n
 }
 
 // unshellQuote decodes one single-quoted shell word back to its value — the

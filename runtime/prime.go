@@ -304,6 +304,14 @@ func readyDelayMs(wireValue int) int {
 	return primeDefaultReadyDelayMs
 }
 
+// primeFilesFor is the one place a stageConfig becomes prime files. It exists
+// so the WIRING is testable: the accessors below can be perfectly correct and
+// simply not called, and a test of the accessors alone passes either way —
+// verified by reverting this call and watching that test stay green.
+func primeFilesFor(text string, cfg stageConfig) []stageFile {
+	return buildPrimeFiles(text, cfg.readyPromptPrefix(), cfg.loadingMarker(), cfg.busyMarker(), cfg.readyDelayMs())
+}
+
 func buildPrimeFiles(text, readyPromptPrefix, loadingMarker, busyMarker string, readyDelayMsValue int) []stageFile {
 	return []stageFile{
 		{Path: primeScriptFile, Content: []byte(primeScript), Mode: 0o755},
@@ -347,7 +355,7 @@ func (l *lifecycle) startupPrimeDetached(ctx context.Context, sessionName string
 		return nil // already running, or finished - syncPromptedMarker will catch that
 	}
 
-	files := buildPrimeFiles(text, cfg.ReadyPromptPrefix, cfg.loadingMarker(), cfg.busyMarker(), cfg.ReadyDelayMs)
+	files := primeFilesFor(text, cfg)
 	data, err := buildTar(files)
 	if err != nil {
 		return fmt.Errorf("building prime script for %q: %w", sessionName, err)
