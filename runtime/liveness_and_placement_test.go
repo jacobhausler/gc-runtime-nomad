@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 // T5: list-running must stop naming a seat whose box is gone for good.
@@ -101,6 +102,23 @@ func TestListRunningKeepsASeatWhenTheAllocReadFails(t *testing.T) {
 // reading exec frame: EOF". A verb whose success means "I sent a request" is
 // the wrong contract for one the caller uses to mean "the box exists".
 func TestProvisionFailsAndNamesTheImageWhenNothingIsPlaced(t *testing.T) {
+	// SHRINK THE PLACEMENT BUDGET. This test's whole job is to wait out the
+	// placement timeout and check what the pack SAYS when nothing places, so
+	// at production values it ran for 30.09 s — allocPlacementTimeout exactly.
+	// That is the defect that made the shipper-flush test fail at 15.29 s under
+	// load, four times larger: a test whose runtime IS a production timeout
+	// will eventually exceed it on a busy host and report a code defect that is
+	// a fact about the machine. It also cost every run of this suite half a
+	// minute.
+	//
+	// The message under test does not depend on how long the wait was, only on
+	// it having expired.
+	prevTimeout, prevPoll := allocPlacementTimeout, allocPlacementPoll
+	allocPlacementTimeout, allocPlacementPoll = 2*time.Second, 50*time.Millisecond
+	t.Cleanup(func() {
+		allocPlacementTimeout, allocPlacementPoll = prevTimeout, prevPoll
+	})
+
 	l, srv := newTestLifecycle(t)
 	ctx := context.Background()
 	const session = "sess-provision-unplaced"

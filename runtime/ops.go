@@ -47,11 +47,27 @@ const (
 	// when it can happen at all; when it cannot — no eligible node, an image
 	// the node has no way to pull — waiting longer does not change the answer,
 	// it only delays a report the operator needs. Short on purpose.
-	allocPlacementTimeout = 30 * time.Second
-	allocPlacementPoll    = 1 * time.Second
+	allocPlacementTimeoutDefault = 30 * time.Second
+	allocPlacementPollDefault    = 1 * time.Second
 
 	allocTaskRunningTimeout = 180 * time.Second
 	allocTaskRunningPoll    = 500 * time.Millisecond
+)
+
+// Overridable so a test does not wait out the production placement budget.
+//
+// FOUND BY MEASURING THE SUITE'S OWN PER-TEST DURATIONS rather than by waiting
+// for it to break: TestProvisionFailsAndNamesTheImageWhenNothingIsPlaced took
+// 30.09 s — allocPlacementTimeout exactly — which is the same defect that had
+// just made the shipper-flush test fail at 15.29 s under load, four times
+// larger and still latent. A test whose runtime IS a production timeout will
+// eventually exceed it on a busy host and report a defect in the code that is
+// a fact about the machine.
+//
+// Production values are unchanged; the test restores them.
+var (
+	allocPlacementTimeout = allocPlacementTimeoutDefault
+	allocPlacementPoll    = allocPlacementPollDefault
 )
 
 // allocStateRunning is the Nomad task state that means the task process is up
