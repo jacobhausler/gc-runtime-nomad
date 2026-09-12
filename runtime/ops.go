@@ -2513,6 +2513,54 @@ func (l *lifecycle) opStop(ctx context.Context, sessionName string) error {
 	return l.sidecar.remove(sessionName)
 }
 
+// isForbiddenErr reports a 403 from EITHER path the client uses.
+//
+// The pack reaches Nomad two ways: its own raw transport, which mints
+// errJobForbidden, and the vendored SDK, whose 403 arrives as a plain error
+// reading "Unexpected response code: 403". Checking only the sentinel missed
+// the SDK path — measured against the live cluster, where `is-running` with no
+// token warned that its answer was unknown but never said the cause was
+// durable, because the 403 had come through the SDK. The text match is
+// deliberate: the SDK exposes no typed status error to assert on, and a
+// missed durable case is exactly the permanently-green-fleet this warning
+// exists to prevent.
+func isForbiddenErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, errJobForbidden) {
+		return true
+	}
+	return strings.Contains(err.Error(), "response code: 403")
+}
+
+// warnUnknownLiveness says out loud that a `true` was UNKNOWN rather than
+// observed.
+//
+// is-running deliberately answers last-known-good on a transport fault: an
+// unreachable API is not evidence a session died, and fabricating a `false`
+// would have the controller reap live work. That is the right answer and it
+// stays. What was wrong is that it was SILENT, with no counter, no marker and
+// no decay — so a revoked or expired token, which fails every call the same
+// way forever, produced a permanently green fleet. Every session reports
+// running, exit 0, nothing on stderr, indefinitely.
+//
+// An auth failure gets its own sentence because it is the durable case. A
+// dial error may be a blip; a 403 will answer identically on every call until
+// somebody changes a credential, so a fleet that looks healthy behind one is
+// not briefly stale, it is permanently wrong.
+func warnUnknownLiveness(w io.Writer, sessionName, what string, err error) {
+	durable := ""
+	if isForbiddenErr(err) {
+		durable = " This is an AUTHORISATION failure, not a blip: it will answer the same way on " +
+			"every call until a credential changes, so every session will keep reporting healthy " +
+			"until then."
+	}
+	fmt.Fprintf(w, "gc-runtime-nomad: warning: session %q reports running because its state is "+
+		"UNKNOWN, not because it was observed alive — %s failed: %v.%s\n",
+		sessionName, what, err, durable) //nolint:errcheck
+}
+
 // probeAgentAlive execs an in-box liveness check into allocID: the tmux
 // session launch created (tmuxSessionName) must still exist, AND — when
 // pid was captured at launch (capturePanePID) — that exact process must
@@ -2560,6 +2608,7 @@ func (l *lifecycle) opIsRunning(ctx context.Context, sessionName string) (bool, 
 	}
 	allocs, _, err := l.client.listAllocsForJob(ctx, b.ChildJobID, 0, 0)
 	if err != nil {
+		warnUnknownLiveness(os.Stderr, sessionName, "listing allocations", err)
 		return true, nil
 	}
 	allocID := ""
@@ -2576,6 +2625,7 @@ func (l *lifecycle) opIsRunning(ctx context.Context, sessionName string) (bool, 
 	if err != nil {
 		// Transport fault probing in-box liveness: unknown, not confirmed
 		// death — same honesty split as the alloc lookup above.
+		warnUnknownLiveness(os.Stderr, sessionName, "probing in-box liveness", err)
 		return true, nil
 	}
 	// Best-effort: pick up the detached prime window's marker files if this
