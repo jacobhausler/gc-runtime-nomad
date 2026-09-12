@@ -322,7 +322,15 @@ exec "$@"`
 // Without the prepend the download would succeed on every box while the seat
 // kept running the stale binary, with nothing failing to observe. With it in
 // the TASK ENV instead, the box lost its PATH entirely (see jobspec.go).
-const boxGCPathPrelude = `if [ -d "$NOMAD_TASK_DIR/` + gcArtifactDest + `" ]; then PATH="$NOMAD_TASK_DIR/` + gcArtifactDest + `:$PATH"; export PATH; fi; `
+const boxGCPathPrelude = `if [ -f "$NOMAD_TASK_DIR/` + gcArtifactDest + `/` + gcBinaryName + `" ]; then ` +
+	// 0644 from an HTTP download, and Nomad's artifact stanza has no mode
+	// option, so the box's own shell is the only layer that can fix it.
+	`chmod +x "$NOMAD_TASK_DIR/` + gcArtifactDest + `/` + gcBinaryName + `" 2>/dev/null || true; ` +
+	// Unconditional once the file is there, deliberately. Branching on whether
+	// it came out executable would fall back to the image's gc on failure —
+	// silently stale, which is the defect this exists to remove. A loud
+	// "Permission denied" is the better failure.
+	`PATH="$NOMAD_TASK_DIR/` + gcArtifactDest + `:$PATH"; export PATH; fi; `
 
 const paneStagedEnvPrelude = `if [ -f "$NOMAD_SECRETS_DIR/env.sh" ]; then . "$NOMAD_SECRETS_DIR/env.sh"; fi; ` +
 	boxGCPathPrelude +

@@ -376,9 +376,20 @@ func sessionTask(agentImage string, artOpt ...gcArtifactConfig) nomadTask {
 		// can override the image. That is what lets one deployment run two
 		// lanes on different gc builds.
 		task.Artifacts = append(task.Artifacts, nomadArtifact{
-			GetterSource:  "${NOMAD_META_" + gcArtifactMetaKey + "}",
+			GetterSource: "${NOMAD_META_" + gcArtifactMetaKey + "}",
+			// "file", not Nomad's "any" default: with "any" go-getter treats
+			// the dest as a DIRECTORY and keeps the URL's basename, so the
+			// binary arrived as gcbin/gc-linux-amd64 and no PATH lookup for
+			// `gc` could ever find it.
+			GetterMode:    "file",
 			GetterOptions: map[string]string{"checksum": "${NOMAD_META_" + gcArtifactSumMetaKey + "}"},
-			RelativeDest:  gcArtifactDest,
+			// local/, because Nomad resolves this against the TASK ROOT and
+			// only local/ is mounted into the container. A bare "gcbin" landed
+			// as a sibling of local/ and $NOMAD_TASK_DIR was empty in the box:
+			// the download succeeded, the task started, and the seat ran the
+			// image's stale gc with nothing failing. The log shipper's own
+			// artifact in this same file already used this prefix.
+			RelativeDest: gcArtifactRelativeDest,
 		})
 		// PATH PRECEDENCE IS THE WHOLE CONTRACT. The image may still carry a
 		// gc — older images do, and an adopter's may too — and a fetched gc
@@ -799,7 +810,14 @@ type nomadResources struct {
 // carries the "checksum" key logShipperTask uses to pin vector's binary
 // download to its published sha256 ("pinned version + sha256").
 type nomadArtifact struct {
-	GetterSource  string            `json:"GetterSource"`
+	GetterSource string `json:"GetterSource"`
+	// GetterMode decides whether RelativeDest names a DIRECTORY to download
+	// into or the FILE to download as. Nomad's default, "any", lets go-getter
+	// choose, and for a plain binary URL it chooses directory — so the file
+	// keeps the URL's own basename. Set it to "file" when the destination
+	// filename matters, which for anything that has to be found on PATH it
+	// always does.
+	GetterMode    string            `json:"GetterMode,omitempty"`
 	GetterOptions map[string]string `json:"GetterOptions,omitempty"`
 	RelativeDest  string            `json:"RelativeDest,omitempty"`
 }
@@ -853,8 +871,15 @@ const (
 	gcArtifactSumMetaKey = "gc_artifact_sha"
 	// gcCommitPlaceholder is what the template substitutes.
 	gcCommitPlaceholder = "{commit}"
-	// gcArtifactDest is the task-dir subdirectory the binary lands in.
+	// gcArtifactDest is the task-dir subdirectory the binary lands in, as the
+	// box sees it. gcArtifactRelativeDest is the same directory as NOMAD
+	// resolves it — against the TASK ROOT, where only local/ is mounted into
+	// the container.
 	gcArtifactDest = "gcbin"
+	// gcBinaryName is what the fetched binary must be CALLED. The release asset
+	// is gc-linux-amd64; nothing looking for `gc` on PATH finds that.
+	gcBinaryName           = "gc"
+	gcArtifactRelativeDest = "local/" + gcArtifactDest + "/" + gcBinaryName
 )
 
 // firstArtifact collapses the optional argument to a value.
