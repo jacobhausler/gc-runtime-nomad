@@ -105,6 +105,27 @@ local_artifact_pin() {
 # Overriding the path without the other two is refused rather than half-applied:
 # the fallback would verify your binary against the lock's checksum and fail with
 # a mismatch, which names the wrong cause.
+# pin_is_sha is THE VCS-STAMP RULE, in one place.
+#
+# A gc built from a source ARCHIVE rather than a checkout has no .git for the
+# Makefile's ldflags to read, so it stamps its commit as the literal string
+# "unknown". That sails through any is-it-empty check and pins an image to a
+# binary which cannot say what it was built from — and an image whose gc cannot
+# name its own revision is not reproducible in any sense worth the word.
+#
+# A real stamp is a hex sha of short or full length. This was enforced at
+# refresh-pin time only, which left the lock side open: a hand-edited or
+# older lock carrying pin=unknown passed `check` and built green.
+pin_is_sha() {
+  case "${1:-}" in
+    ""|*[!0-9a-fA-F]*) return 1 ;;
+  esac
+  case "${#1}" in
+    7|8|9|10|11|12|40) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 require_consistent_artifact_override() {
   [ -n "${GC_LOCAL_ARTIFACT:-}" ] || return 0
   if [ -z "${GC_LOCAL_ARTIFACT_SHA256:-}" ] || [ -z "${GC_LOCAL_ARTIFACT_PIN:-}" ]; then
@@ -134,6 +155,7 @@ require_lock() {
   if [ -n "$(lock_get gc_local_artifact)" ]; then
     [ -n "$(local_artifact_sha)" ] || die "gc_local_artifact is named but carries no sha256=<hex> pin in ${LOCK}"
     [ -n "$(local_artifact_pin)" ] || die "gc_local_artifact is named but carries no pin=<gc commit> in ${LOCK}"
+    pin_is_sha "$(local_artifact_pin)" || die "gc_local_artifact in ${LOCK} carries pin='$(local_artifact_pin)', which is not a hex sha of short or full length. A gc built from a source ARCHIVE stamps 'unknown', and an image pinned to it cannot be traced to a revision — which is the whole of what reproducible means. This is refused at check time as well as at refresh-pin, because a hand-edited or older lock would otherwise build green."
   fi
 }
 
@@ -296,14 +318,7 @@ case "$cmd" in
     # everything builds, runs, and ships.
     #
     # A real stamp is a hex sha. Reject anything that is not.
-    case "$pin" in
-      *[!0-9a-fA-F]*|"")
-        die "refusing to pin ${art}: its gc reports commit '${pin}', which is not a hex sha. A gc built from a source ARCHIVE stamps 'unknown' because there is no .git to read — rebuild it from a real checkout, or the image cannot be traced to a revision." ;;
-    esac
-    case "${#pin}" in
-      7|8|9|10|11|12|40) : ;;
-      *) die "refusing to pin ${art}: its gc reports commit '${pin}' (${#pin} chars), which is not a short or full sha length." ;;
-    esac
+    pin_is_sha "$pin" || die "refusing to pin ${art}: its gc reports commit '${pin}', which is not a hex sha of short or full length. A gc built from a source ARCHIVE stamps 'unknown' because there is no .git to read — rebuild it from a real checkout, or the image cannot be traced to a revision."
     sha="$(file_sha256 "$art")"
     was="$(lock_get gc_local_artifact) sha256=$(lock_attr gc_local_artifact sha256)"
     tmp="$(mktemp)"

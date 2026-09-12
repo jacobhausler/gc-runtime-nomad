@@ -99,6 +99,19 @@ refuse "checksum mismatch is refused" "checksum mismatch" env GC_TOOLCHAIN_HOST_
 
 P="$(mint_pack unpinned)"; FAKE="${P}/staged/gc"; mkdir -p "${P}/staged"; printf 'x\n' > "${FAKE}"
 set_lock_pin "${P}" "${FAKE}" "" ""
+# THE VCS-STAMP TRAP, on the lock side. A gc built from a source archive stamps
+# its commit as the literal string "unknown"; an image pinned to it cannot be
+# traced to a revision, which is the whole of what "reproducible" means. It was
+# enforced at refresh-pin time only, so a hand-edited or older lock carrying
+# pin=unknown passed `check` and built green.
+PV="$(mint_pack vcsstamp)"
+FAKE2="${PV}/staged/gc"; mkdir -p "${PV}/staged"; printf 'fake\n' > "${FAKE2}"
+FAKE2_SHA="$(if command -v sha256sum >/dev/null 2>&1; then sha256sum -b "$FAKE2" | awk '{print $1}'; else shasum -a 256 -b "$FAKE2" | awk '{print $1}'; fi)"
+set_lock_pin "${PV}" "${FAKE2}" "${FAKE2_SHA}" "unknown"
+refuse "a non-sha pin is refused at check time" "which is not a hex sha" bash "${PV}/toolchain/build-image.sh" check
+set_lock_pin "${PV}" "${FAKE2}" "${FAKE2_SHA}" "deadbeef0"
+expect "a real short sha is accepted"            "six components sha256-pinned" bash "${PV}/toolchain/build-image.sh" check
+
 refuse "an unchecksummed local line is refused" "no sha256=<hex> pin" bash "${P}/toolchain/build-image.sh" check
 
 P="$(mint_pack nolocal)"; strip_lock_pin "${P}"
