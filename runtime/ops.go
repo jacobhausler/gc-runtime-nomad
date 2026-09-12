@@ -3069,3 +3069,65 @@ func parentPoolMoveWarning(exists bool, registeredPool, computedPool, parentJobI
 		"dispatch will be placed in %q. A pool with no eligible nodes leaves dispatches pending with "+
 		"no error on the session itself.", parentJobID, registeredPool, computedPool, computedPool)
 }
+
+// namedProcessAlive answers the RPP `process-alive` op: are any of these
+// process names running inside the session's box?
+//
+// THE HONESTY SPLIT IS THE WHOLE DESIGN, and the caller's contract makes it
+// explicit: gc treats empty output and "true" alike as alive, and only an
+// EXPLICIT "false" as a dead agent, precisely so an unimplemented or
+// unmeasurable runtime cannot make it reap a live session. So this op may
+// answer false only on a definitive observation — a `ps` that ran, succeeded,
+// and did not list any of the names. Every other outcome is alive:
+//
+//	transport error       we did not observe anything
+//	`ps` exited nonzero   no `ps` in the image; unmeasurable, not dead
+//	no binding / no alloc a different fault with its own message
+//
+// Answering "dead" from any of those would convert a diagnostic blind spot into
+// a reaped session, which is the most expensive mistake this pack could make.
+func (l *lifecycle) namedProcessAlive(ctx context.Context, sessionName string, names []string) (alive bool, observed bool, err error) {
+	wanted := make([]string, 0, len(names))
+	for _, n := range names {
+		if t := strings.TrimSpace(n); t != "" {
+			wanted = append(wanted, filepath.Base(t))
+		}
+	}
+	if len(wanted) == 0 {
+		// The interface contract: no names asked about means nothing to
+		// disprove.
+		return true, false, nil
+	}
+
+	allocID, err := l.currentAlloc(ctx, sessionName)
+	if err != nil || allocID == "" {
+		return true, false, err
+	}
+
+	exitCode, out, execErr := l.client.execAlloc(ctx, allocID, execTaskName,
+		[]string{"/bin/sh", "-c", "ps -eo comm 2>/dev/null || ps -o comm 2>/dev/null"})
+	if execErr != nil || exitCode != 0 {
+		// Unmeasurable, not dead. See the honesty split above.
+		return true, false, nil
+	}
+	return processListHasAny(out, wanted), true, nil
+}
+
+// processListHasAny reports whether a `ps -eo comm` listing contains any of the
+// wanted names, compared on basename so a listing that prints a full path
+// matches a name given bare (and the reverse).
+func processListHasAny(psOut []byte, wanted []string) bool {
+	for _, line := range strings.Split(string(psOut), "\n") {
+		name := strings.TrimSpace(line)
+		if name == "" || name == "COMMAND" {
+			continue
+		}
+		name = filepath.Base(name)
+		for _, w := range wanted {
+			if name == w {
+				return true
+			}
+		}
+	}
+	return false
+}

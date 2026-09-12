@@ -135,6 +135,7 @@ var lifecycleOps = map[string]bool{
 	"interrupt":        true,
 	"send-keys":        true,
 	"clear-scrollback": true,
+	"process-alive":    true,
 }
 
 // mintsABox is the subset of lifecycleOps that brings a new allocation into
@@ -316,6 +317,31 @@ func run(args []string, stdin io.Reader, stdout, stderr *os.File) int {
 			return fail(err)
 		}
 		fmt.Fprintln(stdout, boolText(running))
+		return exitOK
+
+	case "process-alive":
+		name, ok := needName()
+		if !ok {
+			return exitError
+		}
+		// Process names arrive on stdin, one per line — the caller's contract.
+		raw, readErr := io.ReadAll(stdin)
+		if readErr != nil {
+			return fail(fmt.Errorf("reading process names from stdin: %w", readErr))
+		}
+		alive, observed, err := l.namedProcessAlive(ctx, name, strings.Split(string(raw), "\n"))
+		if err != nil {
+			return fail(err)
+		}
+		// Print "false" ONLY on a definitive observation. gc reads empty and
+		// "true" alike as alive and only an explicit "false" as a dead agent,
+		// so an unmeasurable box must never be able to get a live session
+		// reaped. See namedProcessAlive.
+		if !observed {
+			fmt.Fprintln(stdout, boolText(true))
+			return exitOK
+		}
+		fmt.Fprintln(stdout, boolText(alive))
 		return exitOK
 
 	case "list-running":
