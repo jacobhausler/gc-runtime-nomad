@@ -38,12 +38,19 @@ import (
 // (opIsRunning) — no extra polling loop of its own, and it costs nothing
 // once a session is either primed or was never owed a prompt.
 const (
-	primeDirName     = "gc-prime"
-	primeWindowName  = "gc-prime"
-	primeScriptFile  = "run.sh"
-	primeNudgeFile   = "nudge.txt"
-	primePrefixFile  = "ready_prefix.txt"
-	primeDelayFile   = "ready_delay_ms.txt"
+	primeDirName    = "gc-prime"
+	primeWindowName = "gc-prime"
+	primeScriptFile = "run.sh"
+	primeNudgeFile  = "nudge.txt"
+	primePrefixFile = "ready_prefix.txt"
+	primeDelayFile  = "ready_delay_ms.txt"
+	// primeLoadingFile and primeBusyFile carry the two TUI markers the prime
+	// script polls for. They are staged like ready_prefix.txt rather than baked
+	// into the script because they are PROVIDER facts, not runtime facts: a
+	// different agent family paints a different "still loading" line and a
+	// different busy indicator (cr-8eagyh).
+	primeLoadingFile = "loading_marker.txt"
+	primeBusyFile    = "busy_marker.txt"
 	primeMarkerFile  = "prompted_at"
 	primeStatusFile  = "status"
 	primeReadyBudget = 180 // seconds; mirrors startupReadyBudgetDefault
@@ -125,6 +132,26 @@ set -u
 DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 PREFIX=""
 if [ -f "$DIR/ready_prefix.txt" ]; then PREFIX="$(cat "$DIR/ready_prefix.txt")"; fi
+# The TUI markers. The codex-family defaults live at the USE SITE as
+# ${LOADING:-loading} / ${BUSY:-esc to interrupt}, not here, because pane_ready()
+# is extracted and run as a standalone unit by its own guard
+# (TestPrimeReadinessRejectsLoadingFrameAcceptsLoadedFrame) — a default that
+# lived only in this preamble would vanish under extraction and leave grep
+# matching the empty string, i.e. rejecting every frame. Defaulting at the use
+# site keeps each predicate self-contained.
+#
+# An absent or empty marker file therefore falls back to the default rather than
+# disabling the check: skipping the loading check is fail-OPEN on readiness, and
+# typing into a startup discard window is what crashed the agent before this
+# readiness rule existed. An absent
+# or empty marker file must not disable the check: skipping the loading check is
+# fail-OPEN on readiness, and typing into a startup discard window is what
+# crashed the agent before this readiness rule existed. A family that paints
+# something else overrides these by staging its own value.
+LOADING=""
+if [ -s "$DIR/loading_marker.txt" ]; then LOADING="$(cat "$DIR/loading_marker.txt")"; fi
+BUSY=""
+if [ -s "$DIR/busy_marker.txt" ]; then BUSY="$(cat "$DIR/busy_marker.txt")"; fi
 DELAY_MS=%[8]d
 if [ -f "$DIR/ready_delay_ms.txt" ]; then
   staged="$(cat "$DIR/ready_delay_ms.txt")"
@@ -149,7 +176,7 @@ pane_ready() {
     } END { exit !found }' "$f"; then
     return 1
   fi
-  if grep -q 'loading' "$f"; then
+  if grep -q "${LOADING:-loading}" "$f"; then
     return 1
   fi
   return 0
@@ -172,7 +199,7 @@ while [ "$elapsed" -le %[1]d ]; do
 done
 
 pane_busy() {
-  tmux capture-pane -p -t main 2>/dev/null | grep -q 'esc to interrupt'
+  tmux capture-pane -p -t main 2>/dev/null | grep -q "${BUSY:-esc to interrupt}"
 }
 
 if [ "$ready" -eq 1 ]; then
@@ -277,11 +304,13 @@ func readyDelayMs(wireValue int) int {
 	return primeDefaultReadyDelayMs
 }
 
-func buildPrimeFiles(text, readyPromptPrefix string, readyDelayMsValue int) []stageFile {
+func buildPrimeFiles(text, readyPromptPrefix, loadingMarker, busyMarker string, readyDelayMsValue int) []stageFile {
 	return []stageFile{
 		{Path: primeScriptFile, Content: []byte(primeScript), Mode: 0o755},
 		{Path: primeNudgeFile, Content: []byte(text), Mode: 0o600},
 		{Path: primePrefixFile, Content: []byte(readyPromptPrefix), Mode: 0o600},
+		{Path: primeLoadingFile, Content: []byte(loadingMarker), Mode: 0o600},
+		{Path: primeBusyFile, Content: []byte(busyMarker), Mode: 0o600},
 		{Path: primeDelayFile, Content: []byte(fmt.Sprintf("%d", readyDelayMs(readyDelayMsValue))), Mode: 0o600},
 	}
 }
@@ -318,7 +347,7 @@ func (l *lifecycle) startupPrimeDetached(ctx context.Context, sessionName string
 		return nil // already running, or finished - syncPromptedMarker will catch that
 	}
 
-	files := buildPrimeFiles(text, cfg.ReadyPromptPrefix, cfg.ReadyDelayMs)
+	files := buildPrimeFiles(text, cfg.ReadyPromptPrefix, cfg.loadingMarker(), cfg.busyMarker(), cfg.ReadyDelayMs)
 	data, err := buildTar(files)
 	if err != nil {
 		return fmt.Errorf("building prime script for %q: %w", sessionName, err)

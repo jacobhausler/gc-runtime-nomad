@@ -343,6 +343,47 @@ func (c stageConfig) promptSubset() stageConfig {
 	}
 }
 
+// The agent TUI markers the prime script polls: the "still loading" line and the
+// busy indicator. They are PROVIDER facts — codex paints one thing, another
+// family paints another — and the pack previously hardcoded codex's own strings
+// while README promised nothing provider-specific lives in the runtime, so a
+// non-codex agent behind prime got silently wrong ready/busy detection
+// (cr-8eagyh).
+//
+// They arrive through the session ENV rather than through stageConfig, because
+// stageConfig mirrors gc's launch wire field-for-field (enforced by
+// TestStageConfigCarriesEveryGcLaunchWireField) and gc sends no such keys — this
+// pack must not invent wire fields. Env is what already carries provider facts
+// into the box, so an operator sets these beside the rest of the provider's env
+// (or, for a whole runtime, in [session.runtime_env]).
+//
+// The defaults are codex's, so nothing changes for an existing deployment.
+const (
+	envPrimeLoadingMarker = "GC_PRIME_LOADING_MARKER"
+	envPrimeBusyMarker    = "GC_PRIME_BUSY_MARKER"
+
+	defaultLoadingMarker = "loading"
+	defaultBusyMarker    = "esc to interrupt"
+)
+
+// loadingMarker is the TUI's "still loading" line, defaulting to codex's.
+func (c stageConfig) loadingMarker() string {
+	if v := strings.TrimSpace(c.Env[envPrimeLoadingMarker]); v != "" {
+		return v
+	}
+	return defaultLoadingMarker
+}
+
+// busyMarker is the TUI's busy indicator, defaulting to codex's. A family with no
+// busy indicator sets a string its pane never shows, rather than leaving this
+// empty, which takes the default.
+func (c stageConfig) busyMarker() string {
+	if v := strings.TrimSpace(c.Env[envPrimeBusyMarker]); v != "" {
+		return v
+	}
+	return defaultBusyMarker
+}
+
 // unshellQuote decodes one single-quoted shell word back to its value — the
 // inverse of this file's shellQuote, and the same quote-escaping grammar
 // parseExecWireArgv already decodes on the exec wire. gc builds PromptSuffix
