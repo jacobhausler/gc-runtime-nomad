@@ -111,6 +111,26 @@ on 2026-09-12:
 **None cherry-picks cleanly, including in dependency order.** Anyone planning
 this work should budget a port, not four `git cherry-pick`s.
 
+**Three of the four are now ported, built and tested** against `#6146`'s head
+(2026-09-12), each with a red proof, `gofmt`, `go vet`, and the full
+`./cmd/gc`, `./internal/api` and `./internal/beads/...` suites green:
+
+| family | port | what it needed beyond the commit |
+|---|---|---|
+| `remote-worker-claim-dispatch` | done | `internal/beads/worker_ops.go` (104 lines) — `beads.ClaimFor` does not exist at `#6146` at all. No session-pointer machinery required; that entanglement drops out when only the stated half is ported. |
+| `policy-conditional-writer-forwarding` | done | nothing; `ClaimAs`/`Comment` forwarding included so the capability set stays coherent |
+| `remote-worker-session-identity` | done | an OpenAPI regen — the field's doc string feeds the checked-in spec |
+
+**`remote-step-accept-list` cannot be a follow-up on `#6146` at all.** Its
+wire half is *already there* — `BeadUpdateBody` carries `Metadata` at
+`#6146`'s head. Its CLI half edits `cmd/gc/remote_worker.go`, and **that file
+does not exist in `#6146`**: no `remoteBdFlagArity`, no `remoteBdUpdate`, no
+`UpdateBeadOpts`, no remote `gc bd` CLI leg of any kind. That leg belongs to
+the broad remote-worker family commit `421c99547d`, which `#6146` only
+partially carries. So this row stacks on a *larger* upstream contribution, not
+on `#6146` — which corrects the "four follow-ups stack on #6146" framing
+above: three do, one does not.
+
 **Why they conflict — and the hidden prerequisite.** The estate's
 `7ea324ce38` does two separable things at once. Its *stated* purpose is to
 route the remote claim through `beads.ClaimFor` and the policy
