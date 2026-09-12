@@ -1919,7 +1919,10 @@ func stagesAnything(cfg stageConfig) bool {
 	if len(cfg.CopyFiles) > 0 {
 		return true
 	}
-	secretEnv, _ := mergeExtraSecretEnv(cfg.Env, extraSecretKeys)
+	// No warning here: this is a pure predicate that decides whether stage()
+	// has work to do, and it can be consulted more than once. The declared-but-
+	// absent report belongs on the staging path itself, which runs once.
+	secretEnv, _, _ := mergeExtraSecretEnv(cfg.Env, extraSecretKeys)
 	secretEnv = stripLocalCityStoreEnv(secretEnv)
 	secretEnv = mergeLaunchOptionEnv(secretEnv, cfg.Command)
 	return len(secretEnv) > 0
@@ -1964,7 +1967,8 @@ func (l *lifecycle) stage(ctx context.Context, sessionName string, cfg stageConf
 		}
 	}
 
-	secretEnv, extraKeys := mergeExtraSecretEnv(cfg.Env, extraSecretKeys)
+	secretEnv, extraKeys, absentSecrets := mergeExtraSecretEnv(cfg.Env, extraSecretKeys)
+	warnAbsentSecretKeys(os.Stderr, sessionName, absentSecrets)
 	secretEnv = stripLocalCityStoreEnv(secretEnv)
 	secretEnv = mergeLaunchOptionEnv(secretEnv, cfg.Command)
 

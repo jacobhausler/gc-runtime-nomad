@@ -467,24 +467,49 @@ func envArgvSafe(key string) bool {
 // itself, so an extra-sourced value can never reach the launch argv
 // (buildLaunchCommandForPane is only ever called with cfg.Env, untouched by
 // this function).
-func mergeExtraSecretEnv(base map[string]string, keys []string) (map[string]string, map[string]bool) {
+func mergeExtraSecretEnv(base map[string]string, keys []string) (map[string]string, map[string]bool, []string) {
 	merged := make(map[string]string, len(base)+len(keys))
 	for k, v := range base {
 		merged[k] = v
 	}
 	extra := make(map[string]bool, len(keys))
+	var absent []string
 	for _, k := range keys {
 		if _, ok := merged[k]; ok {
 			continue
 		}
 		v, ok := os.LookupEnv(k)
 		if !ok {
+			// DECLARED AND ABSENT IS A FAULT, not a no-op. An operator who
+			// named a key in GC_NOMAD_EXTRA_SECRET_KEYS meant it; skipping it
+			// silently stages a box that launches without a credential it was
+			// told to carry, and everything downstream looks healthy — the
+			// agent starts, the pane is fine, and the first thing that needed
+			// that credential fails somewhere the operator will read as a
+			// provider or network defect.
+			//
+			// Reported by NAME only. This function is the one place that holds
+			// secret values, and a diagnostic that leaked one would be a worse
+			// defect than the one it reports.
+			absent = append(absent, k)
 			continue
 		}
 		merged[k] = v
 		extra[k] = true
 	}
-	return merged, extra
+	return merged, extra, absent
+}
+
+// warnAbsentSecretKeys names declared-but-absent secret keys on stderr. Names
+// only, never values.
+func warnAbsentSecretKeys(w io.Writer, sessionName string, absent []string) {
+	if len(absent) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "gc-runtime-nomad: warning: session %q declares %d secret key(s) in %s that the "+
+		"supervisor's environment does not carry: %s. Those files are NOT staged, and the box will "+
+		"launch without them — a seat that looks healthy and fails on the first operation needing "+
+		"one of these.\n", sessionName, len(absent), "GC_NOMAD_EXTRA_SECRET_KEYS", strings.Join(absent, ", ")) //nolint:errcheck
 }
 
 // stripLocalCityStoreEnv removes the local target/store family when a
