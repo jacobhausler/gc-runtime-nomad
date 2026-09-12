@@ -80,8 +80,13 @@ behaviour everywhere; that is an upstream question, not something this pack
 requires. Listed so nobody re-derives them as blockers:
 
 `graphroute-one-shot-independence`, `pool-oneshot-asleep-holder-reuse`,
-`pool-stranded-holder`, `dispatch-retry-routing`, `seat-identity`,
-`builtinpacks-pack-validation-memo`.
+`pool-stranded-holder`, `seat-identity`, `builtinpacks-pack-validation-memo`.
+
+`dispatch-retry-routing` sits here **for its named behaviour only**. Its
+commit `b35a078be` also introduces the session current-claim pointer that a
+Tier 1 row's commit leans on — see *Upstreaming the blocking four*. Port that
+Tier 1 row without the pointer and this row stays a Tier 3 row; port it
+verbatim and you have pulled a prerequisite in behind it.
 
 ### Tier 4 — performance, or this estate's own features
 
@@ -89,6 +94,45 @@ requires. Listed so nobody re-derives them as blockers:
 - `workquery-prefetch` ([#5629](https://github.com/gastownhall/gascity/pull/5629)) — its own description: *"the work query takes the un-prefetched path — dispatch latency."*
 - `agent-groups` — group-qualified routing. An estate routing feature; a deployment that declares no `[[agent_groups]]` never exercises it.
 - `runtime-provider` — **not required to select this pack.** See the correction below.
+
+### Upstreaming the blocking four — measured, not estimated
+
+Each of the four unfiled Tier 1 rows is exactly one commit in the pin
+lineage, and all four were test-applied onto **#6146's head (`9c23324fe`)**
+on 2026-09-12:
+
+| family | commit | onto #6146 |
+|---|---|---|
+| `remote-worker-claim-dispatch` | `7ea324ce38` | conflicts — 1 hunk, `internal/api/handler_worker.go` + `internal/beads/worker_ops.go` |
+| `remote-step-accept-list` | `c4ba4511d0` | conflicts — `cmd/gc/remote_worker.go` (+test), `internal/api/client_worker.go` |
+| `remote-worker-session-identity` | `1afd6736a2` | conflicts — `internal/api/handler_worker_test.go` only |
+| `policy-conditional-writer-forwarding` | `857ed398ad` | conflicts — `cmd/gc/bead_policy_store.go` only |
+
+**None cherry-picks cleanly, including in dependency order.** Anyone planning
+this work should budget a port, not four `git cherry-pick`s.
+
+**Why they conflict — and the hidden prerequisite.** The estate's
+`7ea324ce38` does two separable things at once. Its *stated* purpose is to
+route the remote claim through `beads.ClaimFor` and the policy
+`ConditionalWriter` instead of a direct assert. But the same hunk also
+reserves a **session current-claim pointer** (`workerSessionFront`,
+`workerExpectedClaimPointer`, `ReserveCurrentClaim`, `ClearCurrentClaim`).
+Measured at `9c23324fe`: **every one of those symbols occurs zero times.**
+They enter the lineage in `b35a078be` — the `dispatch-retry-routing` family,
+which this file tiers as *not* a pack dependency.
+
+So the table had a gap: a Tier 1 row carried an undeclared dependency on a
+Tier 3 row. Recorded rather than quietly fixed, because it is the shape to
+watch for in the rest of this list — a family's name describes its purpose,
+not necessarily everything its commit touches.
+
+**The good news is that the two halves separate.** #6146's head still
+direct-asserts `workerAssignmentClaimer` and calls `claimer.Claim(id,
+assignee)` at `internal/api/handler_worker.go:120-128`, naming no
+`beads.ClaimFor` — exactly as this file has always said. A minimal upstream
+port replaces that call with `beads.ClaimFor` plus the policy writer and
+**leaves the session-pointer machinery behind**, which keeps the PR to its
+stated subject and drops the prerequisite entirely.
 
 ### Correction: `runtime-provider` is not a blocker
 
