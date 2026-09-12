@@ -201,7 +201,9 @@ func run(args []string, stdin io.Reader, stdout, stderr *os.File) int {
 				fmt.Fprintf(stderr, "diagnostics: %s (nothing recorded yet)\n", path)
 			}
 		}
-		switch gcWorkerSurfaceForCheck(stderr) {
+		surface := gcWorkerSurfaceForCheck(stderr)
+		reportGCRequirements(stderr, surface)
+		switch surface {
 		case gcWorkerSurfaceMissing:
 			fmt.Fprintf(stderr, "FAIL: %v\n", gcMissingWorkerSurfaceError())
 			return exitError
