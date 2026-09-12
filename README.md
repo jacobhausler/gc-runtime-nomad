@@ -295,7 +295,24 @@ Provider-agnostic: what any deployment of this pack needs.
    1. **The toolchain base**, built by this pack:
 
       ```
-      toolchain/build-image.sh check     # verify the lock offline first
+      toolchain/build-image.sh check                        # verify the lock offline first
+      toolchain/build-image.sh build --gc-release=75fbc2cf5b
+      ```
+
+      `--gc-release=<commit>` fetches the `gc` published for that pin and
+      **verifies it against its own sha256 sidecar** before building. You do
+      not have to build a linux `gc` yourself, which was the second
+      prerequisite chain that stopped people here: the image is required, and
+      producing it used to require the one thing the pack could not hand you.
+      A binary that does not match its published checksum is refused, and so is
+      a binary published with no sidecar at all.
+
+      If you would rather stage your own `gc` — building it yourself is
+      strictly stronger than trusting a published checksum, and
+      [`COMPATIBILITY.md`](COMPATIBILITY.md) explains how — the original path
+      is unchanged:
+
+      ```
       toolchain/build-image.sh build --artifact=<path to your linux/amd64 gc>
       ```
 

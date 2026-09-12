@@ -96,6 +96,45 @@ local_artifact_sha() {
   else lock_attr gc_local_artifact sha256
   fi
 }
+# --- the PUBLISHED per-pin artifact (the adopter's path) ------------------------
+# WHY THIS EXISTS. Building the image required a linux/amd64 gc already staged
+# on disk, and getting one required building gc yourself — from a fork, on a
+# linux host, with the ICU development headers. Two prospective adopters
+# independently called that a second prerequisite chain and stopped there: the
+# image is required, and producing it required the very thing the pack cannot
+# hand you.
+#
+# It can now hand you exactly that. A gc is published per pin with a sha256
+# sidecar, so this fetches and VERIFIES it instead of asking you to build one.
+# The checksum is not optional and not the lock's: it comes from the sidecar
+# beside the binary, and a mismatch refuses. That is weaker than reproducing the
+# build yourself (COMPATIBILITY.md tells you how, and why you might want to) and
+# far better than the previous answer, which was "build a fork of gc first".
+#
+# GC_TOOLCHAIN_RELEASE_BASE overrides the origin so this is testable offline and
+# so an adopter mirroring the artifact internally is not forced through GitHub.
+release_base() {
+  printf '%s\n' "${GC_TOOLCHAIN_RELEASE_BASE:-https://github.com/jacobhausler/gascity/releases/download}"
+}
+
+fetch_release_artifact() {
+  _pin="$1"
+  [ -n "$_pin" ] || die "--gc-release needs a pin (the gc commit the image should carry)"
+  pin_is_sha "$_pin" || die "--gc-release ${_pin} is not a commit sha; the published tag is gc-<commit>"
+  command -v curl >/dev/null || die "curl not found: needed to fetch the published gc. Stage one yourself and use --artifact instead."
+  _base="$(release_base)/gc-${_pin}"
+  _dir="$(mktemp -d)"
+  _bin="${_dir}/gc-linux-amd64"
+  curl -fsSL "${_base}/gc-linux-amd64" -o "$_bin" || die "could not fetch ${_base}/gc-linux-amd64 — is that pin published?"
+  curl -fsSL "${_base}/gc-linux-amd64.sha256" -o "${_bin}.sha256" || die "fetched the binary but not its sha256 sidecar at ${_base}/gc-linux-amd64.sha256. Refusing to use an unverified binary."
+  _want="$(awk '{print $1; exit}' "${_bin}.sha256")"
+  _got="$(file_sha256 "$_bin")"
+  [ -n "$_want" ] || die "the sha256 sidecar at ${_base}/gc-linux-amd64.sha256 is empty"
+  [ "$_got" = "$_want" ] || die "published gc checksum MISMATCH for ${_pin}: sidecar=${_want} downloaded=${_got}. Refusing — a binary that does not match its own published checksum is not the pin."
+  chmod 0755 "$_bin"
+  printf '%s\n' "$_bin"
+}
+
 local_artifact_pin() {
   if [ -n "${GC_LOCAL_ARTIFACT_PIN:-}" ]; then printf '%s\n' "$GC_LOCAL_ARTIFACT_PIN"
   else lock_attr gc_local_artifact pin
@@ -220,7 +259,7 @@ cmd="${1:-help}"; shift || true
 # --help and -h are what people type, and rejecting them with "unknown command"
 # made the README's own claim false. Aliased rather than documented around.
 case "$cmd" in --help|-h|-help) cmd=help ;; esac
-DRY=0; RECEIPT=""; CITY=""; OUT_TAG=""; ARTIFACT=""; PUBLISHED=0
+DRY=0; RECEIPT=""; CITY=""; OUT_TAG=""; ARTIFACT=""; PUBLISHED=0; GC_RELEASE=""
 for a in "$@"; do
   case "$a" in
     --dry-run) DRY=1 ;;
@@ -229,6 +268,7 @@ for a in "$@"; do
     --tag=*) OUT_TAG="${a#--tag=}" ;;
     --artifact=*) ARTIFACT="${a#--artifact=}" ;;
     --published) PUBLISHED=1 ;;
+    --gc-release=*) GC_RELEASE="${a#--gc-release=}" ;;
     *) die "unknown argument: $a" ;;
   esac
 done
@@ -352,7 +392,19 @@ case "$cmd" in
       # carrying a published gc older than the live pin, and here it carries
       # none. Ordering matters: that refusal used to fire first and made the
       # omit mode unreachable, which I found by running it.
+      [ -z "$GC_RELEASE" ] || die "GC_TOOLCHAIN_OMIT_GC is set AND --gc-release=${GC_RELEASE} was passed: one ships no gc at all, the other fetches one to ship. Pick one."
       echo "toolchain gc source: NONE (GC_TOOLCHAIN_OMIT_GC) — the box fetches gc per allocation"
+    elif [ -n "$GC_RELEASE" ]; then
+      # The adopter's path: fetch the gc published for a pin and verify it
+      # against its own sidecar. Deliberately does NOT consult the lock's
+      # sha256 — that records the MAINTAINER's staged binary, and checking a
+      # downloaded artifact against it would refuse every adopter who used the
+      # documented flag.
+      [ "$PUBLISHED" = 0 ] || { rm -rf "$ctx" 2>/dev/null; die "--gc-release and --published are exclusive: one fetches the gc for a pin, the other deliberately ships the older published gc $(lock_version gc)"; }
+      art="$(fetch_release_artifact "$GC_RELEASE")"
+      art_pin="$GC_RELEASE"
+      art_sha="$(file_sha256 "$art")"
+      echo "toolchain gc source: PUBLISHED PIN ${art_pin} fetched from $(release_base) (sha256 ${art_sha}, verified against its sidecar)"
     elif [ "$PUBLISHED" = 1 ]; then
       echo "toolchain gc source: PUBLISHED gc $(lock_version gc) (--published; the image will NOT carry the live pin)"
     else
@@ -447,6 +499,9 @@ usage: toolchain/build-image.sh <check|verify|refresh-pin|build|city-image|conte
   verify        re-check every pin against its publisher (gc/bd/codex releases,
                 Ubuntu Release index) and a staged local pin against its own
                 checksum — read-only, needs network
+                --gc-release=<commit> fetches the gc published for that pin
+                and verifies it against its sha256 sidecar, so you do NOT have
+                to build a linux gc yourself. This is the adopter's path.
   refresh-pin   rewrite gc_local_artifact's path+sha256+pin from the binary
                 staged on THIS host (run it where that binary lives)
   build         docker build the toolchain image, rollback-tagging whatever is

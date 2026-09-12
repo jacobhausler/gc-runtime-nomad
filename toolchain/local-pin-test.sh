@@ -229,11 +229,75 @@ grep -qE '^libicu74 [^ ]+ sha256:[0-9a-f]{64}' "${REAL_LOCK}" && ok "ICU is chec
 awk '/install -d \/opt\/codex\/bin/{made=NR} /ln -sfn .*\/opt\/codex\/bin\/current/{print made, NR; exit}' "${DOCKERFILE}" \
   | awk '{exit ($1 != "" && $1+0 < $2+0) ? 0 : 1}' \
   && ok "the codex PATH dir is created before the symlink that needs it" \
-  || bad "ln -sfn /opt/codex/bin/current has no install -d before it — that is the failure the first build hit"grep -q 'PLACEHOLDER' "${REAL_SCRIPT}" && ok "script mints a placeholder so COPY never sees an empty dir" || bad "script does not mint the placeholder COPY needs"
+  || bad "ln -sfn /opt/codex/bin/current has no install -d before it — that is the failure the first build hit"
+
+# A MISSING NEWLINE used to join this assertion to the one above it, so
+# `bad "...long message..."grep` parsed as ONE WORD and this never grepped
+# anything: the ok/bad below was decided by the PREVIOUS command's exit status.
+# It reported "ok" throughout. Found while moving the arm below out of a branch
+# it could never run in — two dead assertions in one file, neither visible from
+# the output.
+grep -q 'PLACEHOLDER' "${REAL_SCRIPT}" \
+  && ok "script mints a placeholder so COPY never sees an empty dir" \
+  || bad "script does not mint the placeholder COPY needs"
+
+# --- ARM: the adopter's fetch path -------------------------------------------
+# Two prospective adopters stopped at "the image needs a linux gc you have to
+# build yourself". --gc-release closes that, but only if it VERIFIES what it
+# downloads — an unverified fetch is worse than the build it replaces, because
+# it looks like a supply chain and is not one.
+#
+# Served from a local directory over file:// via GC_TOOLCHAIN_RELEASE_BASE, so
+# this arm needs no network and no GitHub.
+rel_root="$(mktemp -d)"
+mkdir -p "${rel_root}/gc-abc123def0"
+printf 'not-really-a-binary\n' > "${rel_root}/gc-abc123def0/gc-linux-amd64"
+real_sha="$(shasum -a 256 "${rel_root}/gc-abc123def0/gc-linux-amd64" | awk '{print $1}')"
+
+# 1. a sidecar that MATCHES is accepted (the fetch itself works)
+printf '%s  gc-linux-amd64\n' "$real_sha" > "${rel_root}/gc-abc123def0/gc-linux-amd64.sha256"
+out="$(GC_TOOLCHAIN_RELEASE_BASE="file://${rel_root}" GC_TOOLCHAIN_HOST_STEP=1 \
+  bash "$REAL_SCRIPT" build --gc-release=abc123def0 --dry-run 2>&1)" && rc=0 || rc=$?
+case "$out" in
+  *"PUBLISHED PIN abc123def0"*) ok "a matching sidecar is accepted and the pin is named" ;;
+  *) bad "the verified fetch path did not report the pin it fetched (rc=$rc): $(printf '%s' "$out" | tail -2 | tr '\n' ' ')" ;;
+esac
+
+# 2. a sidecar that does NOT match is refused. THE POINT OF THE ARM.
+printf '%s  gc-linux-amd64\n' "0000000000000000000000000000000000000000000000000000000000000000" \
+  > "${rel_root}/gc-abc123def0/gc-linux-amd64.sha256"
+out="$(GC_TOOLCHAIN_RELEASE_BASE="file://${rel_root}" GC_TOOLCHAIN_HOST_STEP=1 \
+  bash "$REAL_SCRIPT" build --gc-release=abc123def0 --dry-run 2>&1)" && rc=0 || rc=$?
+if [ "$rc" != 0 ] && printf '%s' "$out" | grep -q "checksum MISMATCH"; then
+  ok "a mismatched sidecar is refused, naming the mismatch"
+else
+  bad "a binary that does not match its own published sha256 was ACCEPTED (rc=$rc)"
+fi
+
+# 3. a missing sidecar is refused rather than silently trusted
+rm -f "${rel_root}/gc-abc123def0/gc-linux-amd64.sha256"
+out="$(GC_TOOLCHAIN_RELEASE_BASE="file://${rel_root}" GC_TOOLCHAIN_HOST_STEP=1 \
+  bash "$REAL_SCRIPT" build --gc-release=abc123def0 --dry-run 2>&1)" && rc=0 || rc=$?
+if [ "$rc" != 0 ] && printf '%s' "$out" | grep -q "not its sha256 sidecar"; then
+  ok "a missing sidecar is refused, not treated as nothing to check"
+else
+  bad "a published binary with NO checksum sidecar was accepted (rc=$rc)"
+fi
+
+# 4. exclusive with the two other gc sources
+out="$(GC_TOOLCHAIN_RELEASE_BASE="file://${rel_root}" GC_TOOLCHAIN_HOST_STEP=1 GC_TOOLCHAIN_OMIT_GC=1 \
+  bash "$REAL_SCRIPT" build --gc-release=abc123def0 --dry-run 2>&1)" && rc=0 || rc=$?
+if [ "$rc" != 0 ] && printf '%s' "$out" | grep -q "Pick one"; then
+  ok "omit-gc plus --gc-release is refused"
+else
+  bad "omit-gc and --gc-release were both accepted (rc=$rc)"
+fi
+rm -rf "$rel_root"
 
 if [ "$fails" = 0 ]; then
   echo "local-pin-test: PASS"
 else
+
   printf 'local-pin-test: FAIL (%d failing)\n' "$fails"
   exit 1
 fi
