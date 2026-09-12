@@ -161,7 +161,16 @@ names it as one of the five signals; this is what is in it. Under
   box is fine.
 
 `is-running` answers `false` for BOTH, which is why reading the binding is the
-step that splits them. Note also that a deleted binding strands a child job:
+step that splits them.
+
+**`diagnostics.log` lives in that same directory, and it is the first thing to
+read after a failed op.** gc's exec transport turns any nonzero op exit into
+`tmux exited N` and discards the pack's stdout and stderr, so the cause it
+printed never reaches you — a bare exit code is all that survives. The pack
+therefore appends its own account there: one line per event, stamped and
+attributed to the operation that produced it, with `FAILED: <cause>` for an op
+that failed. When an error reads `tmux exited 1:` with nothing after the colon,
+that file is where the missing half went. Note also that a deleted binding strands a child job:
 `stop` has no orphan reaper, so a scratch sidecar directory removed by hand
 leaves the dispatch behind.
 

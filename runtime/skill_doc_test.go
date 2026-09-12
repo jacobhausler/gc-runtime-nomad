@@ -180,3 +180,18 @@ func TestSkillWarnsThatConformanceDisablesTheGate(t *testing.T) {
 			"the warning is now false", skillDoc)
 	}
 }
+
+// TestSkillPointsAtTheDurableDiagnostics: the pack writes its own account to a
+// file precisely because gc discards its stderr, and an instrument nobody
+// knows about is not an instrument. If the file or its directory is ever
+// renamed, the skill stops pointing at anything.
+func TestSkillPointsAtTheDurableDiagnostics(t *testing.T) {
+	doc := readSkillDoc(t)
+	if !strings.Contains(doc, diagnosticsFile) {
+		t.Errorf("%s does not name %q, the file that holds the cause gc throws away",
+			skillDoc, diagnosticsFile)
+	}
+	if !strings.Contains(doc, "GC_NOMAD_SIDECAR_DIR") {
+		t.Errorf("%s names the diagnostics file but not the directory it lives in", skillDoc)
+	}
+}
