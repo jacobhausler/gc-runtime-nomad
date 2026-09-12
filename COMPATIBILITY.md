@@ -30,21 +30,31 @@ git log --oneline upstream/main..75fbc2cf5b      # what the fork adds
 make build COMMIT=75fbc2cf5b VERSION=dev         # reproduce the published binary
 ```
 
-Be clear about the size of that audit, because the number is not small:
-**the pin is 97 commits ahead of `upstream/main`, and `upstream/main` is 100
-commits ahead of the pin** (measured 2026-09-12). This is a diverged fork, not
-a patch series.
+**What you are looking at is a PINNED BUILD, not an abandoned fork, and the
+difference is a discipline with a name.** The maintainer's estate runs the
+EDGE protocol: every local deviation from `gastownhall/gascity` is a hot-patch
+that must have an **upstream twin** — a filed PR or issue — and an **expiry
+equal to that twin's merge.** When the twin lands, the local patch is dead
+weight and the next pin roll drops it. A nightly audit files findings against
+anything local that cannot name its twin and an expiry date.
 
-What makes the audit tractable is that **only six of those families are
-load-bearing for this pack** — the rest are the maintainer's own city work that
-happens to share the lineage. Those six, their upstream PRs, and what each one
-does are the table in
-[`docs/PIN-DEPENDENCIES.md`](docs/PIN-DEPENDENCIES.md). Audit those six; you do
-not need to read 97 commits to decide.
+So "these commits are not upstream yet" is the steady state of that model, not
+a warning sign, and open PRs are not a stalled release — the pack's own
+co-owner runs the same way, with his own queue of pending upstream PRs. If you
+already run a pinned `gc` (and if you are considering this pack, you probably
+do), this is the operating mode you are in.
 
-If your policy is "no forks in production", that policy is correct here and the
-honest answer is to wait for the upstream PRs. This section exists so the
-decision is yours on real numbers, not on a reassuring sentence.
+For scale: the pin sits 97 commits ahead of `upstream/main` and 100 behind it
+(measured 2026-09-12) — but that number is **not your audit surface.** Most of
+it is the maintainer's own city work that merely shares the lineage. **Six
+families are load-bearing for this pack**, and each one's upstream twin and
+status is tabulated in
+[`docs/PIN-DEPENDENCIES.md`](docs/PIN-DEPENDENCIES.md). Audit those six.
+
+If your policy forbids running anything but an upstream release binary, this
+pack is not for you yet, and no amount of framing changes that — the families
+it needs are genuinely not upstream. Tracking their twins is how you know when
+that stops being true.
 
 This is not a version floor that a newer release will eventually clear on
 its own. The pack rides a *city pin* carrying ~19 behaviour families.
