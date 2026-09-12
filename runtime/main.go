@@ -86,9 +86,15 @@ const (
 	envLogLabels          = "GC_NOMAD_LOG_LABELS"
 	envLogArtifact        = "GC_NOMAD_LOG_SHIPPER_ARTIFACT"
 	envAgentImage         = "GC_NOMAD_AGENT_IMAGE"
-	envAdoptMaxAge        = "GC_NOMAD_ADOPT_MAX_AGE"
-	envDNSServers         = "GC_NOMAD_DNS_SERVERS"
-	envNodeConstraint     = "GC_NOMAD_NODE_CONSTRAINT"
+	// GC_NOMAD_AGENT_IMAGE_TAR delivers the agent image as a TARBALL fetched
+	// per allocation and loaded by the docker driver, instead of pulled from a
+	// registry. Set it and no registry is required; leave it unset and nothing
+	// changes. See runtime/image_tar.go for why this exists.
+	envAgentImageTar    = "GC_NOMAD_AGENT_IMAGE_TAR"
+	envAgentImageTarSum = "GC_NOMAD_AGENT_IMAGE_TAR_SHA256"
+	envAdoptMaxAge      = "GC_NOMAD_ADOPT_MAX_AGE"
+	envDNSServers       = "GC_NOMAD_DNS_SERVERS"
+	envNodeConstraint   = "GC_NOMAD_NODE_CONSTRAINT"
 
 	defaultParentJob = "gc-sessions"
 

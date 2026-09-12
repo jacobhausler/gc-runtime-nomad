@@ -1581,7 +1581,31 @@ func (l *lifecycle) parentJobSpec() nomadJob {
 	// One shape: the Docker task the configured image describes. There is no
 	// legacy exec variant left to choose between.
 	return parentJobSpec(l.client.namespace, l.nodePool, l.parentJobID, l.logShipper, l.agentImage,
-		l.placement, l.gcArtifact())
+		l.placement, l.gcArtifact(), l.imageTar())
+}
+
+// imageTar resolves the agent-image tarball delivery from the environment.
+//
+// Read fresh per call, like gcArtifact, so turning it on or off is a
+// supervisor-env change plus a cycle rather than a rebuild. Unset means "pull
+// the image from wherever its tag points", which is what every deployment did
+// before this existed.
+//
+// The checksum is optional but strongly wanted: Nomad verifies it before the
+// driver loads the tarball, and an image loaded from unverified bytes is a
+// worse trust boundary than a registry pull. When only the URL is set, the
+// "file:<url>.sha256" sidecar form is derived, matching the gc artifact's
+// convention, so publishing a sidecar beside the tarball is enough.
+func (l *lifecycle) imageTar() imageTarConfig {
+	src := strings.TrimSpace(os.Getenv(envAgentImageTar))
+	if src == "" {
+		return imageTarConfig{}
+	}
+	sum := strings.TrimSpace(os.Getenv(envAgentImageTarSum))
+	if sum == "" {
+		sum = "file:" + src + ".sha256"
+	}
+	return imageTarConfig{Source: src, Checksum: sum}
 }
 
 // gcArtifact resolves the per-box gc download from the gc that is ACTUALLY

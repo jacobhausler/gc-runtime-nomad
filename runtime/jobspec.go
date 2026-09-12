@@ -84,12 +84,12 @@ const (
 // binary to it). With no second shape left to fall back to, newLifecycle
 // refuses to build a lifecycle at all without an image rather than
 // register a parent whose boxes can never run an agent.
-func parentJobSpec(namespace, nodePool, parentID string, logShipper logShipperConfig, agentImage string, dep placementConfig, artOpt ...gcArtifactConfig) nomadJob {
+func parentJobSpec(namespace, nodePool, parentID string, logShipper logShipperConfig, agentImage string, dep placementConfig, artOpt ...sessionTaskOpt) nomadJob {
 	// Variadic because the feature is OPTIONAL and off is the safe default:
 	// every existing caller keeps today's jobspec byte-for-byte. The one
 	// production call site passes it explicitly, and a test asserts that, so
 	// "a caller forgot" cannot silently disable it where it matters.
-	art := firstArtifact(artOpt)
+	art, imgTar := splitSessionTaskOpts(artOpt)
 	job := nomadJob{
 		ID:        parentID,
 		Namespace: namespace,
@@ -142,10 +142,11 @@ func parentJobSpec(namespace, nodePool, parentID string, logShipper logShipperCo
 			// dispatcher actually sends. Still non-secret attribution only - the
 			// instance token/capability NEVER rides Meta.
 			MetaOptional: []string{"gc_session", "gc_nonce", "gc_created_at", agentImageMetaKey,
-				gcArtifactMetaKey, gcArtifactSumMetaKey},
+				gcArtifactMetaKey, gcArtifactSumMetaKey,
+				imageTarMetaKey, imageTarSumMetaKey},
 			Payload: "forbidden",
 		},
-		TaskGroups: []nomadTaskGroup{sessionTaskGroup(logShipper, agentImage, dep, art)},
+		TaskGroups: []nomadTaskGroup{sessionTaskGroup(logShipper, agentImage, dep, artOpt...)},
 	}
 	// Stamp the jobspec's own fingerprint into its Meta: a
 	// registered parent that still exists and still matches on NodePool can
@@ -170,6 +171,8 @@ func parentJobSpec(namespace, nodePool, parentID string, logShipper logShipperCo
 		// to be possible at all.
 		gcArtifactMetaKey:    art.Source,
 		gcArtifactSumMetaKey: art.Checksum,
+		imageTarMetaKey:      imgTar.Source,
+		imageTarSumMetaKey:   imgTar.Checksum,
 	}
 	job.Meta[jobspecHashMetaKey] = jobspecHash(job)
 	return job
@@ -267,9 +270,8 @@ var nomadConstraintOperands = map[string]bool{
 	"in": true, "not": true, "is": true, "bitset": true,
 }
 
-func sessionTaskGroup(logShipper logShipperConfig, agentImage string, dep placementConfig, artOpt ...gcArtifactConfig) nomadTaskGroup {
-	art := firstArtifact(artOpt)
-	agent := sessionTask(agentImage, art)
+func sessionTaskGroup(logShipper logShipperConfig, agentImage string, dep placementConfig, artOpt ...sessionTaskOpt) nomadTaskGroup {
+	agent := sessionTask(agentImage, artOpt...)
 	tasks := []nomadTask{agent}
 	// bridge networking so the host-network fatal-rule constraint above
 	// has a placement to fail closed against.
@@ -322,8 +324,8 @@ func sessionTaskGroup(logShipper logShipperConfig, agentImage string, dep placem
 	return group
 }
 
-func sessionTask(agentImage string, artOpt ...gcArtifactConfig) nomadTask {
-	art := firstArtifact(artOpt)
+func sessionTask(agentImage string, artOpt ...sessionTaskOpt) nomadTask {
+	art, imgTar := splitSessionTaskOpts(artOpt)
 	// The image owns the agent toolchain. Keep the task alive with a
 	// signal-aware native sleep process; GC's rendered command and runtime
 	// environment still arrive later through alloc-exec/staging. This Docker
@@ -391,15 +393,34 @@ func sessionTask(agentImage string, artOpt ...gcArtifactConfig) nomadTask {
 			// artifact in this same file already used this prefix.
 			RelativeDest: gcArtifactRelativeDest,
 		})
-		// PATH PRECEDENCE IS THE WHOLE CONTRACT. The image may still carry a
-		// gc — older images do, and an adopter's may too — and a fetched gc
-		// that loses a PATH race to a baked one would reintroduce the exact
-		// staleness this removes, silently, with the artifact downloading
-		// successfully every time. Nomad expands NOMAD_TASK_DIR inside the
-		// container, and the fetched copy goes FIRST.
-		if task.Env == nil {
-			task.Env = map[string]string{}
-		}
+	}
+	if imgTar.enabled() {
+		// THE IMAGE WITHOUT A REGISTRY. Nomad's docker driver takes
+		// `load = "<tarball>"` — documented as equivalent to `docker load -i`
+		// — so the image bytes arrive as an artifact and the driver imports
+		// them. No registry, and no per-client daemon configuration either,
+		// which an in-cluster registry would need on every client that is not
+		// already configured for an insecure one.
+		//
+		// It also removes a trap this pack could previously only WARN about: a
+		// bare local tag works solely through the node's own image cache, so
+		// every session is silently pinned to whichever node built the image.
+		// With the tarball fetched per allocation, every eligible node loads
+		// the same checksummed bytes and the hidden placement pin goes away.
+		//
+		// archive=false is REQUIRED, not a preference: Nomad auto-extracts a
+		// recognised archive, and an extracted tar is not a tar the driver can
+		// load. `image` stays set — the tarball supplies the bytes, the tag
+		// selects which image inside it to run.
+		task.Artifacts = append(task.Artifacts, nomadArtifact{
+			GetterSource: "${NOMAD_META_" + imageTarMetaKey + "}",
+			GetterOptions: map[string]string{
+				"checksum": "${NOMAD_META_" + imageTarSumMetaKey + "}",
+				"archive":  "false",
+			},
+			RelativeDest: "local/" + imageTarDest + "/",
+		})
+		task.Config["load"] = "${NOMAD_TASK_DIR}/" + imageTarDest + "/"
 		// NOT task.Env[PATH]. Nomad interpolates its OWN variables in the task
 		// env, so ${NOMAD_TASK_DIR} resolved there and ${PATH} — not a Nomad
 		// variable — was passed through as six literal characters, leaving every
@@ -867,6 +888,12 @@ type nomadTemplate struct {
 // every historical pin. A deployment turns it on when its release pipeline is
 // producing them, and the in-box staleness check stays the backstop either way.
 const (
+	// imageTarMetaKey carries the agent-image TARBALL url, and
+	// imageTarSumMetaKey the checksum Nomad verifies before the driver loads
+	// it. Both are dispatch-overridable for the same reason the image tag is:
+	// a lane may name its own toolchain.
+	imageTarMetaKey    = "gc_image_tar"
+	imageTarSumMetaKey = "gc_image_tar_sha"
 	// gcArtifactMetaKey carries the resolved download URL.
 	gcArtifactMetaKey = "gc_artifact"
 	// gcArtifactSumMetaKey carries the checksum Nomad verifies.
