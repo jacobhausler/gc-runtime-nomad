@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -89,5 +90,45 @@ func TestAbsentSecretsAreReportedEvenWhenNothingStages(t *testing.T) {
 	_, _, absent := mergeExtraSecretEnv(empty.Env, extraSecretKeys)
 	if len(absent) != 1 || absent[0] != "GC_DRILL_NEVER_SET_ANYWHERE" {
 		t.Fatalf("absent = %v, want the one declared key even with nothing to stage", absent)
+	}
+}
+
+// TestForbiddenHintSeparatesNoTokenFromRefusedToken is gate 4's expired-token
+// case: the layer that knows naming which of two very different faults it is.
+//
+// Nomad answers "Permission denied" whether no token was sent or a token was
+// sent and rejected. Those need opposite responses — one is configuration, the
+// other a live credential that aged out — and the bare answer sends an
+// operator to edit ACL policy either way. This estate has the receipt for the
+// second: a seat token that worked at T and 403'd by T+15min.
+func TestForbiddenHintSeparatesNoTokenFromRefusedToken(t *testing.T) {
+	none := forbiddenHint(false)
+	sent := forbiddenHint(true)
+	if none == sent {
+		t.Fatal("both 403 causes produce the same hint; the distinction is the whole point")
+	}
+	if !strings.Contains(none, "GC_NOMAD_TOKEN") {
+		t.Errorf("the no-token hint does not name the variable that supplies one: %q", none)
+	}
+	for _, want := range []string{"expired", "revoked", "check the token before the policy"} {
+		if !strings.Contains(sent, want) {
+			t.Errorf("the refused-token hint does not mention %q: %q", want, sent)
+		}
+	}
+}
+
+// TestStatusErrorCarriesTheForbiddenHint pins that the hint reaches the error
+// an operator actually reads, and that other statuses are untouched.
+func TestStatusErrorCarriesTheForbiddenHint(t *testing.T) {
+	err := statusError(403, "/v1/jobs", []byte(`{"error":"Permission denied"}`), true)
+	if !errors.Is(err, errJobForbidden) {
+		t.Fatalf("403 no longer maps to errJobForbidden: %v", err)
+	}
+	if !strings.Contains(err.Error(), "expired") {
+		t.Errorf("the 403 error does not carry the hint: %v", err)
+	}
+	gone := statusError(404, "/v1/jobs", nil, true)
+	if !errors.Is(gone, errJobGone) || strings.Contains(gone.Error(), "expired") {
+		t.Errorf("a 404 was altered by the 403 hint: %v", gone)
 	}
 }

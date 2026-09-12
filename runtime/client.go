@@ -989,7 +989,7 @@ func (c *client) doIndexed(ctx context.Context, timeout time.Duration, method st
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return idx, statusError(resp.StatusCode, target.String(), data)
+		return idx, statusError(resp.StatusCode, target.String(), data, strings.TrimSpace(c.token) != "")
 	}
 	if out == nil || len(bytes.TrimSpace(data)) == 0 {
 		return idx, nil
@@ -1019,15 +1019,36 @@ func (c *client) urlFor(parts []string, query url.Values) *url.URL {
 	return &u
 }
 
-func statusError(status int, target string, data []byte) error {
+func statusError(status int, target string, data []byte, hasToken bool) error {
 	msg := statusText(status, data)
 	switch status {
 	case http.StatusNotFound:
 		return fmt.Errorf("%w: %s: %s", errJobGone, target, msg)
 	case http.StatusForbidden:
-		return fmt.Errorf("%w: %s: %s", errJobForbidden, target, msg)
+		return fmt.Errorf("%w: %s: %s%s", errJobForbidden, target, msg, forbiddenHint(hasToken))
 	}
 	return fmt.Errorf("nomad %s: status %d: %s", target, status, msg)
+}
+
+// forbiddenHint separates the two reasons Nomad answers 403, because the bare
+// answer reads the same for both and sends operators to the wrong place.
+//
+// Nomad says "Permission denied" whether no token was sent at all or a token
+// was sent and rejected. The first is configuration — GC_NOMAD_TOKEN never
+// reached the supervisor. The second is a live credential that has expired,
+// been revoked, or lacks a capability, and this estate has the receipt for it:
+// a seat token that worked at T and answered 403 by T+15min. An operator
+// reading "Permission denied" on a job listing reasonably concludes their ACL
+// POLICY is wrong and goes to edit policy, which is the expensive wrong
+// direction when the token simply aged out.
+func forbiddenHint(hasToken bool) string {
+	if !hasToken {
+		return " (no GC_NOMAD_TOKEN was sent with this request: if the cluster has ACLs " +
+			"enabled the runtime needs one, and the supervisor's environment is where it comes from)"
+	}
+	return " (a token WAS sent and refused: it has expired, been revoked, or lacks the " +
+		"capability this route needs for the namespace — check the token before the policy, " +
+		"an aged-out token and a wrong policy answer identically here)"
 }
 
 func statusText(status int, data []byte) string {
