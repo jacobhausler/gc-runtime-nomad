@@ -136,3 +136,29 @@ func TestCompatibilityDocDisclosesTheAgentSandboxPosture(t *testing.T) {
 		}
 	}
 }
+
+// TestCompatibilityDocFakeBlindnessListIsStillTrue guards the claim that the
+// offline fake models none of the jobspec surface. That claim is what tells a
+// reader how far to trust a green receipt, and it is the kind of statement
+// that rots in the safe-looking direction: someone teaches fakenomad about
+// constraints, the document still says it is blind to them, and the receipt
+// quietly looks weaker than it is — or, worse, another field is added to the
+// fake and a reader trusts the whole list.
+func TestCompatibilityDocFakeBlindnessListIsStillTrue(t *testing.T) {
+	fake, err := os.ReadFile("../fakenomad/fakenomad.go")
+	if err != nil {
+		t.Fatalf("reading fakenomad: %v", err)
+	}
+	// Each token is something COMPATIBILITY.md says the fake does not model.
+	for _, token := range []string{
+		"ParameterizedJob", "MetaOptional", "Driver", "Constraints",
+		"RestartPolicy", "Artifacts", "Lifecycle",
+	} {
+		if strings.Contains(string(fake), token) {
+			t.Errorf("fakenomad now references %q, but %s still tells readers the fake\n"+
+				"models none of the jobspec surface. Update the document: how much a\n"+
+				"green conformance receipt proves depends on this list being true.",
+				token, compatibilityDoc)
+		}
+	}
+}

@@ -240,10 +240,42 @@ discovered later.
    now fails closed on a non-amd64 client rather than half-running, but
    failing closed is not support.
 
-3. **The conformance receipt is offline.** `CONFORMANCE-RECEIPT.md` is
-   produced against `fakenomad`, this pack's own in-memory Nomad API
-   fake. It proves lifecycle protocol conformance. It does **not** prove
-   anything about your cluster, your image, or your `gc`.
+3. **Read the green checks narrowly — they cover less than they look
+   like they cover.** This is the limitation most likely to mislead, so
+   it is spelled out rather than summarized.
+
+   - `CONFORMANCE-RECEIPT.md` is produced against `fakenomad`, this
+     pack's own in-memory Nomad API fake. It proves lifecycle protocol
+     conformance and nothing about your cluster, your image, or your
+     `gc`.
+   - **The fake is structurally blind to the jobspec.** It models job
+     ID, namespace, node pool, meta, port labels, and a task's command /
+     args / env / templates. It models no `ParameterizedJob` or
+     `MetaOptional`, no driver, no image, no constraints, no resources,
+     no restart policy, no artifact checksum, no task lifecycle, no ACL
+     token and no TLS. Every one of those is load-bearing in production.
+   - **That is not hypothetical — it has already happened.** The
+     `gc_created_at` dispatch key was added without being declared in
+     `MetaOptional`. Nomad rejects an undeclared key outright, HTTP 500,
+     on *every* provision; zero boxes started. The offline ladder was
+     green throughout. The post-mortem is a comment in `jobspec.go`.
+   - **The fake runs a box's commands as local subprocesses.** The
+     production session task is a Docker task, but the fake reads only
+     the command and ignores driver and image — so a conformance run
+     executes "in-box" commands on the developer's own machine, where
+     `tmux`, `ps`, `sh` and `gc` happen to exist. A green receipt is
+     partly a statement about the machine that produced it.
+   - **CI is green on a `gc` that cannot run this pack.** The workflow
+     pins the *upstream base* of the pin lineage — the commit carrying
+     none of the 19 families — because the pin itself does not exist on
+     the public repository and cannot be resolved by `go install`. So
+     the suite passes against exactly the `gc` this document says makes
+     the pack go dark. The workflow states this in its own comments; it
+     is repeated here because a green check is what people actually
+     read. A release needs an at-pin run against live Nomad, exercising
+     parameterized dispatch with `meta_optional`, the Docker driver,
+     constraints, the artifact checksum, the poststart sidecar, and both
+     ACL tokens.
 
 4. **The image build ships, but the last mile is undocumented.**
    `toolchain/Dockerfile`, `toolchain/TOOLCHAIN.lock` and
