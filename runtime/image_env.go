@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 )
 
@@ -128,4 +129,61 @@ func namesOrchestratorPath(value string, roots []string) bool {
 		}
 	}
 	return false
+}
+
+// imageRegistry returns the registry host of an image reference, or "" when the
+// reference names none.
+//
+// WHY THIS MATTERS MORE THAN IT LOOKS. A reference with no registry host — say
+// "gc-agent:3a3dda06a" — cannot be pulled by anything. Docker resolves a bare
+// name against Docker Hub, which will not have a privately built agent image,
+// so in practice the only way such a reference ever resolves is from a node's
+// LOCAL image cache. That silently pins every session to whichever nodes happen
+// to have been the build host, and it is invisible in the jobspec: the
+// constraint list looks clean, the scheduler places freely, and the allocation
+// then fails to start on any node that was not there when the image was built.
+//
+// An arbitrary cluster wants to place allocations anywhere, which is exactly
+// what a registry-less reference cannot support. The pack cannot fix that for
+// an adopter — it does not build their image and must not push one — but it can
+// refuse to let it be a surprise.
+//
+// The rule is Docker's own: the first path segment is a registry host only if
+// it contains a "." or a ":", or is exactly "localhost".
+func imageRegistry(ref string) string {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return ""
+	}
+	first, rest, ok := strings.Cut(ref, "/")
+	if !ok {
+		return "" // "name" or "name:tag" — no registry component at all
+	}
+	_ = rest
+	if first == "localhost" || strings.ContainsAny(first, ".:") {
+		return first
+	}
+	return "" // "library/name" — a Docker Hub namespace, not a registry host
+}
+
+// imageIsRegistryless reports whether this reference can only ever resolve from
+// a node's local image cache.
+func imageIsRegistryless(ref string) bool {
+	return strings.TrimSpace(ref) != "" && imageRegistry(ref) == ""
+}
+
+// registrylessImageWarning is the sentence an adopter needs BEFORE the first
+// placement that lands on the wrong node, not after.
+func registrylessImageWarning(ref string) string {
+	if !imageIsRegistryless(ref) {
+		return ""
+	}
+	return fmt.Sprintf("warning: the agent image %q names no registry, so it can only ever resolve "+
+		"from a node's LOCAL image cache. Nothing can pull it: a bare name resolves against Docker "+
+		"Hub, which will not have a privately built agent image. Every session is therefore pinned to "+
+		"whichever nodes already hold a copy, and that pin is INVISIBLE — the jobspec carries no "+
+		"constraint for it, the scheduler places freely, and the allocation fails to start on any "+
+		"other node. For a cluster that should be able to place a session anywhere, push the image to "+
+		"a registry your clients can reach and reference it by that name; otherwise pre-load it on "+
+		"every eligible node and expect to redo that on every image change.", ref)
 }

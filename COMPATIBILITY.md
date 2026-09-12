@@ -303,10 +303,34 @@ links cleanly and then dies at runtime inside an Ubuntu noble image (ICU
 74). Build the in-box `gc` against the image you will actually run it
 in.
 
-**Registry access.** The jobspec ships **no** Docker `auth` block. The
-image has to be pullable by the Nomad client with no job-level
-credentials — a public registry, a client-level docker config, or a
-pre-pulled image. There is no per-job registry credential path today.
+**A registry is effectively required, and the pack now says so.**
+
+An arbitrary cluster expects to place an allocation on any eligible node.
+An image reference with **no registry host** cannot support that: a bare
+name like `gc-agent:3a3dda06a` resolves against Docker Hub, which will not
+have a privately built agent image, so in practice it only ever resolves
+from a node's **local image cache**. Every session is then pinned to
+whichever nodes happen to hold a copy — and that pin is **invisible**. The
+jobspec carries no constraint for it, the scheduler places freely, and the
+allocation fails to start on any node that was not the build host.
+
+`gc-runtime-nomad check` warns when the configured image names no
+registry, and a pull failure on such a reference says outright that no
+node can ever pull it, rather than reporting it as "not on this node" —
+which understates a condition that will recur on every node, forever.
+
+So: push the agent image to a registry your Nomad clients can reach and
+reference it by that name. Pre-loading it on every eligible node also
+works, and means redoing that on every image change.
+
+**Private registries: no per-job credential path.** The jobspec ships
+**no** Docker `auth` block, deliberately — a task-level `auth` stanza puts
+the password in the jobspec, and therefore in Nomad's API and in every
+copy of that job. The image has to be pullable by the Nomad client without
+job-level credentials: a public registry, a client-level docker config, or
+Nomad's own `docker` driver `auth` configuration. If your image must be
+private, that credential is a **cluster** configuration step this pack
+does not perform and cannot perform for you.
 
 ---
 

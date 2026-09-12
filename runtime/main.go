@@ -171,6 +171,9 @@ func run(args []string, stdin io.Reader, stdout, stderr *os.File) int {
 		} else if os.Getenv(envLogArtifact) == "" {
 			fmt.Fprintln(stderr, "warning: log-shipper artifact source will use network default (GC_NOMAD_LOG_SHIPPER_ARTIFACT unset)")
 		}
+		if w := registrylessImageWarning(os.Getenv(envAgentImage)); w != "" {
+			fmt.Fprintln(stderr, w)
+		}
 		if os.Getenv(envAgentImage) == "" {
 			fmt.Fprintln(stderr, "warning: GC_NOMAD_AGENT_IMAGE unset — the session agent task is a Docker task and there is no other session shape, so every lifecycle op will fail closed")
 		}

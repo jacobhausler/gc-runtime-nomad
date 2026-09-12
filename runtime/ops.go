@@ -2829,6 +2829,17 @@ func allocFailureDiagnosis(agentImage string, allocs []allocRecord, taskName str
 	}
 	if isImagePullFailure(event) {
 		if img := strings.TrimSpace(agentImage); img != "" {
+			if imageIsRegistryless(img) {
+				// Not a transient pull fault and not fixable in a registry:
+				// this reference can never be pulled by anything, so "not on
+				// this node" understates it. It will fail on every node that
+				// does not already hold a copy, forever.
+				return fmt.Sprintf("the image %q is not on this node AND NAMES NO REGISTRY, so no "+
+					"node can ever pull it — a bare name resolves against Docker Hub, which will not "+
+					"have a privately built agent image. This allocation did not lose a race with a "+
+					"pull; it landed on a node that was never given the image. Push it to a registry "+
+					"your clients can reach, or pre-load it on every eligible node: %s", img, event)
+			}
 			return fmt.Sprintf("the image %q is not on this node: %s", img, event)
 		}
 		return fmt.Sprintf("the agent image is not on this node: %s", event)
