@@ -614,8 +614,17 @@ func (l *lifecycle) confirmDispatchPlaced(ctx context.Context, sessionName strin
 				return fmt.Errorf("provision %q: child %s placed an allocation that went %s without starting — if the agent image (%s) is not present on the node, that is why; read `nomad alloc status` for the driver's own error",
 					sessionName, b.ChildJobID, lastStatus, l.agentImage)
 			}
-			return fmt.Errorf("provision %q: child %s was dispatched but NO allocation was placed within %s — the image (%s) or the node constraints cannot be satisfied",
-				sessionName, b.ChildJobID, allocPlacementTimeout, l.agentImage)
+			// Name the constraints rather than referring to them. NOTHING
+			// was placed, so there is no allocation to read a driver error
+			// from, and "the node constraints cannot be satisfied" sends an
+			// operator to go find out which. The pack built the jobspec; it
+			// knows exactly which rules it asked for.
+			return fmt.Errorf("provision %q: child %s was dispatched but NO allocation was placed within %s — "+
+				"no client satisfied the job's constraints. This job requires %s. Compare them against "+
+				"`nomad node status -verbose <node>`; an image that is merely missing would have PLACED "+
+				"and then failed, so a placement that never happens is a constraint or capacity fault, "+
+				"not an image one",
+				sessionName, b.ChildJobID, allocPlacementTimeout, describeConstraints(l.parentJobSpec().Constraints))
 		}
 		select {
 		case <-ctx.Done():
@@ -2771,11 +2780,51 @@ func allocFailureDiagnosis(agentImage string, allocs []allocRecord, taskName str
 		}
 		return fmt.Sprintf("the agent image is not on this node: %s", event)
 	}
+	if isOOMFailure(event) {
+		// Its own case because its REMEDY is its own. A pull fault is fixed in
+		// a registry, a constraint fault on a client; an OOM is fixed by
+		// raising the task's memory or shrinking what runs in it, and the
+		// generic "never started" wording below buries that under a sentence
+		// about starting.
+		return fmt.Sprintf("the %q task was OOM-killed — the box ran out of the memory its "+
+			"resources block allows, which is a sizing fault, not a start fault: %s", taskName, event)
+	}
 	state := strings.TrimSpace(ts.State)
 	if state == "" {
 		state = "unknown"
 	}
 	return fmt.Sprintf("the %q task never started (state %q): %s", taskName, state, event)
+}
+
+// describeConstraints renders a job's placement rules as the operator would
+// have to read them off a node, so a "nothing placed" error can name what was
+// required instead of referring to it.
+func describeConstraints(cs []nomadConstraint) string {
+	if len(cs) == 0 {
+		return "no constraints at all (so this is capacity, not placement)"
+	}
+	parts := make([]string, 0, len(cs))
+	for _, c := range cs {
+		parts = append(parts, strings.TrimSpace(c.LTarget+" "+c.Operand+" "+c.RTarget))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// isOOMFailure reports whether a driver event describes a task the kernel
+// killed for memory. Matched on the driver's vocabulary rather than one exact
+// string, the same way isImagePullFailure is: the docker driver, the exec
+// driver and the kernel each word this differently and all three mean the box
+// ran out of memory.
+func isOOMFailure(event string) bool {
+	e := strings.ToLower(event)
+	switch {
+	case strings.Contains(e, "oom killed"),
+		strings.Contains(e, "oom-killed"),
+		strings.Contains(e, "oomkilled"),
+		strings.Contains(e, "out of memory"):
+		return true
+	}
+	return false
 }
 
 // isImagePullFailure reports whether a driver event describes an image the node

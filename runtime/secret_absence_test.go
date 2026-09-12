@@ -231,3 +231,47 @@ func TestIncompleteCityTargetIsNamed(t *testing.T) {
 		}
 	}
 }
+
+// TestOOMIsItsOwnNamedCause pins gate 4's OOM row. It used to fall into the
+// generic "the task never started" fallback, which passes the driver event
+// through but buries the cause under a sentence about STARTING — and an OOM's
+// remedy (raise the memory, or shrink what runs in the box) has nothing to do
+// with starting, a registry, or a constraint.
+func TestOOMIsItsOwnNamedCause(t *testing.T) {
+	for _, wording := range []string{
+		"Docker container exited: OOM Killed",
+		"Task was oom-killed",
+		"container killed: OOMKilled",
+		"the kernel reported out of memory",
+	} {
+		if !isOOMFailure(wording) {
+			t.Errorf("an OOM worded as %q was not recognised", wording)
+		}
+	}
+	for _, other := range []string{
+		"Failed to pull `gc-agent:x`: pull access denied",
+		"Policy allows no restarts",
+		"",
+	} {
+		if isOOMFailure(other) {
+			t.Errorf("a non-OOM event was treated as one: %q", other)
+		}
+	}
+}
+
+// TestPlacementFailureNamesTheConstraints pins the other half: when NOTHING
+// places there is no allocation to read a driver error from, so "the node
+// constraints cannot be satisfied" sends an operator off to discover which.
+// The pack built the jobspec and knows exactly what it asked for.
+func TestPlacementFailureNamesTheConstraints(t *testing.T) {
+	spec := parentJobSpec("gc", "", "gc-sessions", logShipperConfig{}, testAgentImage, placementConfig{})
+	got := describeConstraints(spec.Constraints)
+	for _, want := range []string{"attr.kernel.name", "linux", "attr.cpu.arch", "amd64"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("describeConstraints omits %q: %s", want, got)
+		}
+	}
+	if empty := describeConstraints(nil); !strings.Contains(empty, "capacity") {
+		t.Errorf("with no constraints the message should point at capacity, got: %s", empty)
+	}
+}
