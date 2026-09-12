@@ -155,6 +155,9 @@ func run(args []string, stdin io.Reader, stdout, stderr *os.File) int {
 		if os.Getenv(envAgentImage) == "" {
 			fmt.Fprintln(stderr, "warning: GC_NOMAD_AGENT_IMAGE unset — the session agent task is a Docker task and there is no other session shape, so every lifecycle op will fail closed (cr-3vvnb5.2)")
 		}
+		if skipVerifyRequested() {
+			fmt.Fprintln(stderr, tlsVerificationDisabledWarning)
+		}
 		if os.Getenv(envDNSServers) == "" {
 			fmt.Fprintln(stderr, "warning: session boxes will declare no dns stanza and inherit the client host's resolv.conf (GC_NOMAD_DNS_SERVERS unset) — on a systemd-resolved host that stub resolver is unreachable from a bridge alloc (cr-tzsxk.18)")
 		}

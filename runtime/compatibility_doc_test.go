@@ -86,3 +86,53 @@ func TestCompatibilityDocStatesTheModuleGoVersion(t *testing.T) {
 		t.Errorf("%s does not state the module's go directive %q", compatibilityDoc, goVersion)
 	}
 }
+
+// TestCompatibilityDocStatesEveryFatalPlacementRule is the guard the first
+// four were missing.
+//
+// An outside review put it exactly right: the original guards pinned the
+// facts that do not rot (a protocol string, a pinned filename) and missed the
+// ones that do. It was proven the same day — adding the ${attr.cpu.arch}
+// fence made this document's arch section false the moment it landed, and not
+// one of the four guards fired, because none of them read the constraint LIST.
+// This one does: every fatal rule the jobspec sends must appear in the
+// document, so adding a rule without saying so goes red.
+func TestCompatibilityDocStatesEveryFatalPlacementRule(t *testing.T) {
+	doc := readCompatibilityDoc(t)
+	// No deployment fences: what is left is exactly the pack's own fatal rules.
+	job := parentJobSpec("gc", "", "gc-sessions", logShipperConfig{}, "img", placementConfig{})
+	if len(job.Constraints) == 0 {
+		t.Fatal("the jobspec carries no constraints at all")
+	}
+	for _, c := range job.Constraints {
+		if !strings.Contains(doc, c.LTarget) {
+			t.Errorf("%s never mentions the fatal placement rule %s %s %s.\n"+
+				"A placement rule decides where this pack can run at all; adding one\n"+
+				"without stating it leaves adopters reading a supported-platform\n"+
+				"section that is quietly false.", compatibilityDoc, c.LTarget, c.Operand, c.RTarget)
+		}
+	}
+}
+
+// TestCompatibilityDocDisclosesTheAgentSandboxPosture pins the disclosure of
+// the agent config the pack hardcodes. approval_policy/sandbox_mode decide
+// what an agent in a box may do, there is no deployment override, and the
+// documentation did not mention either one until an outside review found them
+// in the source. If the posture changes, or the disclosure is dropped, this
+// goes red.
+func TestCompatibilityDocDisclosesTheAgentSandboxPosture(t *testing.T) {
+	rendered, err := os.ReadFile("codex_home.go")
+	if err != nil {
+		t.Fatalf("reading codex_home.go: %v", err)
+	}
+	doc := readCompatibilityDoc(t)
+	for _, setting := range []string{"approval_policy", "sandbox_mode", "danger-full-access"} {
+		if !strings.Contains(string(rendered), setting) {
+			continue // the posture changed; nothing to disclose for this key
+		}
+		if !strings.Contains(doc, setting) {
+			t.Errorf("the pack writes %q into every agent config and %s does not\n"+
+				"disclose it", setting, compatibilityDoc)
+		}
+	}
+}

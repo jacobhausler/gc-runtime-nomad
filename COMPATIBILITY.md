@@ -142,9 +142,13 @@ places and silently assumed in a third.
 `GC_NOMAD_LOG_SHIPPER_ARTIFACT` lets you point the shipper at a
 different tarball, but the checksum sent to Nomad's artifact stanza is
 always the x86_64 one, so an arm64 override fails the checksum rather
-than working. There is no arm64 path today. Give the pack amd64 clients,
-or add a `cpu.arch` constraint of your own so a wrong-arch placement
-fails loudly instead of running half-dark.
+than working. There is no arm64 path today.
+
+**As of the fence below, the silent part is closed.** The parent jobspec
+now carries `${attr.cpu.arch} = amd64` as a second fatal rule beside the
+kernel one, so an arm64 client fails to place rather than running an
+agent whose logs quietly never ship. If you have somehow made an arm64
+deployment work, this fence is what you would have to change.
 
 ---
 
@@ -231,10 +235,10 @@ discovered later.
    per-agent override, so **a codex lane and a claude lane cannot
    coexist on one deployment of this runtime.** Tracked as `cr-420zkj`.
 
-2. **amd64 only, and the arch mismatch is silent** (see *Nomad
-   clients*). The image build refuses a wrong-arch `gc` loudly; the
-   *placement* does not, so an arm64 client yields a running agent with
-   no log shipping and no error.
+2. **amd64 only.** No arm64 path exists — the image build, the `gc`
+   inside it, and the log-shipper binary are all x86_64. The placement
+   now fails closed on a non-amd64 client rather than half-running, but
+   failing closed is not support.
 
 3. **The conformance receipt is offline.** `CONFORMANCE-RECEIPT.md` is
    produced against `fakenomad`, this pack's own in-memory Nomad API
@@ -252,11 +256,80 @@ discovered later.
    `build-image.sh` run anywhere but the host that stages the linux pin.
    Tracked as `cr-2dh2w9`.
 
-5. **No credential story for the in-box agent yet.** How an agent inside
-   an alloc obtains its provider credentials is deployment-specific and
-   undocumented here. Tracked with the install work, `cr-pbqh1d`.
+5. **Credentials reach the agent's process environment.** See
+   *Security posture* below — this is the item most likely to decide
+   whether you can adopt, and it was undocumented until an outside
+   review found it. Tracked with the install work, `cr-pbqh1d`.
 
 ---
+
+## Security posture
+
+Three things here are deliberate, load-bearing, and were undocumented
+until an outside adoption review found them in the source. They are
+stated plainly because each one can decide whether this pack is
+adoptable in a given environment.
+
+### The agent runs with no sandbox and no approval gate
+
+Every rendered agent config carries:
+
+```toml
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+```
+
+There is no deployment override. The reasoning is that nobody is
+watching an agent inside a dispatched alloc, so an approval prompt is a
+hang rather than a control, and the alloc's own container is the
+boundary. That reasoning holds **only as far as your container boundary
+does.** If your Nomad clients run privileged containers, share a docker
+socket, or mount host paths into task containers, an agent in this
+runtime has whatever that grants. Decide that deliberately.
+
+Related: the provider base URL is permitted to be plain `http://` and
+the rendered config sets `requires_openai_auth = false`, so a
+non-TLS provider endpoint is accepted without complaint.
+
+### Certificate verification can be off without you knowing
+
+The pack aliases four TLS settings — `CACERT`, `CLIENT_CERT`,
+`CLIENT_KEY`, `TLS_SERVER_NAME` — and deliberately does **not** offer a
+`GC_NOMAD_` spelling for skipping verification. But the Nomad SDK's own
+`DefaultConfig` reads `NOMAD_SKIP_VERIFY` regardless, and the resulting
+config is the one the alloc-exec WebSocket dialer uses — **the channel
+every staged secret travels over.**
+
+One stray `NOMAD_SKIP_VERIFY=1` in the supervisor's environment
+therefore disabled verification for the API *and* for secret staging.
+That is now loud: the runtime prints a warning naming the variable and
+the secret channel every time a client is built, and `check` reports it
+in the pre-flight. It is still not something the pack can refuse on your
+behalf — but it will no longer happen quietly.
+
+### Where credentials actually end up
+
+The staging channel itself is value-blind and does not log secret
+values. What the documentation never said is where the values come to
+rest:
+
+- **Only `_PEM`-suffixed keys get the pointer treatment.** For those,
+  the environment script points at a staged file and never repeats the
+  bytes. **Every other key becomes a literal `export KEY='value'`** in
+  the environment script the pane sources. So an API key or an auth JSON
+  blob lives in the agent's process environment — and therefore in
+  `/proc/<pid>/environ` for the agent and every process it spawns.
+- **The agent's stdout is shipped off-box.** When `GC_NOMAD_LOG_SINK` is
+  set, the log-shipper tails `logs/agent.stdout` — the raw terminal tap
+  — and posts it to that sink; `GC_NOMAD_EGRESS_DIR` gets a copy on
+  stop. **Neither path scrubs.** If an agent ever prints its own
+  environment, that output is durably persisted locally and POSTed to an
+  external endpoint.
+
+Those two facts compose. Treat the log sink and the egress directory as
+credential-sensitive storage, scope the credentials you stage as
+narrowly as you can, and prefer the `_PEM` pointer form wherever the
+credential shape allows it.
 
 ## Reporting a mismatch
 

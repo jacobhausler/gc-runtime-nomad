@@ -11,8 +11,8 @@ This file is the checklist: for each family, the upstream twin, its live merge
 state, what the runtime loses without it, and the first pin that carried it.
 
 **Pin line** (verified, not remembered — `git merge-base --is-ancestor <sha> <pin>`
-in the candidate worktree `/Users/home/scratch/pinroll-candidate-20260907T105511Z`,
-HEAD `857ed398a`):
+in the maintainer's pin-candidate worktree, HEAD `857ed398a` — these shas are
+in the private lineage and will not resolve against `gastownhall/gascity`):
 
 ```
 6ba434271 (upstream base)
@@ -81,30 +81,48 @@ that date even if nothing changed upstream. `quarantine-dead-runtime` and
 `federation-shadow` are staged review receipts with no candidate code and no upstream
 twin asserted — they are not pin dependencies and are excluded from the table.
 
-## Re-checking this file
+## Is this still a blocker? — anyone can check
+
+The merge states in the table above were true on the date stated and will
+rot. This loop needs only `gh` and read access to the public repository, and
+it answers the only question an outside reader actually has: **have the
+carriers landed yet?**
 
 ```bash
-cd /Users/home/westlands/ops/receipts/edge/pin-roll-20260907
-sed -n '1,60p' repin4-c1-table.md     # the C1 row staging this table is built from
-sed -n '1,90p' edge-families/INDEX    # the family landing index
-
-# live state of every carrier named here
 for n in 5518 5584 5586 5592 5594 5599 5609 5629 5735 5864 6089 6133 6137 6143 6146; do
   printf '%s\t' "$n"
   gh pr view "$n" --repo gastownhall/gascity \
     --json state,mergedAt,mergeable,isDraft,headRefOid \
     --jq '[.state,.mergedAt,.mergeable,.isDraft,.headRefOid]|@tsv'
 done
+```
 
-# which pin first carried a family sha (list pins literally: zsh does not
-# word-split an unquoted variable, so a $PINS loop silently reports nothing)
-cd /Users/home/scratch/pinroll-candidate-20260907T105511Z
+Read the result against the **Not yet filed upstream** list above before
+concluding anything: every one of these merging still would not clear the
+dependency, because seven families have no PR in that list at all. In
+particular #6146 is a single squashed head carrying only part of the
+remote-worker surface, so **#6146 merging does not retire its family group.**
+
+## Re-checking the provenance — maintainer-local
+
+The rest of this file's evidence lives in the maintaining estate's receipt
+tree and cannot be re-derived from this repository. Recorded so the trail is
+honest about where it ends, not as instructions:
+
+```bash
+# the C1 row this table is staged from, and the family landing index
+sed -n '1,60p' <receipts>/edge/pin-roll-20260907/repin4-c1-table.md
+sed -n '1,90p' <receipts>/edge/pin-roll-20260907/edge-families/INDEX
+
+# which pin first carried a family sha, run in the pin-candidate worktree.
+# List the pins literally: zsh does not word-split an unquoted variable, so
+# a $PINS loop silently reports nothing.
 for p in 3c28c0430 60543e0db e6c792597 400a7af53 f75c33003 1afd6736a 857ed398a; do
   git merge-base --is-ancestor <family-sha> "$p" && { echo "first pin: $p"; break; }
 done
 ```
 
-Sources: `ops/receipts/edge/pin-roll-20260907/edge-families/INDEX` and the per-family
+Sources (maintainer-local): `ops/receipts/edge/pin-roll-20260907/edge-families/INDEX` and the per-family
 ledgers, `repin4-c1-table.md` (`cr-zt27m.4.71`), and the C1 rows of
 `checks-receipt-400a7af53.md`, `checks-receipt-f75c33003.md`,
 `checks-receipt-1afd6736a.md`, `checks-receipt-857ed398a.md`.

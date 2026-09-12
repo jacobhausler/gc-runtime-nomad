@@ -315,6 +315,54 @@ were rejected and why. It ships no delivery layer: nothing in this pack
 publishes an image, and the `gc` pin the lock must be read alongside belongs
 to whoever operates the deployment.
 
+### Building the agent image
+
+`GC_NOMAD_AGENT_IMAGE` is required and there is no default, so this is a step
+every deployment has to do. It is two images: a **base** carrying the session
+toolchain, then your **city content** composed onto it. `toolchain/` ships
+both halves; `toolchain/build-image.sh --help` lists every verb, and the ones
+that matter here are:
+
+```bash
+# 0. validate the pin file (offline; no docker, no network)
+bash toolchain/build-image.sh check
+
+# 1. base toolchain image. Needs docker and a linux/amd64 host.
+#    The gate below is not ceremony: this builds an image, and a build that
+#    runs inside an agent allocation would be a session building its own
+#    successor. Run it on a build host, never in a box.
+GC_TOOLCHAIN_HOST_STEP=1 bash toolchain/build-image.sh build --published
+
+# 2. compose city content onto that base -- this is `gc build-image`, and it
+#    is the step that produces the tag you actually run
+bash toolchain/build-image.sh city-image --city=<city-root> --tag=<image:tag>
+
+# 3. the result is what GC_NOMAD_AGENT_IMAGE points at
+export GC_NOMAD_AGENT_IMAGE=<image:tag>
+```
+
+Three things that will bite you:
+
+- **`--city` must be a bounded city root**, not a working checkout.
+  `gc build-image` copies the whole directory and excludes only secrets, so
+  pointing it at a live estate root ships that estate into an image. The
+  script refuses it.
+- **`--published` builds against the published upstream `gc` release.** That
+  is the portable path, and today it produces an image whose in-box `gc`
+  cannot run this pack — see the status banner at the top of this file. This
+  is the same blocker, not a second one. Without `--published`, `build`
+  prefers a locally staged pin binary named in `TOOLCHAIN.lock`, which only
+  exists on a host that stages one.
+- **The in-box `gc` must be built for the image it runs in.** A `gc` compiled
+  against a different libc or ICU major links cleanly and dies at the first
+  seat command; `build-image.sh` refuses a `gc` that is not an x86-64 ELF for
+  exactly this reason.
+
+`toolchain/TOOLCHAIN.lock` is the checksum pin of record for every component
+and image, and `toolchain/BUILD-RECEIPT.md` carries one maintainer's measured
+run of the above — including the pins that were rejected and why. Neither is
+a set of values to copy.
+
 Prebaking the toolchain into the box image is the intended 1.0.x shape —
 `gc build-image` is the prebake verb gc ships - its contract at the pin is
 K8s-shaped, see the `GC_NOMAD_AGENT_IMAGE` row in step 6 - and epic `cr-u7b0s` is

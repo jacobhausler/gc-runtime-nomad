@@ -108,6 +108,9 @@ func newClient(addr, token, namespace string) (*client, error) {
 		return nil, fmt.Errorf("configuring nomad TLS: %w", err)
 	}
 	tlsConfig := transport.TLSClientConfig.Clone()
+	if w := tlsVerificationWarning(tlsConfig); w != "" {
+		fmt.Fprintln(os.Stderr, w)
+	}
 	httpClient := &http.Client{
 		Timeout:   defaultTimeout,
 		Transport: &nomadWriteMetaCompatTransport{base: transport},
@@ -143,6 +146,44 @@ func applyGCNomadTLSConfig(config *nomadapi.TLSConfig) {
 	config.ClientCert = envAlias("GC_NOMAD_CLIENT_CERT", "NOMAD_CLIENT_CERT", config.ClientCert)
 	config.ClientKey = envAlias("GC_NOMAD_CLIENT_KEY", "NOMAD_CLIENT_KEY", config.ClientKey)
 	config.TLSServerName = envAlias("GC_NOMAD_TLS_SERVER_NAME", "NOMAD_TLS_SERVER_NAME", config.TLSServerName)
+}
+
+// tlsVerificationWarning reports the operator warning owed for a transport
+// that skips certificate verification, or "" when verification is on.
+//
+// The pack deliberately does NOT alias NOMAD_SKIP_VERIFY the way it aliases
+// the other four TLS knobs: there is no legitimate reason for a runtime to
+// offer its own spelling of "turn verification off". But the SDK's
+// DefaultConfig honours the variable regardless, and the resulting config is
+// cloned onto the client and used by the alloc-exec WebSocket dialer — which
+// is how every staged secret reaches a box. Verification being off on that
+// channel is a thing an operator must be told, every time, rather than a
+// thing they discover.
+func tlsVerificationWarning(cfg *tls.Config) string {
+	if cfg == nil || !cfg.InsecureSkipVerify {
+		return ""
+	}
+	return tlsVerificationDisabledWarning
+}
+
+// tlsVerificationDisabledWarning is the single wording, shared by the client
+// construction path and by the `check` pre-flight, so the two can never
+// diverge.
+const tlsVerificationDisabledWarning = "warning: TLS certificate verification is DISABLED " +
+	"for the Nomad API and for the alloc-exec channel that carries staged secrets " +
+	"(NOMAD_SKIP_VERIFY is set in this environment). Unset it, or accept that secrets " +
+	"are staged over an unauthenticated TLS connection."
+
+// skipVerifyRequested reports whether the environment asks the Nomad SDK to
+// skip verification. `check` builds no client, so it reads the variable the
+// SDK itself reads (DefaultConfig, api.go) rather than inspecting a transport.
+func skipVerifyRequested() bool {
+	v := strings.TrimSpace(os.Getenv("NOMAD_SKIP_VERIFY"))
+	if v == "" {
+		return false
+	}
+	insecure, err := strconv.ParseBool(v)
+	return err == nil && insecure
 }
 
 func envAlias(primary, fallback, current string) string {
