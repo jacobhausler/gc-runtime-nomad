@@ -433,6 +433,16 @@ type allocRecord struct {
 type allocTaskState struct {
 	State     string
 	LastEvent string
+
+	// FailureEvent is the task event that explains why this task did not run,
+	// which is NOT the same as the last one. Nomad appends terminal bookkeeping
+	// after the real cause: on a missing image the event list ends
+	//   ... "Failed to pull `img`: ... repository does not exist"
+	//   ... "Policy allows no restarts"
+	// so LastEvent reports the restart policy and says nothing about the image.
+	// Measured live on T6 (cr-kkcvmd), 2026-09-11. Empty when no event in the
+	// list carries a failure detail.
+	FailureEvent string
 }
 
 // listAllocsForJob reads the allocations placed for jobID. If wait > 0 and
@@ -489,7 +499,11 @@ func allocTaskStatesOf(alloc *nomadapi.AllocationListStub) map[string]allocTaskS
 		if state == nil {
 			continue
 		}
-		states[name] = allocTaskState{State: state.State, LastEvent: latestTaskEvent(state.Events)}
+		states[name] = allocTaskState{
+			State:        state.State,
+			LastEvent:    latestTaskEvent(state.Events),
+			FailureEvent: failureTaskEvent(state.Events),
+		}
 	}
 	if len(states) == 0 {
 		return nil
@@ -510,6 +524,35 @@ func latestTaskEvent(events []*nomadapi.TaskEvent) string {
 		detail := firstNonEmpty(e.DisplayMessage, e.Message, e.SetupError, e.DriverError, e.DownloadError, e.KillReason)
 		if detail == "" {
 			return e.Type
+		}
+		return e.Type + ": " + detail
+	}
+	return ""
+}
+
+// failureTaskEvent finds the event that explains a task's failure, scanning
+// newest-first for one that carries a driver-level detail rather than taking the
+// last event outright. Nomad appends terminal bookkeeping ("Policy allows no
+// restarts", "Task Setup") AFTER the real cause, so the newest event is usually
+// the least informative one in the list — which is exactly how a missing image
+// came out as EOF with no image name anywhere (T6, cr-kkcvmd).
+//
+// Only events carrying a real error field qualify: DriverError, DownloadError,
+// SetupError and KillReason. A DisplayMessage alone does not, because every
+// routine lifecycle event has one and matching on those would make any ordinary
+// "Task Setup" look like a cause.
+func failureTaskEvent(events []*nomadapi.TaskEvent) string {
+	for i := len(events) - 1; i >= 0; i-- {
+		e := events[i]
+		if e == nil {
+			continue
+		}
+		detail := firstNonEmpty(e.DriverError, e.DownloadError, e.SetupError, e.KillReason)
+		if detail == "" {
+			continue
+		}
+		if strings.TrimSpace(e.Type) == "" {
+			return detail
 		}
 		return e.Type + ": " + detail
 	}

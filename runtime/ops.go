@@ -1695,6 +1695,11 @@ func (l *lifecycle) stage(ctx context.Context, sessionName string, cfg stageConf
 			"stage-workspace", workDir,
 		}
 		if err := l.execStage(ctx, sessionName, command, data); err != nil {
+			// T6: "reading exec frame: EOF" is what a task that never started
+			// looks like from in here. Nomad knows why; ask it before reporting.
+			if detail := l.provisionFailureDetail(ctx, sessionName); detail != "" {
+				return fmt.Errorf("staging workspace for %q: %s: %w", sessionName, detail, err)
+			}
 			return fmt.Errorf("staging workspace for %q: %w", sessionName, err)
 		}
 	}
@@ -1793,6 +1798,11 @@ func (l *lifecycle) stage(ctx context.Context, sessionName string, cfg stageConf
 			"stage-secrets",
 		}
 		if err := l.execStage(ctx, sessionName, command, data); err != nil {
+			// Same reasoning as the workspace leg above (T6): a task that never
+			// started reads as a truncated exec frame from in here.
+			if detail := l.provisionFailureDetail(ctx, sessionName); detail != "" {
+				return fmt.Errorf("staging secrets for %q: %s: %w", sessionName, detail, err)
+			}
 			return fmt.Errorf("staging secrets for %q: %w", sessionName, err)
 		}
 	}
@@ -2315,6 +2325,129 @@ func (l *lifecycle) opIsRunning(ctx context.Context, sessionName string) (bool, 
 // An error is returned rather than a guess. The caller keeps reporting the
 // child as running when it cannot tell, because a read failure is not evidence
 // of death.
+// allocFailureDiagnosis turns an allocation's OWN task state into a sentence that
+// names the cause of a failed provision.
+//
+// T6, measured live 2026-09-11: with GC_NOMAD_AGENT_IMAGE set to a tag that
+// exists nowhere, Nomad said exactly what was wrong —
+//
+//	Driver Failure  Failed to pull `gc-agent:...`: Error response from daemon:
+//	pull access denied for gc-agent, repository does not exist
+//
+// — while the city's own log said only:
+//
+//	provision worker-local-1-pool: staging workspace for "worker-local-1-pool":
+//	reading exec frame: EOF
+//
+// No image, no node, no pull: an exec frame that ended early, three layers from
+// the cause. The operator has to leave the city and read Nomad to learn that the
+// image is absent. This function closes that gap by reading the answer Nomad
+// already has.
+//
+// It is deliberately NOT an image special case. The exec frame ends early for
+// every reason a task can fail to start — pull denied, OOM, a constraint, a bad
+// entrypoint — and each of those arrives here with its own driver text. The
+// image gets a named phrasing because it is the one this pack can state
+// authoritatively (it owns agentImage); everything else is reported verbatim,
+// which is still infinitely better than EOF.
+//
+// Empty return means "no answer", never a guess: a caller that cannot read the
+// allocation keeps its original error rather than inventing a cause.
+func allocFailureDiagnosis(agentImage string, allocs []allocRecord, taskName string) string {
+	if len(allocs) == 0 {
+		// Nothing placed at all is the PLACEMENT shape, which
+		// confirmDispatchPlaced already reports with its own message.
+		return ""
+	}
+	// Prefer an allocation that actually failed; fall back to the newest read.
+	pick := allocs[len(allocs)-1]
+	for _, a := range allocs {
+		switch strings.ToLower(strings.TrimSpace(a.ClientStatus)) {
+		case "failed", "lost":
+			pick = a
+		}
+	}
+	if pick.TaskStates == nil {
+		// A read that carried no task states is a stub read, not an answer.
+		return ""
+	}
+	ts, ok := pick.TaskStates[taskName]
+	if !ok {
+		return ""
+	}
+	// The FAILURE event, not the newest one. Nomad appends terminal bookkeeping
+	// ("Policy allows no restarts") after the real cause, so LastEvent on a
+	// missing image reports the restart policy and never names the image.
+	event := strings.TrimSpace(ts.FailureEvent)
+	if event == "" {
+		event = strings.TrimSpace(ts.LastEvent)
+	}
+	if event == "" {
+		return ""
+	}
+	if isImagePullFailure(event) {
+		if img := strings.TrimSpace(agentImage); img != "" {
+			return fmt.Sprintf("the image %q is not on this node: %s", img, event)
+		}
+		return fmt.Sprintf("the agent image is not on this node: %s", event)
+	}
+	state := strings.TrimSpace(ts.State)
+	if state == "" {
+		state = "unknown"
+	}
+	return fmt.Sprintf("the %q task never started (state %q): %s", taskName, state, event)
+}
+
+// isImagePullFailure reports whether a driver event describes an image the node
+// does not have. Matched on the driver's own vocabulary rather than an exact
+// string, because the daemon's wording differs between "not found", a denied
+// pull on a private repo, and a registry that cannot be reached — all of which
+// mean the same thing to an operator: the image is not on this node.
+func isImagePullFailure(event string) bool {
+	e := strings.ToLower(event)
+	switch {
+	case strings.Contains(e, "failed to pull"),
+		strings.Contains(e, "pull access denied"),
+		strings.Contains(e, "repository does not exist"),
+		strings.Contains(e, "manifest unknown"),
+		strings.Contains(e, "no such image"),
+		strings.Contains(e, "image not found"):
+		return true
+	}
+	return false
+}
+
+// provisionFailureDetail reads the live allocation behind sessionName and
+// returns allocFailureDiagnosis's sentence for it, or "" when it cannot get an
+// answer. Every read failure is silent on purpose: this runs on an error path,
+// and a diagnosis that fails must never replace or mask the original error.
+func (l *lifecycle) provisionFailureDetail(ctx context.Context, sessionName string) string {
+	if l == nil || l.sidecar == nil || l.client == nil {
+		return ""
+	}
+	b, ok, err := l.sidecar.load(sessionName)
+	if err != nil {
+		return fmt.Sprintf("could not read the binding to diagnose this: %v", err)
+	}
+	if !ok || strings.TrimSpace(b.ChildJobID) == "" {
+		// No child bound yet: there is genuinely nothing to ask Nomad about,
+		// and saying so beats inventing a cause.
+		return ""
+	}
+	allocs, _, err := l.client.listAllocsForJob(ctx, b.ChildJobID, 0, 0)
+	if err != nil {
+		return fmt.Sprintf("could not read the allocations of child %q to diagnose this: %v", b.ChildJobID, err)
+	}
+	if d := allocFailureDiagnosis(l.agentImage, allocs, execTaskName); d != "" {
+		return d
+	}
+	// Nomad had nothing to say about the task. Report THAT rather than going
+	// quiet, because a silent diagnosis is what left the exec-frame EOF standing
+	// alone in the first place (T6).
+	return fmt.Sprintf("child %q has %d allocation(s) and none reports why task %q is not running",
+		b.ChildJobID, len(allocs), execTaskName)
+}
+
 func (l *lifecycle) childHasLiveAlloc(ctx context.Context, childJobID string) (bool, error) {
 	allocs, _, err := l.client.listAllocsForJob(ctx, childJobID, 0, 0)
 	if err != nil {
