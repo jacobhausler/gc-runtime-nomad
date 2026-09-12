@@ -648,6 +648,15 @@ does.
    Each replacement stages the new value at provision. Budget for it: this is
    one dispatch per seat, and a large pool will not finish in ten minutes.
 
+   **What happens to work a seat was mid-way through: the pack does not release
+   it.** `stop` egresses the session's evidence, deregisters its child job,
+   confirms it terminal and tombstones the binding — and touches the bead claim
+   **not at all**. A seat stopped while holding claimed work leaves that claim
+   exactly as `gc` left it, and recovering it is `gc`'s dead-assignee handling,
+   not this pack's. Plan the rotation around that: you are trading in-flight
+   work for a rotated credential, deliberately, and the pack will not soften
+   the trade for you.
+
    **Check the exit code of that loop.** `list-running` exits **1 on any lookup
    error** rather than printing a partial list, so a transport fault makes the
    loop above iterate over nothing, complete instantly, and look like it

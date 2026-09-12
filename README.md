@@ -273,6 +273,14 @@ Provider-agnostic: what any deployment of this pack needs.
    | `GC_NOMAD_AGENT_IMAGE` | **yes** | Docker image carrying the session agent and its toolchain (see the image-content note below). Unset fails every lifecycle op closed at startup: the Docker task is the only session shape |
    | `GC_NOMAD_EXEC_TASK` | no | Task name alloc-exec targets, when it is not the pack's session task |
    | `GC_NOMAD_EXTRA_SECRET_KEYS` | no | Comma-separated names to bridge from the supervisor's own process env into `$NOMAD_SECRETS_DIR` — the value-blind channel for a secret `gc`'s provider env map cannot interpolate. Naming a key is what stages it; an unnamed key is never staged, and an extra key is always routed to the secrets dir, never to the launch argv. The names themselves belong to the deployment (part 2 works one Codex name through it) |
+
+   **Rotating one of these, or responding to a leak**, is its own procedure and
+   the wrong thing to improvise: see
+   [`COMPATIBILITY.md`](COMPATIBILITY.md) → *"Rotating a credential, when one
+   has leaked"*. The short version, because getting it wrong looks like
+   success: a staged secret is materialised **once**, at start/provision, so
+   neither `relaunch` nor `gc reload` rotates a live seat — only replacing the
+   box does.
    | `GC_NOMAD_EGRESS_DIR` | no | Stop-path transcript/evidence directory; unset disables egress |
    | `GC_NOMAD_FORBID_REGISTER` | no | `true` = never register the parent; fail closed instead. Unset = the default (registration allowed); a value that is not a boolean is a config error and the op stops naming this variable rather than defaulting to allowed |
    | `GC_NOMAD_ADOPT_MAX_AGE` | no | Go duration capping how old a live-but-unlaunched box may be before it is reaped and replaced instead of adopted (default `30m`; unparseable is a config error) |
