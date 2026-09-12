@@ -47,6 +47,20 @@ const (
 	// gcWorkerSurfaceMissing: this gc answers with the upstream capability
 	// gate. A seat driven by it cannot claim.
 	gcWorkerSurfaceMissing
+	// gcWorkerSurfaceAbsent: the probe could not run AT ALL — there is no
+	// `gc` on PATH, or the one there answered with nothing.
+	//
+	// This is split out of Unknown because the two are opposite cases and
+	// were being given the same fail-open answer. Unknown means "a gc
+	// answered in a shape I do not recognise", and proceeding is right:
+	// refusing a session over an unparsed string is worse than the fault.
+	// Absent means "no gc answered". The pack shells out to `gc` for
+	// everything a seat does, so a deployment with no gc on PATH cannot
+	// work under any interpretation — there is no future gc whose wording
+	// this might be. Failing open here handed the exact stranger case the
+	// gate exists for (installing from public sources, gc not yet
+	// installed) a green box and a dark seat.
+	gcWorkerSurfaceAbsent
 )
 
 const (
@@ -84,6 +98,23 @@ func gcMissingWorkerSurfaceError() error {
 			"`gc bd claim` under a remote target.)", edgeWorkerSurfaceMarker)
 }
 
+// gcAbsentWorkerSurfaceError is the refusal for "no gc answered the probe".
+//
+// It is a DIFFERENT message from the missing-family refusal on purpose. That
+// one says "your gc is the wrong build"; this one says "there is no gc here",
+// and sending an operator to the dependency table when the real fix is
+// installing gc is the wrong-layer diagnosis this pack exists to stop making.
+func gcAbsentWorkerSurfaceError() error {
+	return fmt.Errorf(
+		"refusing to start: no `gc` on PATH answered the capability probe, so this pack "+
+			"cannot tell whether a seat in an allocation could claim work — and it shells "+
+			"out to `gc` for everything such a seat does, so an absent gc cannot work "+
+			"regardless. Install gc and put it on the PATH of the process running this pack "+
+			"(the SUPERVISOR's PATH, not an interactive shell's), or set %s=1 if you are "+
+			"running an offline harness that mints no real sessions. See COMPATIBILITY.md "+
+			"for the gc this pack requires.", envSkipCapabilityGate)
+}
+
 // envSkipCapabilityGate lets a harness that is NOT running real sessions opt
 // out of the gate.
 //
@@ -117,7 +148,7 @@ func capabilityGateSkipped(stderr io.Writer) bool {
 func probeGCWorkerSurface(ctx context.Context) gcWorkerSurface {
 	gc, err := exec.LookPath("gc")
 	if err != nil {
-		return gcWorkerSurfaceUnknown
+		return gcWorkerSurfaceAbsent
 	}
 	ctx, cancel := context.WithTimeout(ctx, gcProbeTimeout)
 	defer cancel()
@@ -126,6 +157,12 @@ func probeGCWorkerSurface(ctx context.Context) gcWorkerSurface {
 	cmd := exec.CommandContext(ctx, gc, "bd", "claim", "gc-runtime-nomad-capability-probe",
 		"--city-url", "https://127.0.0.1:1", "--city-name", "gc-runtime-nomad-probe")
 	out, _ := cmd.CombinedOutput()
+	// Empty output is not an unrecognised answer, it is no answer: the probe
+	// never reached the target gate both lineages refuse at. Classifying it
+	// Unknown let a gc that could not execute at all read as "proceed".
+	if strings.TrimSpace(string(out)) == "" {
+		return gcWorkerSurfaceAbsent
+	}
 	return classifyWorkerSurface(string(out))
 }
 

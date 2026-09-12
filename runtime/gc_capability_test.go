@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -66,10 +67,100 @@ func TestMissingWorkerSurfaceErrorNamesTheSymptom(t *testing.T) {
 // actually running on — asserting PRESENT would make the suite fail on a
 // machine with a stock gc, which is a legitimate place to develop the pack.
 func TestProbeGCWorkerSurfaceAgainstTheLiveGC(t *testing.T) {
+	gc, lookErr := exec.LookPath("gc")
 	got := probeGCWorkerSurface(context.Background())
-	t.Logf("probe against the gc on PATH: %v", got)
-	if got == gcWorkerSurfaceMissing {
-		t.Skip("this machine's gc lacks the remote-worker family; nothing to assert")
+	t.Logf("probe against the gc on PATH (%q, lookErr=%v): %v", gc, lookErr, got)
+
+	if lookErr != nil {
+		// No gc here: the probe MUST say Absent. This is the assertion the
+		// test was missing — it previously passed on a machine with no gc at
+		// all, which is the one machine whose answer decides whether the
+		// stranger case fails closed.
+		if got != gcWorkerSurfaceAbsent {
+			t.Fatalf("no gc on PATH but probe = %v, want absent — the stranger case "+
+				"(installing from public sources, gc not yet installed) must fail closed", got)
+		}
+		return
+	}
+
+	// A gc IS on PATH. Asserting PRESENT would fail on a machine with a stock
+	// gc, which is a legitimate place to develop this pack, so that is not
+	// asserted. But Absent is now a REFUSAL, so a live gc that probes Absent
+	// would refuse every box-minting op on a machine that can actually run
+	// them — a false refusal is as bad as the dark lane, and this is the only
+	// test positioned to catch it.
+	if got == gcWorkerSurfaceAbsent {
+		t.Fatalf("gc is on PATH at %q but the probe reports absent — the gate would refuse "+
+			"start/provision/relaunch on a machine with a working gc", gc)
+	}
+}
+
+// TestProbeReportsAbsentWhenNoGCIsOnPath is the hermetic half: PATH is emptied
+// so the result does not depend on what this machine happens to have.
+//
+// The case matters because it was FAIL-OPEN. An absent gc classified Unknown,
+// and Unknown proceeds — so the deployment least likely to have the right gc
+// (a stranger installing from public sources) was the one the gate waved
+// through into a green box with a dark seat.
+func TestProbeReportsAbsentWhenNoGCIsOnPath(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	if got := probeGCWorkerSurface(context.Background()); got != gcWorkerSurfaceAbsent {
+		t.Fatalf("probe with an empty PATH = %v, want absent", got)
+	}
+}
+
+// TestSilentGCIsAbsentNotUnknown pins the other no-answer shape. A gc that
+// exits without printing anything never reached the target gate both lineages
+// refuse at, so it produced no evidence — which is not the same as evidence
+// this pack cannot parse.
+func TestSilentGCIsAbsentNotUnknown(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "gc"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatalf("writing silent stub gc: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if got := probeGCWorkerSurface(context.Background()); got != gcWorkerSurfaceAbsent {
+		t.Fatalf("probe against a gc that prints nothing = %v, want absent", got)
+	}
+}
+
+// TestBoxMintingOpsRefuseAnAbsentGC is the wiring proof for the absent path,
+// and it asserts the message is the RIGHT one. Sending an operator whose real
+// problem is "gc is not installed" to the pin-dependency table is the
+// wrong-layer diagnosis this pack exists to stop making, so the refusal must
+// name the absence and must not name the family.
+func TestBoxMintingOpsRefuseAnAbsentGC(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	for _, op := range []string{"start", "provision", "relaunch"} {
+		t.Run(op, func(t *testing.T) {
+			outFile, errFile := t.TempDir()+"/out", t.TempDir()+"/err"
+			out, err := os.Create(outFile)
+			if err != nil {
+				t.Fatalf("creating stdout capture: %v", err)
+			}
+			defer out.Close()
+			errf, err := os.Create(errFile)
+			if err != nil {
+				t.Fatalf("creating stderr capture: %v", err)
+			}
+			defer errf.Close()
+
+			code := run([]string{op, "sess-absent-gc-probe"}, strings.NewReader(""), out, errf)
+			if code != exitError {
+				t.Errorf("%s exit = %d, want %d (a refusal)", op, code, exitError)
+			}
+			captured, readErr := os.ReadFile(errFile)
+			if readErr != nil {
+				t.Fatalf("reading stderr capture: %v", readErr)
+			}
+			got := string(captured)
+			if !strings.Contains(got, "no `gc` on PATH") {
+				t.Errorf("%s did not name the absent gc:\n%s", op, got)
+			}
+			if strings.Contains(got, "remote-worker-lifecycle") {
+				t.Errorf("%s blamed the dependency family for an absent gc — wrong layer:\n%s", op, got)
+			}
+		})
 	}
 }
 

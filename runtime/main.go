@@ -196,12 +196,15 @@ func run(args []string, stdin io.Reader, stdout, stderr *os.File) int {
 		case gcWorkerSurfaceMissing:
 			fmt.Fprintf(stderr, "FAIL: %v\n", gcMissingWorkerSurfaceError())
 			return exitError
+		case gcWorkerSurfaceAbsent:
+			fmt.Fprintf(stderr, "FAIL: %v\n", gcAbsentWorkerSurfaceError())
+			return exitError
 		case gcWorkerSurfaceUnknown:
-			fmt.Fprintln(stderr, "warning: could not determine whether the `gc` on PATH carries "+
-				"the remote-worker-lifecycle family this pack requires (no gc on PATH, or it "+
-				"answered in a shape this probe does not recognise). Proceeding: an "+
-				"unrecognised gc is not evidence of a missing family. See "+
-				"docs/PIN-DEPENDENCIES.md.")
+			fmt.Fprintln(stderr, "warning: the `gc` on PATH answered the capability probe in a "+
+				"shape this pack does not recognise, so whether it carries the "+
+				"remote-worker-lifecycle family is undetermined. Proceeding: an unrecognised "+
+				"answer is not evidence of a missing family. (An ABSENT gc is a different "+
+				"case and is refused, not warned.) See docs/PIN-DEPENDENCIES.md.")
 		}
 		if os.Getenv(envDNSServers) == "" {
 			fmt.Fprintln(stderr, "warning: session boxes will declare no dns stanza and inherit the client host's resolv.conf (GC_NOMAD_DNS_SERVERS unset) — on a systemd-resolved host that stub resolver is unreachable from a bridge alloc (cr-tzsxk.18)")
@@ -224,10 +227,19 @@ func run(args []string, stdin io.Reader, stdout, stderr *os.File) int {
 	// working against boxes that already exist. Refusing those would strand
 	// allocations on the very gc that cannot drive them — converting a startup
 	// refusal into an orphaned-box problem, which is strictly worse.
-	if mintsABox[op] && !capabilityGateSkipped(stderr) &&
-		probeGCWorkerSurface(context.Background()) == gcWorkerSurfaceMissing {
-		fmt.Fprintf(stderr, "gc-runtime-nomad %s: %v\n", op, gcMissingWorkerSurfaceError())
-		return exitError
+	if mintsABox[op] && !capabilityGateSkipped(stderr) {
+		// Two refusals, not one. Missing = the wrong gc build; Absent = no gc
+		// answered at all. Both are fail-closed on the ops that mint a box;
+		// Unknown still proceeds, because an unrecognised answer is not
+		// evidence of a missing family.
+		switch probeGCWorkerSurface(context.Background()) {
+		case gcWorkerSurfaceMissing:
+			fmt.Fprintf(stderr, "gc-runtime-nomad %s: %v\n", op, gcMissingWorkerSurfaceError())
+			return exitError
+		case gcWorkerSurfaceAbsent:
+			fmt.Fprintf(stderr, "gc-runtime-nomad %s: %v\n", op, gcAbsentWorkerSurfaceError())
+			return exitError
+		}
 	}
 
 	l, err := newLifecycle()
