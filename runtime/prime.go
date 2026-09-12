@@ -532,23 +532,71 @@ func (l *lifecycle) diagnosePaneGone(ctx context.Context, allocID string) string
 	if allocID == "" {
 		return ""
 	}
-	exitRec, exitErr := l.client.readAllocFile(ctx, allocID, "alloc/logs/agent.exit")
-	if exitErr == nil && len(strings.TrimSpace(string(exitRec))) > 0 {
+	if rec, ok := l.readBoxFile(ctx, allocID, "alloc/logs/agent.exit"); ok && looksLikeAgentExitRecord(rec) {
 		out := " THE PANE'S COMMAND EXITED — a tmux server exits with its last session, and that " +
 			"session ends when its pane's command does, so the server being gone IS the agent having " +
-			"died. The box's own exit record says: " + execExcerpt([]byte(lastLine(string(exitRec))))
-		if errRec, err := l.client.readAllocFile(ctx, allocID, "alloc/logs/agent.stderr"); err == nil {
-			if tail := strings.TrimSpace(lastLine(string(errRec))); tail != "" {
+			"died. The box's own exit record says: " + execExcerpt([]byte(lastLine(rec)))
+		if errRec, ok := l.readBoxFile(ctx, allocID, "alloc/logs/agent.stderr"); ok {
+			if tail := strings.TrimSpace(lastLine(errRec)); tail != "" {
 				out += " Its stderr ended: " + execExcerpt([]byte(tail))
 			}
 		}
 		return out
 	}
 	return " The pane's command has exited (a tmux server exits with its last session), but this box " +
-		"wrote NO agent-capture record at alloc/logs/agent.exit, so why it exited cannot be recovered " +
-		"from here. In the prebaked-image shape that record is the IMAGE's responsibility: an image " +
-		"that does not write it makes this exact failure permanently unexplainable. Fix that in the " +
-		"image rather than looking further at tmux."
+		"wrote NO usable agent-capture record at alloc/logs/agent.exit, so why it exited cannot be " +
+		"recovered from here. In the prebaked-image shape that record is the IMAGE's responsibility: " +
+		"an image that does not write it makes this exact failure permanently unexplainable. Fix that " +
+		"in the image rather than looking further at tmux."
+}
+
+// readBoxFile reads a file out of the allocation and reports whether what came
+// back is actually FILE CONTENT.
+//
+// Nomad's fs/cat can answer 200 with an ERROR BODY — "stat <path>: no such file
+// or directory" — rather than a 404, and readAllocFile correctly passes that
+// through as a successful read of those bytes. Quoting it is worse than saying
+// nothing: the first version of this diagnosis reported
+//
+//	The box's own exit record says: "stat /opt/nomad/data/.../agent.exit: no
+//	such file or directory"
+//
+// which is a confident answer built out of the instrument's own failure. That
+// is the exact shape this pack exists to stop producing, produced by the code
+// written to stop producing it — found by reading its own live output.
+func (l *lifecycle) readBoxFile(ctx context.Context, allocID, path string) (string, bool) {
+	raw, err := l.client.readAllocFile(ctx, allocID, path)
+	if err != nil {
+		return "", false
+	}
+	body := strings.TrimSpace(string(raw))
+	if body == "" || isFSErrorBody(body) {
+		return "", false
+	}
+	return body, true
+}
+
+// isFSErrorBody recognises the fs API answering with a complaint instead of a
+// file. Matched on the operation words rather than the path, because the path
+// is whatever was asked for and only the verb identifies the shape.
+func isFSErrorBody(body string) bool {
+	low := strings.ToLower(body)
+	if strings.Contains(low, "no such file or directory") ||
+		strings.Contains(low, "permission denied") ||
+		strings.Contains(low, "unknown allocation") {
+		return true
+	}
+	// A one-line body that starts with a syscall name is the fs API's error
+	// shape, never an agent record.
+	return strings.HasPrefix(low, "stat ") || strings.HasPrefix(low, "open ")
+}
+
+// looksLikeAgentExitRecord requires the record to BE one. The launcher writes
+// "exit= started= ended= pane= argv0= alloc=", so the exit field is the cheapest
+// positive signal that this is the record and not something else that happened
+// to be readable at that path.
+func looksLikeAgentExitRecord(body string) bool {
+	return strings.Contains(body, "exit=")
 }
 
 // lastLine returns the final non-empty line, which is where an exit record and

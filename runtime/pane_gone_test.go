@@ -96,3 +96,92 @@ func readSourceFile(t *testing.T, name string) string {
 	}
 	return string(b)
 }
+
+// TestFSErrorBodyIsNotMistakenForAFile is a defect this code SHIPPED and then
+// reported about itself in live output.
+//
+// Nomad's fs/cat can answer 200 with an error body rather than a 404, and
+// readAllocFile correctly passes those bytes through as a successful read. The
+// first version of diagnosePaneGone quoted them:
+//
+//	The box's own exit record says: "stat /opt/nomad/data/.../agent.exit: no
+//	such file or directory"
+//
+// A confident answer assembled out of the instrument's own failure — the exact
+// shape this pack exists to stop producing, produced by the code written to
+// stop producing it.
+func TestFSErrorBodyIsNotMistakenForAFile(t *testing.T) {
+	for _, body := range []string{
+		"stat /opt/nomad/data/alloc/547fe1e2/alloc/logs/agent.exit: no such file or directory",
+		"open /alloc/logs/agent.stderr: permission denied",
+		"unknown allocation ID \"547fe1e2\"",
+		"Stat /x: No Such File Or Directory",
+	} {
+		if !isFSErrorBody(body) {
+			t.Errorf("isFSErrorBody(%q) = false; this is the fs API complaining, not a file, and "+
+				"quoting it produces a confident wrong answer", body)
+		}
+	}
+	// Real records and real output must pass through.
+	for _, body := range []string{
+		"exit=1 started=1789221000 ended=1789221001 pane=%0 argv0=codex alloc=547fe1e2",
+		"Traceback (most recent call last):",
+		"codex: cannot open display",
+	} {
+		if isFSErrorBody(body) {
+			t.Errorf("isFSErrorBody(%q) = true; this is real content and must not be discarded", body)
+		}
+	}
+}
+
+// TestExitRecordMustLookLikeOne is the positive half. A readable file at that
+// path is not automatically the record, and "exit=" is the launcher's own
+// documented field.
+func TestExitRecordMustLookLikeOne(t *testing.T) {
+	if !looksLikeAgentExitRecord("exit=0 started=a ended=b pane=%0 argv0=codex") {
+		t.Error("a real exit record was rejected")
+	}
+	for _, body := range []string{
+		"",
+		"some other file that happened to be readable",
+		"started=a ended=b",
+	} {
+		if looksLikeAgentExitRecord(body) {
+			t.Errorf("looksLikeAgentExitRecord(%q) = true; without the exit field this is not the record", body)
+		}
+	}
+}
+
+// TestReadBoxFileRejectsTheFSErrorBody guards the WIRING, not the predicate.
+//
+// The first version of this guard asserted isFSErrorBody directly, which passes
+// whether or not anything calls it — so removing the call site left the suite
+// green while the defect was fully restored. The predicate is not the thing
+// that was broken; using it is.
+func TestReadBoxFileRejectsTheFSErrorBody(t *testing.T) {
+	src := readSourceFile(t, "prime.go")
+	fn := src[strings.Index(src, "func (l *lifecycle) readBoxFile("):]
+	if end := strings.Index(fn, "\nfunc "); end > 0 {
+		fn = fn[:end]
+	}
+	if fn == "" {
+		t.Fatal("readBoxFile not found — this guard is pinned to a function that moved")
+	}
+	if !strings.Contains(fn, "isFSErrorBody(") {
+		t.Error("readBoxFile no longer rejects an fs error body, so a 200 carrying " +
+			"\"no such file or directory\" is quoted back as file content — which is how this " +
+			"diagnosis reported a stat error as the box's own exit record")
+	}
+	diag := src[strings.Index(src, "func (l *lifecycle) diagnosePaneGone("):]
+	if end := strings.Index(diag, "\nfunc "); end > 0 {
+		diag = diag[:end]
+	}
+	if !strings.Contains(diag, "looksLikeAgentExitRecord(") {
+		t.Error("diagnosePaneGone no longer checks that what it read IS an exit record; any " +
+			"readable file at that path would be quoted as one")
+	}
+	if strings.Contains(diag, "l.client.readAllocFile(") {
+		t.Error("diagnosePaneGone reads the alloc file directly again, bypassing the validation " +
+			"in readBoxFile")
+	}
+}
