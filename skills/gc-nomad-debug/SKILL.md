@@ -231,7 +231,7 @@ That is the whole question, so here is the map:
 | tmux subcommand | Issued by | What its failure means |
 |---|---|---|
 | `new-session -d -s main` | **launch** — creates the session and runs the agent in its pane | the session could not be created at all: no tmux in the image, or an unusable socket dir |
-| `new-window -d -t main` | **startup prime** — a SECOND window on the same session, delivering the first prompt AFTER launch reported success | **the launch's pane is already dead.** The prime only runs once launch returned, so `no server running` here is not a prime defect: the agent exited between the two calls, taking the server with it. Go to the exit record — do not debug the prime |
+| `new-window -d -t main` | **startup prime** — a SECOND window on the same session, running a staged script under `$NOMAD_SECRETS_DIR` that delivers the first prompt, AFTER launch reported success | **the launch's pane is already dead.** The prime only runs once launch returned, so `no server running` here is not a prime defect: the agent exited between the two calls, taking the server with it. Go to the exit record — do not debug the prime. (The prime is a *separate window*, so its own script cannot be what killed the agent's pane — one more reason the answer is in the exit record, not here.) |
 | `respawn-pane -k -t main` | **relaunch** — re-runs the agent in the EXISTING pane | the pane or session is gone; relaunch cannot recreate it (that is `start`'s job) |
 | `send-keys` | **nudge**, **interrupt**, **send-keys** | the pane is gone, or the agent is not reading its tty |
 | `capture-pane` | **peek** | same, and peek is the cheapest way to confirm it |
@@ -298,6 +298,18 @@ BEFORE you need them:
   writes an `evidence_lost` marker instead. Its presence is the answer to "why
   is there nothing here" — it means the pack tried and says so, rather than
   never having tried.
+- **A pool replacing a dead seat DOES egress first.** A reader asked the right
+  question here — if something keeps minting replacements for days, does the
+  replacement path stop the old box (egressing) or just abandon it? Answer,
+  read off the code: the reap path writes a tombstone and **then calls the same
+  `stop`**, so each replaced incarnation leaves its evidence behind. A lane
+  dark for days should therefore have one egressed set per attempt, which is
+  exactly the history you want.
+- **Nothing prunes that directory.** The pack never reaps
+  `GC_NOMAD_EGRESS_DIR`; it grows one set per stopped session forever. That is
+  deliberate — evidence the pack deleted would be evidence nobody could read —
+  but it means retention is yours, and "still recoverable after days" depends
+  on you not having cleaned it.
 
 This section was added because an outside reader, given the "dark for days"
 symptom and only these docs, reached the mechanism and then stopped: the recipe
