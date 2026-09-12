@@ -163,6 +163,7 @@ RUN set -eu; \
       expected=""; \
     fi; \
     rm -rf /tmp/toolchain-local; \
+    if [ -n "${GC_OMIT}" ]; then exit 0; fi; \
     missing="$(ldd /usr/local/bin/gc | awk '/not found/ {printf "%s ", $1}')"; \
     test -z "${missing}" || { echo "gc has unresolved shared libraries in this image: ${missing}" >&2; echo "add the providing package to the apt RUN above; measured with: docker run --rm -v <staged gc>:/gc:ro <base_image> ldd /gc" >&2; exit 1; }; \
     reported="$(gc version --json --long)"; \

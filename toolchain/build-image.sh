@@ -346,7 +346,14 @@ case "$cmd" in
     agent="${OUT_TAG:-$(lock_get agent_image)}"
     rollback="$(lock_get rollback_image)"
     art=""; art_sha=""; art_pin=""; staged=""
-    if [ "$PUBLISHED" = 1 ]; then
+    if [ -n "${GC_TOOLCHAIN_OMIT_GC:-}" ]; then
+      # No gc ships in this image at all, so the "you have not pinned a gc"
+      # refusal below does not apply — it exists to stop an image silently
+      # carrying a published gc older than the live pin, and here it carries
+      # none. Ordering matters: that refusal used to fire first and made the
+      # omit mode unreachable, which I found by running it.
+      echo "toolchain gc source: NONE (GC_TOOLCHAIN_OMIT_GC) — the box fetches gc per allocation"
+    elif [ "$PUBLISHED" = 1 ]; then
       echo "toolchain gc source: PUBLISHED gc $(lock_version gc) (--published; the image will NOT carry the live pin)"
     else
       art="$(local_artifact_path)"
