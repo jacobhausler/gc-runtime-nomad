@@ -579,8 +579,32 @@ func buildLaunchCommandForTmuxWithPaneCommand(env map[string]string, tmuxArgs []
 	// placeholder-pane shape left to fall back to: launch() has
 	// already failed closed on an empty rendered command.
 	cmd = append(cmd, "/bin/sh", "-c", paneStagedEnvPrelude+paneCwdPrelude(workDir)+agentCaptureBody(paneCommand))
+
+	// Tap the pane's output, in the SAME tmux invocation, separated by tmux's
+	// own ";" argument.
+	//
+	// egressFiles and the vector config have declared agent.stdout since before
+	// this pack shipped, and the egress doc names this exact mechanism —
+	// pipe-pane rather than a redirect, so the agent keeps its tty, which
+	// matters because gc drives it as an interactive client (peek, nudge,
+	// interrupt). Nothing ever issued it. The cost was a day of diagnosis
+	// reconstructing by hand what this prints: the exit record could say the
+	// agent died and never say why, because the agent's message went to a pane
+	// that died with its server.
+	//
+	// Same invocation, not a second exec, because the failing pane dies in
+	// about a second and a round trip is a window in which it runs untapped.
+	// -o appends: a relaunch into a box the pack already made (the adopt path)
+	// must not erase the previous attempt's output, which is the one most
+	// likely to explain the current state.
+	cmd = append(cmd, ";", "pipe-pane", "-o", "-t", tmuxSessionName,
+		`cat >> "${NOMAD_ALLOC_DIR:-/tmp}/data/`+agentStdoutCaptureName+`"`)
 	return cmd
 }
+
+// agentStdoutCaptureName is the pane-output capture file, the name egressFiles
+// copies and the vector source includes.
+const agentStdoutCaptureName = "agent.stdout"
 
 // isTerminalStatus reports whether a Nomad alloc ClientStatus is terminal.
 func isTerminalStatus(status string) bool {

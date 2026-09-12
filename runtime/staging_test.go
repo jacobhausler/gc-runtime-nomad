@@ -35,6 +35,29 @@ import (
 // renderedWithoutExec is what a rendered pane command looks like once
 // agentCaptureBody has dropped its leading `exec` — which it must, or the
 // capture wrapper never runs.
+// launchPaneBody finds the pane body in a launch argv BY CONTENT.
+//
+// Every test here used to take cmd[len(cmd)-1], which was the pane body only
+// while the body was last. When the pipe-pane tap was appended after it, those
+// tests silently began asserting against the TAP — and one of them was the
+// work-dir injection guard, whose "does not interpolate unquoted" check passes
+// trivially against any string that does not contain the work dir. A guard
+// that cannot fail is not a guard, and position is the reason it stopped
+// being one.
+func launchPaneBody(t *testing.T, cmd []string) string {
+	t.Helper()
+	const marker = `. "$NOMAD_SECRETS_DIR/env.sh"`
+	for i := len(cmd) - 1; i >= 0; i-- {
+		// The launch WRAPPER also sources env.sh, so skip it: the pane body is
+		// the one that additionally carries the cwd prelude's own shape.
+		if strings.Contains(cmd[i], marker) && strings.Contains(cmd[i], "__gc_cap=") {
+			return cmd[i]
+		}
+	}
+	t.Fatalf("no pane body in launch argv %v", cmd)
+	return ""
+}
+
 func renderedWithoutExec(cmd string) string {
 	out, _ := stripLeadingExec(cmd)
 	return out
@@ -747,10 +770,20 @@ func TestLaunchCommandPaneSourcesStagedEnv(t *testing.T) {
 		{"respawn-pane", "-k", "-t", tmuxSessionName},
 	} {
 		cmd := buildLaunchCommandForTmuxWithPaneCommand(nil, tmuxArgs, "", rendered)
-		if len(cmd) < 3 || cmd[len(cmd)-3] != "/bin/sh" || cmd[len(cmd)-2] != "-c" {
-			t.Fatalf("%s: launch command %v does not end in a /bin/sh -c pane body", tmuxArgs[0], cmd)
+		pane := launchPaneBody(t, cmd)
+		// The property is that the body is handed to a shell as -c, not that
+		// it sits at a particular offset from the end: the pipe-pane tap is
+		// appended after it. Asserted on the two argv slots BEFORE the body,
+		// wherever the body is.
+		var bodyAt = -1
+		for i, arg := range cmd {
+			if arg == pane {
+				bodyAt = i
+			}
 		}
-		pane := cmd[len(cmd)-1]
+		if bodyAt < 2 || cmd[bodyAt-2] != "/bin/sh" || cmd[bodyAt-1] != "-c" {
+			t.Fatalf("%s: launch command %v does not hand the pane body to /bin/sh -c", tmuxArgs[0], cmd)
+		}
 		if !strings.Contains(pane, `. "$NOMAD_SECRETS_DIR/env.sh"`) {
 			t.Errorf("%s: pane body does not source the staged environment: %q", tmuxArgs[0], pane)
 		}
@@ -815,7 +848,7 @@ func TestLaunchCommandPaneCdToStagedWorkDir(t *testing.T) {
 	const rendered = "exec codex"
 
 	cmd := buildLaunchCommandForPane(nil, "/tmp/staged-rig", rendered)
-	body := cmd[len(cmd)-1]
+	body := launchPaneBody(t, cmd)
 	wantCd := `cd '/tmp/staged-rig' 2>/dev/null || `
 	if !strings.Contains(body, wantCd) {
 		t.Fatalf("pane body %q does not cd to the staged work dir first", body)
@@ -842,7 +875,7 @@ func TestLaunchCommandPaneCdToStagedWorkDir(t *testing.T) {
 // pane-shell code.
 func TestLaunchCommandPaneCdQuotesWorkDir(t *testing.T) {
 	cmd := buildLaunchCommandForPane(nil, "/tmp/it's a trap;touch /tmp/pwned", `exec codex`)
-	body := cmd[len(cmd)-1]
+	body := launchPaneBody(t, cmd)
 	if strings.Contains(body, "cd /tmp/it") {
 		t.Fatalf("pane body %q interpolates the work dir unquoted", body)
 	}

@@ -28,7 +28,7 @@ import (
 func TestPaneReportsArgumentPathsMissingInTheBox(t *testing.T) {
 	cmd := buildLaunchCommandForPane(map[string]string{}, "",
 		`exec codex exec -c model_catalog_json=/orchestrator-home/.agent/cat.json -c model=x /opt/present`)
-	body := cmd[len(cmd)-1]
+	body := launchPaneBody(t, cmd)
 	if !strings.Contains(body, "/orchestrator-home/.agent/cat.json") {
 		t.Fatalf("the absolute path in an argument is never checked in the box, so a path that exists only on the orchestrator kills the agent with an error naming neither:\n%s", body)
 	}

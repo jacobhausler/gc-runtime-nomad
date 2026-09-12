@@ -32,11 +32,18 @@ import (
 func paneBody(t *testing.T) string {
 	t.Helper()
 	cmd := buildLaunchCommandForPane(map[string]string{}, "", "codex --model x")
-	// The pane body is the argument after `-c` in the INNER /bin/sh the tmux
-	// pane runs, which is the last element of the launch argv.
-	body := cmd[len(cmd)-1]
-	if !strings.Contains(body, "codex --model x") {
-		t.Fatalf("did not find the pane body in the launch argv; got %q", body)
+	// Located by CONTENT, not position. This used to take the last argv
+	// element, which was the pane body until the pipe-pane tap was appended
+	// after it — and then this helper silently started returning the tap, so
+	// every test using it asserted against the wrong string.
+	var body string
+	for _, arg := range cmd {
+		if strings.Contains(arg, "codex --model x") {
+			body = arg
+		}
+	}
+	if body == "" {
+		t.Fatalf("did not find the pane body in the launch argv; got %v", cmd)
 	}
 	return body
 }
@@ -101,8 +108,12 @@ func TestCaptureDoesNotSwallowTheExitStatus(t *testing.T) {
 // it runs and the exit record is never written. Found by an existing guard
 // going red on the wrapped body, not by reading the code.
 func TestLeadingExecIsDroppedSoTheWrapperSurvives(t *testing.T) {
-	body := buildLaunchCommandForPane(map[string]string{}, "", "exec codex --model x")
-	got := body[len(body)-1]
+	cmd := buildLaunchCommandForPane(map[string]string{}, "", "exec codex --model x")
+	// launchPaneBody, not cmd[len-1]: the pipe-pane tap is appended after the
+	// body, and reading by position made this assert against the tap. My own
+	// test, one commit old, broken by the very positional assumption its
+	// sibling helper was fixed for.
+	got := launchPaneBody(t, cmd)
 	if strings.Contains(got, "{ exec codex") {
 		t.Fatalf("the pane still execs, so the exit record is never written:\n%s", got)
 	}
