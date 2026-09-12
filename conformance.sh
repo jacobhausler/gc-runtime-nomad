@@ -42,6 +42,16 @@ if ! command -v tmux >/dev/null 2>&1; then
   exit 1
 fi
 
+# This ladder drives the pack's RPP surface against an in-memory Nomad fake:
+# no city, no claim, no work. The gc capability gate asks whether the gc on
+# PATH can claim work from inside an allocation, which is a question about a
+# real deployment and not about this harness -- and gating here would make the
+# protocol suite unrunnable by anyone who does not already have the pinned gc,
+# which is exactly the contributor this pack most needs to keep. The runtime
+# prints a warning on every op when this is set, so it can never be a quiet
+# way to disable the guard.
+export GC_NOMAD_SKIP_GC_CAPABILITY_GATE=1
+
 echo "conformance: building gc-runtime-nomad + fakenomad"
 ( cd "$runtime_dir" && go build -o "$bindir/gc-runtime-nomad" . )
 ( cd "$fakenomad_dir" && go build -o "$bindir/fakenomad" ./cmd/fakenomad )

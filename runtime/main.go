@@ -168,7 +168,7 @@ func run(args []string, stdin io.Reader, stdout, stderr *os.File) int {
 		if skipVerifyRequested() {
 			fmt.Fprintln(stderr, tlsVerificationDisabledWarning)
 		}
-		switch probeGCWorkerSurface(context.Background()) {
+		switch gcWorkerSurfaceForCheck(stderr) {
 		case gcWorkerSurfaceMissing:
 			fmt.Fprintf(stderr, "FAIL: %v\n", gcMissingWorkerSurfaceError())
 			return exitError
@@ -200,7 +200,8 @@ func run(args []string, stdin io.Reader, stdout, stderr *os.File) int {
 	// working against boxes that already exist. Refusing those would strand
 	// allocations on the very gc that cannot drive them — converting a startup
 	// refusal into an orphaned-box problem, which is strictly worse.
-	if mintsABox[op] && probeGCWorkerSurface(context.Background()) == gcWorkerSurfaceMissing {
+	if mintsABox[op] && !capabilityGateSkipped(stderr) &&
+		probeGCWorkerSurface(context.Background()) == gcWorkerSurfaceMissing {
 		fmt.Fprintf(stderr, "gc-runtime-nomad %s: %v\n", op, gcMissingWorkerSurfaceError())
 		return exitError
 	}

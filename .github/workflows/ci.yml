@@ -69,3 +69,36 @@ jobs:
 
       - name: Run the phase-1 conformance suite
         run: GC_BIN="$(go env GOPATH)/bin/gc" ./conformance.sh
+
+      # The suite above is green against a gc carrying NONE of the pin
+      # families -- which is the honest state of this workflow and also its
+      # blind spot: a green run cannot see the pack's own primary dependency
+      # failing. This leg is the inverse assertion, and it is the only place
+      # CI observes that dependency at all.
+      #
+      # The pack refuses to mint a box on a gc that cannot claim work from
+      # inside an allocation. GC_REF here IS such a gc, so `check` MUST exit
+      # nonzero. If it starts passing, either the gate regressed or the ref
+      # gained the family -- both are things this workflow should stop and
+      # say rather than sail past.
+      - name: Assert the pack refuses a gc without the remote-worker family
+        env:
+          DISPATCH_GC_REF: ${{ inputs.gc_ref }}
+        run: |
+          set -euo pipefail
+          if [ -n "${DISPATCH_GC_REF:-}" ]; then
+            echo "workflow_dispatch supplied gc_ref=${DISPATCH_GC_REF}; this leg"
+            echo "asserts the refusal only for the default upstream-base ref."
+            exit 0
+          fi
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          ( cd runtime && go build -o "${RUNNER_TEMP}/gc-runtime-nomad" . )
+          if "${RUNNER_TEMP}/gc-runtime-nomad" check; then
+            echo "::error::gc-runtime-nomad check PASSED against gc@${GC_REF}," \
+                 "the upstream base carrying none of the pin families. Either the" \
+                 "capability gate regressed, or that ref now carries" \
+                 "remote-worker-lifecycle. See docs/PIN-DEPENDENCIES.md."
+            exit 1
+          fi
+          echo "ok: the pack refuses gc@${GC_REF}, as it must."
+

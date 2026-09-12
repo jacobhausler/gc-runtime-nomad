@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -134,5 +135,65 @@ func TestNonMintingOpsSurviveAGCWithoutTheWorkerSurface(t *testing.T) {
 		if mintsABox[op] {
 			t.Errorf("%q is treated as box-minting; it must not be gated", op)
 		}
+	}
+}
+
+// TestCapabilityGateOptOutIsNeverSilent pins that disabling the gate announces
+// itself. An env var that quietly switches off a dark-lane guard is a way to
+// recreate the dark lane, and this one switches it off on exactly the ops that
+// mint boxes — so the warning is the feature, not decoration.
+func TestCapabilityGateOptOutIsNeverSilent(t *testing.T) {
+	t.Setenv(envSkipCapabilityGate, "1")
+	var out bytes.Buffer
+	if !capabilityGateSkipped(&out) {
+		t.Fatal("gate not skipped with the opt-out set")
+	}
+	for _, want := range []string{envSkipCapabilityGate, "no_work"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("the skip warning does not mention %q:\n%s", want, out.String())
+		}
+	}
+}
+
+func TestCapabilityGateIsOnByDefault(t *testing.T) {
+	t.Setenv(envSkipCapabilityGate, "")
+	var out bytes.Buffer
+	if capabilityGateSkipped(&out) {
+		t.Error("the gate reported itself skipped with the opt-out unset")
+	}
+	if out.Len() != 0 {
+		t.Errorf("the gate warned when it was not skipped: %s", out.String())
+	}
+}
+
+// TestOptOutLetsBoxMintingOpsPastAMissingSurface is the behaviour the offline
+// conformance ladder depends on: with the opt-out set, a gc that cannot claim
+// no longer refuses the lifecycle. Without this the protocol suite is
+// unrunnable by anyone who does not already have the pinned gc.
+func TestOptOutLetsBoxMintingOpsPastAMissingSurface(t *testing.T) {
+	stubGCOnPath(t, baseRefusal)
+	t.Setenv(envSkipCapabilityGate, "1")
+
+	errFile := t.TempDir() + "/err"
+	errf, err := os.Create(errFile)
+	if err != nil {
+		t.Fatalf("creating stderr capture: %v", err)
+	}
+	defer errf.Close()
+	out, err := os.Create(t.TempDir() + "/out")
+	if err != nil {
+		t.Fatalf("creating stdout capture: %v", err)
+	}
+	defer out.Close()
+
+	run([]string{"start", "sess-optout-probe"}, strings.NewReader(""), out, errf)
+	captured, readErr := os.ReadFile(errFile)
+	if readErr != nil {
+		t.Fatalf("reading stderr capture: %v", readErr)
+	}
+	// It may still fail for unrelated reasons (no GC_NOMAD_ADDR here); what it
+	// must NOT do is refuse on the capability gate.
+	if strings.Contains(string(captured), "does not carry the remote-worker-lifecycle") {
+		t.Errorf("the capability gate refused despite the opt-out:\n%s", captured)
 	}
 }

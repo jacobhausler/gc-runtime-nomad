@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -82,6 +84,35 @@ func gcMissingWorkerSurfaceError() error {
 			"`gc bd claim` under a remote target.)", edgeWorkerSurfaceMarker)
 }
 
+// envSkipCapabilityGate lets a harness that is NOT running real sessions opt
+// out of the gate.
+//
+// The offline conformance ladder is the case this exists for: it drives the
+// pack's RPP surface against an in-memory Nomad fake, with no city, no claim
+// and no work — so "the gc on PATH cannot claim work from inside an
+// allocation" is true and irrelevant there. Without an opt-out the protocol
+// suite becomes unrunnable by anyone who does not already have the pinned gc,
+// which is precisely the contributor this pack most needs to keep.
+//
+// It is deliberately NOT quiet. Skipping prints a line every time, because an
+// env var that silently disables a dark-lane guard is a way to recreate the
+// dark lane — and this one would do it on the exact ops that mint boxes.
+const envSkipCapabilityGate = "GC_NOMAD_SKIP_GC_CAPABILITY_GATE"
+
+// capabilityGateSkipped reports whether the gate is opted out of, and warns
+// when it is.
+func capabilityGateSkipped(stderr io.Writer) bool {
+	if strings.TrimSpace(os.Getenv(envSkipCapabilityGate)) == "" {
+		return false
+	}
+	fmt.Fprintf(stderr, "warning: the gc capability gate is disabled (%s is set). "+
+		"This pack is NOT checking whether the gc on PATH can claim work from inside "+
+		"an allocation. Correct for an offline harness; in a real deployment it "+
+		"restores the failure the gate exists to prevent — a box that comes up, looks "+
+		"healthy, and drains no_work forever.\n", envSkipCapabilityGate)
+	return true
+}
+
 // probeGCWorkerSurface runs the probe against the gc on PATH.
 func probeGCWorkerSurface(ctx context.Context) gcWorkerSurface {
 	gc, err := exec.LookPath("gc")
@@ -101,3 +132,13 @@ func probeGCWorkerSurface(ctx context.Context) gcWorkerSurface {
 // gcProbeTimeout bounds the probe. It is refused locally and returns in
 // milliseconds; this only exists so a pathological gc cannot hang a start.
 const gcProbeTimeout = 10 * time.Second
+
+// gcWorkerSurfaceForCheck is the `check` door's view: the opt-out suppresses
+// the FAIL the same way it suppresses the refusal, so a harness that can run
+// the lifecycle can also run the diagnostic.
+func gcWorkerSurfaceForCheck(stderr io.Writer) gcWorkerSurface {
+	if capabilityGateSkipped(stderr) {
+		return gcWorkerSurfacePresent
+	}
+	return probeGCWorkerSurface(context.Background())
+}
