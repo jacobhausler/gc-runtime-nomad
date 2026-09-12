@@ -31,7 +31,7 @@ owner-unit: runtime-nomad
 
 ## Health and SLO signals
 
-- `is-running` prints `true`/`false` with an honesty split: provisioned-but-never-launched reads `false` even while the alloc runs; once launched, an in-box probe (tmux session + pane pid) answers, so an agent killed inside a live alloc reads `false`; transport faults along the path answer last-known-good `true`, never a fabricated `false`.
+- `is-running` prints `true`/`false` with an honesty split: provisioned-but-never-launched reads `false` even while the alloc runs; once launched, an in-box probe (tmux session + pane pid) answers, so an agent killed inside a live alloc reads `false`; note this probe answers *does the session exist* and will read `true` for an empty box — *did an agent actually start* is a separate process-list probe on the launch path, not this op; transport faults along the path answer last-known-good `true`, never a fabricated `false`.
 - `list-running` exits 0 with one launched session name per line (prefix-filterable); exits 1 on any lookup error — never a partial list.
 - `check` exits 0 with no cluster configuration; with the sink unset it prints `warning: session logs will not be shipped (GC_NOMAD_LOG_SINK unset)` to stderr.
 - Shipper metrics: with the sink set, each session group carries a pinned vector `log-shipper` task exposing vector's own Prometheus metrics via its built-in `prometheus_exporter` on a group-local port.

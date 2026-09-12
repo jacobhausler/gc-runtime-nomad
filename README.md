@@ -28,14 +28,31 @@ unset, this task is never added at all.
 
 ## Before you install
 
-**[`COMPATIBILITY.md`](COMPATIBILITY.md) first.** It states what this pack
+> **Status: not installable outside its home estate yet.** Read this before
+> anything else.
+>
+> This pack requires a `gc` built from a private EDGE lineage. The pin it
+> needs is **not a commit that exists on `gastownhall/gascity`**, so the
+> `go install ...@<pin>` in the install section below **cannot resolve for
+> you**. This repository's own CI says so in as many words
+> (`.github/workflows/ci.yml`). Nineteen behaviour families are involved and
+> seven of them have no upstream PR at all — the full table is
+> [`docs/PIN-DEPENDENCIES.md`](docs/PIN-DEPENDENCIES.md).
+>
+> Budget for the failure mode, because it is the expensive part: when that
+> dependency is missing **the pack does not refuse, it goes dark.** A lane
+> reads as configured and serves nothing. Two measured examples are in
+> `COMPATIBILITY.md`.
+>
+> What would have to become true for this line to be deleted: those families
+> land upstream, or the lineage is published so a reader can build the `gc`
+> this pack drives. Until one of those happens, treat everything below as a
+> description of how the pack works rather than as instructions you can
+> follow to a running system.
+
+**[`COMPATIBILITY.md`](COMPATIBILITY.md) next.** It states what this pack
 needs — Gas City, Nomad, clients, image, host, toolchain — and what it does
 not support yet, with the measurement behind each claim.
-
-The one line worth reading here: this pack requires a `gc` built from the
-Westlands EDGE lineage and **does not run on a released upstream `gc`**. When
-that dependency is missing the pack does not refuse — it goes dark. See
-`COMPATIBILITY.md` and `docs/PIN-DEPENDENCIES.md`.
 
 ## Layout
 
@@ -94,7 +111,7 @@ layers:
 | Layer | Delivery contract |
 |---|---|
 | Workspace/secrets | `stageConfig.Env` is staged through the pack's tar-over-exec-stdin channel into `$NOMAD_SECRETS_DIR`, including the sourceable `env.sh` file. This is the pack's own transport, not an RPP claim: the pack declares no `env.workspace` capability, because the start wire does not materialize `work_dir` inside the alloc and gc probes every declared `env.*` code. |
-| Toolchain | The Docker image named by the **required** `GC_NOMAD_AGENT_IMAGE` carries the session toolchain (`gc` agent, Codex, tmux, `sh`, `tar`); the agent task declares no host volume, so nothing is delivered from the client host. `GC_NOMAD_AGENT_IMAGE` unset fails every lifecycle op closed — cr-3vvnb5.2 removes the legacy `exec` task and the `GC_NOMAD_ARTIFACT_VOLUME` `/mnt/nomad` mount that used to feed it. |
+| Toolchain | The Docker image named by the **required** `GC_NOMAD_AGENT_IMAGE` carries the session toolchain; the binaries it must provide are one canonical list in one place, [`COMPATIBILITY.md`](COMPATIBILITY.md) → "The agent image" (this row deliberately does not copy it — the last copy here named a specific agent CLI, which contradicts the runtime/provider independence stated above, and omitted three binaries the runtime actually execs). The agent task declares no host volume, so nothing is delivered from the client host. `GC_NOMAD_AGENT_IMAGE` unset fails every lifecycle op closed — cr-3vvnb5.2 removes the legacy `exec` task and the `GC_NOMAD_ARTIFACT_VOLUME` `/mnt/nomad` mount that used to feed it. |
 | Identity/config | The city target arrives through the secrets environment channel as **exactly one** of a complete remote context (`GC_HOME` + `GC_CITY_CONTEXT`) or `GC_CITY_URL`; both at once is the fail-closed case, not a redundancy - see Install part 1 step 7. Session identity values are added by the lifecycle. |
 
 The Cloudflare pack's bundle is the environment boundary for pack-provided
@@ -115,23 +132,25 @@ shipped; disabling shipping is therefore explicit and visible.
 
 ## Install
 
-D4 has ruled: this pack is now the estate default for every lane except the
-executive. Everything below is provider-agnostic; the values one estate actually
-chose are not this pack's to carry and live in its admitted deployment record
-(end of part 1).
+Read the status banner at the top of this file first: step 1 below cannot be
+completed from outside the pack's home estate today.
 
-The runtime and the agent **provider** are separate abstractions: this pack
-schedules a box and feeds it; it does not know, name, or ship what runs inside
-it. Part 1 is the runtime and part 2 the contract its provider side must
-satisfy; what a given estate fills in is recorded outside this pack.
+Everything here is provider-agnostic. The runtime and the agent **provider**
+are separate abstractions: this pack schedules a box and feeds it; it does not
+know, name, or ship what runs inside it. Part 1 is the runtime; part 2 is the
+contract its provider side must satisfy. The concrete values any one
+deployment fills in are not this pack's to carry.
 
 ### Part 1 — Runtime requirements
 
 Provider-agnostic: what any deployment of this pack needs.
 
 1. **`gc`, installed at a pin that carries the remote-worker families.**
-   `go install github.com/gastownhall/gascity/cmd/gc@<pin>`. `gc` is a tool
-   dependency of this pack, never a Go import — the pack keeps zero gascity
+   `go install github.com/gastownhall/gascity/cmd/gc@<pin>` — **but see the
+   status banner: there is no public value of `<pin>` that satisfies this
+   today.** The families a pin must carry are not all upstream, so this step
+   is currently completable only where that lineage is already built. `gc` is
+   a tool dependency of this pack, never a Go import — the pack keeps zero gascity
    Go dependencies. The families the pin must carry, their upstream twins, and
    the first pin that carried each are the checklist in
    [`docs/PIN-DEPENDENCIES.md`](docs/PIN-DEPENDENCIES.md). Pin choice is the
@@ -143,8 +162,10 @@ Provider-agnostic: what any deployment of this pack needs.
    **is not in effect until the pin moves onto a commit that is an ancestor
    of it** — verify with `git merge-base --is-ancestor <fix-sha> <pin>`, and
    treat the result as a pin-roll action, not a defect to re-investigate.
-2. **A Go toolchain where `go install` may run.** On an estate that forbids
-   Mac-side Go runs, build off-Mac and install the artifact from there.
+2. **A Go toolchain where `go install` may run.** Build on the platform you
+   will run on: the runtime binary is a Nomad API client and runs wherever
+   `gc` does, but the `gc` that goes *inside* the agent image must be a
+   linux/amd64 build (COMPATIBILITY.md, "The agent image").
    `install.sh` is that Go run and nothing else: the launcher deploy it used to
    carry existed to serve the host-toolchain pane and is gone (cr-3vvnb5.4).
 3. **A reachable Nomad API, plus two tokens:** a management token holding
@@ -290,29 +311,28 @@ and per image (base, builder, agent, rollback) — digest-pinned references, nev
 floating tags. `toolchain/build-image.sh` reads every value in it and passes
 each as a build ARG, `toolchain/Dockerfile` consumes the ARGs, and
 `toolchain/BUILD-RECEIPT.md` carries the measurements — including the pins that
-were rejected and why. It ships no delivery layer: publishing stays an executive
-host step, and the live pin it must be read alongside is the estate record, not
-this pack's. (cr-u7b0s.45 landed the lock; cr-5xrcu added this pointer on
-2026-09-09, having found `rg 'toolchain/' README.md` empty in a tree that
-already carried it.)
+were rejected and why. It ships no delivery layer: nothing in this pack
+publishes an image, and the `gc` pin the lock must be read alongside belongs
+to whoever operates the deployment.
 
 Prebaking the toolchain into the box image is the intended 1.0.x shape —
 `gc build-image` is the prebake verb gc ships - its contract at the pin is
 K8s-shaped, see the `GC_NOMAD_AGENT_IMAGE` row in step 6 - and epic `cr-u7b0s` is
 that work; manual staging as above is what runs today.
 
-### Estate deployment values live outside this pack
+### Deployment values live outside this pack
 
-The keys above are a contract, not a set of values. One deployment's filled-in
-record - endpoint and mTLS custody, host-firewall allowlist, resolver address,
-placement state (enforced vs emergent), host-volume and launcher pointers, the
-off-Mac Go rule - is not this pack's to carry. Westlands' lives in the admitted
-cleanroom card
-`_cleanroom/service_groups/agent_fabric/gc_control_plane_relay/gc_control_plane_relay.md`
-(`gc_control_plane_relay`, linked from `CLEANROOM-MAP.yaml`). Read it before
-debugging an alloc egress timeout: a host absent from that estate's firewall
-table fails exactly like a broken runtime would. Nothing in that record is a
-default to copy.
+The keys above are a contract, not a set of values. What any one deployment
+fills in — API endpoint and mTLS custody, host-firewall allowlist, resolver
+address, whether placement is enforced or emergent — is not this pack's to
+carry, and nothing another deployment chose is a default to copy.
+
+Keep that record wherever your team keeps such things, and **read it before
+you debug an alloc egress timeout**. That is the lesson worth porting from
+the deployments that have already hit it: a host missing from your firewall
+or allowlist table fails in a way that is indistinguishable from a broken
+runtime. The runtime cannot tell you the difference, because from inside the
+alloc the two look identical.
 
 ## Conformance
 
