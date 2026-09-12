@@ -83,7 +83,7 @@ the exception - it returns the remote command's own exit code.
 
 ## 1. Classify the symptom before collecting anything
 
-Run `gc-runtime-nomad check` before reading this table, and read its output
+Run `gc-runtime-nomad check` before reading this table — **it writes to stderr**, so capture it as `gc-runtime-nomad check 2>&1 | tee /tmp/gcn-check.txt` or you will paste an empty file into your bug report — and read its output
 bottom-up: a **FAIL supersedes every warning above it.** `check` warns about
 several unset keys that are each a real fault on their own, so a reader working
 top-down can fix the warning, feel progress, and still have the lane that does
@@ -146,9 +146,34 @@ questions across sessions. Fall back to raw event greps only where neither can
 answer. Trace state persists under the city's runtime directory and stays
 manageable even when the controller is offline.
 
-Cluster side, read-only, correlated by child job and allocation id:
-`nomad job status`, `nomad job allocations`, `nomad alloc status`,
-`nomad alloc logs`, `nomad evaluation status`, `nomad node status`.
+Cluster side, read-only, correlated by child job and allocation id. **Every one
+of these needs `-namespace`** — the pack runs in its own namespace
+(`GC_NOMAD_NAMESPACE`, default `default`), and without the flag you are querying
+a namespace the sessions are not in and will conclude the job does not exist:
+
+```
+NS=<your GC_NOMAD_NAMESPACE>
+CHILD=<child_job_id from the binding>
+nomad job status   -namespace "$NS" "$CHILD"
+nomad job allocs   -namespace "$NS" "$CHILD"
+nomad alloc status -namespace "$NS" <alloc-id>
+nomad alloc logs   -namespace "$NS" <alloc-id> <task>
+nomad node status  -verbose <node-id>
+```
+
+**What to look for, because the output is long and most of it is irrelevant:**
+
+- `nomad job status` prints a **`Placement Failure`** block when nothing could
+  be placed. Read `Nodes evaluated`, `Nodes filtered`, and the per-constraint
+  counts. `Nodes evaluated = 0` with an empty filter list is NOT a constraint
+  problem — it means the scheduler saw no nodes at all in the job's node pool,
+  and no constraint change will fix it. The pack names this case for you.
+- An **evaluation in `blocked` status** means Nomad has queued the placement and
+  is waiting for capacity; it is not an error and will never resolve on its own
+  if the pool is empty or the constraints are unsatisfiable.
+- `nomad job status` prints **two** lines beginning `Status` — the job's and the
+  latest deployment's. An `awk '/^Status/{print $2}'` captures both; anchor on
+  the first or you will read the wrong one.
 
 **The sidecar binding is the only layer that can tell two faults apart.** Law 3
 names it as one of the five signals; this is what is in it. Under
@@ -289,10 +314,28 @@ stop when one of them dies.
    ```
 
    **And whose environment?** `check` and this loop read the environment of
-   whoever RUNS them. The pack reads the SUPERVISOR's. Run these as the
-   supervisor, or treat their warnings as facts about your shell — an unset
-   `GC_NOMAD_AGENT_IMAGE` in your terminal says nothing about a deployment
-   whose boxes are demonstrably running.
+   whoever RUNS them. The pack reads the SUPERVISOR's. So a warning from your
+   own shell says nothing about the deployment — an unset
+   `GC_NOMAD_AGENT_IMAGE` in your terminal tells you nothing about boxes that
+   are demonstrably running.
+
+   Being blunt about this, because it is the step most likely to strand you:
+   **if you cannot run a command as the user and environment the supervisor
+   runs under, this ladder cannot be completed from your shell.** What to do
+   instead, in order of preference:
+
+   1. Read the deployment record that DEFINES that environment — the unit file,
+      service definition, container spec or wrapper script your team used to
+      start the supervisor. That is the authority on what the pack sees, and it
+      is a file you can read without touching the running process.
+   2. Run `gc-runtime-nomad check` under that same definition (the same
+      user, the same env file) rather than bare in your shell.
+   3. Read `diagnostics.log`, which the SUPERVISOR's own runs wrote. It is the
+      one instrument that reports the pack's real environment rather than
+      yours, and it needs no privileges beyond reading the file.
+
+   Do not go hunting in the process table for the answer: §9 forbids it, and
+   the environment of a live supervisor may carry credentials.
 
    Almost every key in the table is diagnosable from set-vs-unset alone. Where
    a value genuinely matters (an image tag, a sink URL), read it from the
@@ -369,8 +412,6 @@ Because there is one shape, recovery is short and always reversible:
    jobs, allocations, evaluations, alloc directories, sidecar records, egress
    store, staged config drops, shipper leftovers, temp files. A clean process
    list is not a clean residual audit.
-7. A snapshot restore on a cloud-init image regenerates SSH host keys;
-   re-baseline them before trusting SSH to that node again.
 
 ## 6. Classify before choosing an owner
 
@@ -378,11 +419,36 @@ Because there is one shape, recovery is short and always reversible:
 |---|---|---|
 | Pack defect | The documented contract fails against valid input, and the mechanism is in this pack's source | Pack fix plus a regression in the conformance ladder |
 | Nomad/API behavior | The fake accepts it, a real server rejects or schedules it differently, and the difference is a documented wire, query, ACL, or scheduler contract | Pack compatibility change, with the version evidence attached |
-| Gas City defect | Pack and Nomad state are right; `gc` invoked the operation with the wrong contract or misread its result | The gc-side defect path (`gc-debug` and its twin) |
+| Gas City defect | Pack and Nomad state are right; `gc` invoked the operation with the wrong contract or misread its result | A gc-side defect: report it against gc, not against this pack |
 | Configuration or operations | The pack behaved as documented, but the parent fingerprint, namespace, placement, custody, TLS, timing, or rollback precondition was wrong | Fix the owned deployment record - not a product bug until that mismatch is closed |
 | Harness gap | The observation is not representable in the fake or the reconciler simulator, or the simulator is being read as real gc | Extend the harness with an explicit scope; the lab receipt stays the authority |
 
 ## 7. Escalate onto a durable record
+
+**If you are reporting this to the pack's maintainer rather than to your own
+tracker, you need only this** — everything below is about keeping a record
+inside a city that has one, and it does not apply to a vendor bug report:
+
+```
+gc-runtime-nomad check 2>&1            # the whole output, not an excerpt
+```
+
+plus, from `$GC_NOMAD_SIDECAR_DIR`:
+
+- `diagnostics.log` — the pack's own account. Attach it whole; it carries the
+  failures AND the warnings, and the warnings are usually the answer.
+- the session's binding JSON (§2's recipe) — the one thing no other layer holds.
+
+and state, in one sentence each: what you expected, what you observed, and
+which rung of §1's table you stopped at. Include the pack version
+(`pack.toml`), your Nomad version, and the `commit` field from
+`gc version --json --long` — **not** the `version` field, which is the literal
+string `dev` on every build that can run this pack and tells a maintainer
+nothing. Never paste an environment dump; name keys, never values (§9).
+
+---
+
+The rest of this section is for a city that keeps its own work record.
 
 Mail, chat, and terminal scrollback are notifications, not the record: a read
 message is swept away within the hour and a closed one leaves every inbox.
@@ -442,7 +508,7 @@ write directly to the owner-approved custody path and never into a transcript.
 
 ## What this page is not
 
-It is not an upstream-defect filing procedure - that is `gc-debug`, which
+It is not a gc-defect filing procedure - a gc defect is reported against gc, which
 demands a disposable reproduction against pinned edge provenance before anything
 is published. It is not a fault-drill runbook, and it is not a list of one
 deployment's values: endpoint, custody paths, resolver addresses, and placement

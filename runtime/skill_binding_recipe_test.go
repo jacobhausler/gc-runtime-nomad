@@ -155,3 +155,78 @@ func TestCheckPrintsDiagnosticsPathBeforeFailing(t *testing.T) {
 			"sends the reader there for exactly this failure")
 	}
 }
+
+// The skill is a 3am runbook, so its value is executability, not prose. Two
+// independent outside SREs, each handed only this document with no access to
+// this estate, named the same class of defect: instruments the page tells you
+// to trust without telling you how to run them. These guards hold the fixes.
+
+// TestSkillNomadVerbsCarryNamespace pins the flag whose absence guarantees a
+// wrong answer. The pack runs in its own Nomad namespace, so a query without
+// -namespace inspects a namespace the sessions are not in and reports that the
+// job does not exist — a false negative that reads like a real finding.
+func TestSkillNomadVerbsCarryNamespace(t *testing.T) {
+	doc := skillBody(t)
+	if !strings.Contains(doc, "-namespace") {
+		t.Error("SKILL.md names Nomad verbs with no -namespace flag anywhere; run in the wrong " +
+			"namespace they report the job does not exist, which reads like a diagnosis")
+	}
+	// And it must tie the value to the pack's own variable rather than leaving
+	// the reader to guess it.
+	if !strings.Contains(doc, envNamespace) {
+		t.Errorf("SKILL.md does not tell the reader where the namespace comes from (%s)", envNamespace)
+	}
+}
+
+// TestSkillInterpretsPlacementOutput guards against naming an instrument
+// without saying what to read in it. `nomad job status` output is long and
+// almost all of it is irrelevant to a placement failure.
+func TestSkillInterpretsPlacementOutput(t *testing.T) {
+	doc := skillBody(t)
+	for _, want := range []struct{ needle, why string }{
+		{"Placement Failure", "the block to look for is not named"},
+		{"Nodes evaluated", "the field that distinguishes the two failure classes is not named"},
+		{"blocked", "a blocked evaluation is not explained, and it is not an error"},
+	} {
+		if !strings.Contains(doc, want.needle) {
+			t.Errorf("SKILL.md does not interpret placement output: %s (missing %q)", want.why, want.needle)
+		}
+	}
+}
+
+// TestSkillSaysWhenTheLadderCannotBeCompleted is the honesty property an SRE
+// asked for by name. The pack reads the SUPERVISOR's environment; if the reader
+// cannot run as it, several rungs are simply unavailable from their shell, and
+// saying so beats letting them mistake their own shell's warnings for facts
+// about the deployment.
+func TestSkillSaysWhenTheLadderCannotBeCompleted(t *testing.T) {
+	doc := skillBody(t)
+	if !strings.Contains(doc, "this ladder cannot be completed") {
+		t.Error("SKILL.md does not admit that the ladder is incompletable without the supervisor's " +
+			"environment; a reader will instead read their own shell's warnings as deployment facts")
+	}
+	if !strings.Contains(doc, "2>&1") {
+		t.Error("SKILL.md tells the reader to attach check's output without saying it goes to " +
+			"stderr, so they will capture an empty file")
+	}
+}
+
+// TestSkillHasAVendorReportPath keeps the page usable by someone who has no
+// bead tracker. Its escalation section is written for a city that keeps a
+// durable work record; an adopter reporting upstream has none of that.
+func TestSkillHasAVendorReportPath(t *testing.T) {
+	doc := skillBody(t)
+	if !strings.Contains(doc, "reporting this to the pack's maintainer") {
+		t.Error("SKILL.md's escalation section assumes a work record the reader may not have, with " +
+			"no path for reporting to the pack's maintainer")
+	}
+	// The version trap is worth one line, since the obvious field is useless.
+	if !strings.Contains(doc, "`dev`") {
+		t.Error("SKILL.md does not warn that gc's version field is the literal string dev, so a " +
+			"bug report will carry the one identifier that tells a maintainer nothing")
+	}
+	// And it must not point at a document this pack does not ship.
+	if strings.Contains(doc, "gc-debug") {
+		t.Error("SKILL.md points at `gc-debug`, which does not ship in this repository")
+	}
+}
