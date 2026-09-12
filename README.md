@@ -170,8 +170,12 @@ Provider-agnostic: what any deployment of this pack needs.
    will run on: the runtime binary is a Nomad API client and runs wherever
    `gc` does, but the `gc` that goes *inside* the agent image must be a
    linux/amd64 build (COMPATIBILITY.md, "The agent image").
-   `install.sh` is that Go run and nothing else: the launcher deploy it used to
-   carry existed to serve the host-toolchain pane and is gone (cr-3vvnb5.4).
+   `install.sh` is that Go run plus a self-check: the launcher deploy it used
+   to carry existed to serve the host-toolchain pane and is gone (cr-3vvnb5.4).
+   It fails, with the exact `export PATH=...` line for your machine, when the
+   binary lands somewhere `gc` cannot resolve it by bare name — then verifies
+   the RPP handshake and runs `check`, so an incompatible `gc` is reported at
+   install time rather than after you have built an image and wired a lane.
 3. **A reachable Nomad API, plus two tokens:** a management token holding
    `submit-job` for the one-time parent-job registration (step 5), and the
    narrowed runtime token every session-path op runs on.
