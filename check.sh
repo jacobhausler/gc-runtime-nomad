@@ -46,8 +46,17 @@ for mod in "${mods[@]}"; do
   fi
   rm -f /tmp/check-vet.$$
 
-  if (cd "$mod" && go test -count=1 ./... >/tmp/check-test.$$ 2>&1); then
-    ok "go test"
+  # -v so skips are visible. A suite that quietly skips its driver tests on a
+  # machine without tmux reports "ok" while asserting nothing — the same
+  # dark-lane shape the runtime itself is built to refuse, one layer up.
+  if (cd "$mod" && go test -count=1 -v ./... >/tmp/check-test.$$ 2>&1); then
+    skipped=$(grep -cE '^\s*--- SKIP' /tmp/check-test.$$ || true)
+    if [ "${skipped:-0}" -gt 0 ]; then
+      ok "go test ($skipped skipped)"
+      grep -E '^\s*--- SKIP' /tmp/check-test.$$ | sed 's/^/        /' | head -10
+    else
+      ok "go test"
+    fi
   else
     fail "go test"
     grep -E '^(---|\s+---) FAIL|^FAIL' /tmp/check-test.$$ | head -20 | sed 's/^/        /'
