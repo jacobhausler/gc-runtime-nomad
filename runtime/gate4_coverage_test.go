@@ -1,6 +1,8 @@
 package main
 
 import (
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -22,6 +24,48 @@ import (
 // goStringConcat matches the `" +\n\t\t"` seam between adjacent literals.
 var goStringConcat = regexp.MustCompile(`"\s*\+\s*\n\s*"`)
 
+// stripComments blanks every comment in a Go source file, keeping byte offsets
+// so the concatenation normalisation below still lines up.
+//
+// WITHOUT THIS THE WHOLE ASSERTION BELOW IS VACUOUS, and it was. Every one of
+// these phrases is ALSO quoted in a doc comment somewhere nearby — that is how
+// this package documents its own error text — so a phrase deleted from the CODE
+// is still found in the COMMENT that describes it, and the guard reports the
+// cause as still named. Measured: breaking "The box's own exit record says" in
+// prime.go:538 left the test passing, because prime.go:566 quotes the same
+// sentence in a comment.
+//
+// A guard that cannot fail is not a guard, and this one could not fail for any
+// of its twelve causes.
+func stripComments(t *testing.T, name, body string) string {
+	t.Helper()
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, name, body, parser.ParseComments)
+	if err != nil {
+		// An unparseable file is a real problem, but not this test's problem:
+		// go vet and the build catch it. Fall back to the raw body rather than
+		// failing the coverage audit for a syntax error elsewhere.
+		return body
+	}
+	out := []byte(body)
+	base := fset.File(f.Pos()).Base()
+	for _, group := range f.Comments {
+		for _, c := range group.List {
+			start := int(c.Pos()) - base
+			end := int(c.End()) - base
+			if start < 0 || end > len(out) || start >= end {
+				continue
+			}
+			for i := start; i < end; i++ {
+				if out[i] != '\n' {
+					out[i] = ' '
+				}
+			}
+		}
+	}
+	return string(out)
+}
+
 // normalisedPackageSource returns every .go file in the package with Go string
 // concatenation joined, so a phrase written across two literals reads as one.
 func normalisedPackageSource(t *testing.T) string {
@@ -36,7 +80,8 @@ func normalisedPackageSource(t *testing.T) string {
 		if e.IsDir() || filepath.Ext(name) != ".go" || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		body, err := os.ReadFile(name)
+		raw, err := os.ReadFile(name)
+		body := []byte(stripComments(t, name, string(raw)))
 		if err != nil {
 			t.Fatalf("reading %s: %v", name, err)
 		}
@@ -66,6 +111,18 @@ func TestGate4CausesAreEachNamed(t *testing.T) {
 		{"no token at all", "no GC_NOMAD_TOKEN was sent"},
 		{"a box that starts and never claims", "reports running because its state is UNKNOWN"},
 		{"a box whose agent died: pane gone", "THE PANE'S COMMAND EXITED"},
+		// NAMING A CAUSE IS NOT EXPLAINING IT, and the three below are what
+		// separates the two. For days the lane failed with the pane-gone
+		// message above — correct, and useless: it said the agent had died and
+		// could not say why, because the record it told the reader to go find
+		// was never written by anything and the agent's own words went to a
+		// pane that died with its tmux server.
+		//
+		// So gate 4 is asserted on the EVIDENCE too, not only on the
+		// vocabulary. Each of these is a channel that must keep existing:
+		{"the box's own exit record is quoted", "The box's own exit record says"},
+		{"the agent's own last words are quoted", "Its stderr ended"},
+		{"orchestrator-only paths in argv are named", "PATHS THAT DO NOT EXIST IN IT"},
 	} {
 		if !strings.Contains(src, c.phrase) {
 			t.Errorf("gate 4 cause %q is no longer named: expected a message containing %q",
