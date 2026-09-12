@@ -229,6 +229,15 @@ into the task, so nothing in the box can write there regardless of its mode.
 | `alloc/data/agent.stdout` | the pane's own output, tapped with `tmux pipe-pane` so the agent keeps its tty | the exit code is not the reason. This is where the agent's own error message is |
 | `alloc/data/agent.paths` | `missing-path: <path>` per absolute path in the agent's argv that does not exist in the box | the agent died at once and its argv names files. A line here is always a defect |
 
+`agent.exit` is written when the pane's command EXITS, so **on a box whose
+agent is still alive it does not exist yet, and that is correct.** Running the
+command below against a healthy seat prints `No such file or directory` for all
+three files; that is the answer "this agent has not died", not a fault. Absence
+matters only when something has already told you the pane is gone — then it
+means the pane died before the wrapper ran, or the allocation directory was not
+writable. (Found by running the recipe below against a live box while writing
+this page, which is the only reason the distinction is here.)
+
 The record carries the command's NAME and timestamps, never argument values,
 which is what makes it safe to ship off the box.
 
