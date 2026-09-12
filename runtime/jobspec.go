@@ -418,9 +418,16 @@ func sessionTask(agentImage string, artOpt ...sessionTaskOpt) nomadTask {
 				"checksum": "${NOMAD_META_" + imageTarSumMetaKey + "}",
 				"archive":  "false",
 			},
-			RelativeDest: "local/" + imageTarDest + "/",
+			// "file" + a named destination: directory mode would keep the
+			// URL's basename, and `load` must name an exact file.
+			GetterMode:   "file",
+			RelativeDest: imageTarRelativeDest,
 		})
-		task.Config["load"] = "${NOMAD_TASK_DIR}/" + imageTarDest + "/"
+		// NOT interpolated with NOMAD_TASK_DIR. The driver resolves this
+		// against the task dir itself, so interpolating doubled it and the
+		// live failure was: unable to open image archive: open
+		// .../t/local/local/loadtest.tar
+		task.Config["load"] = imageTarLoadPath
 		// NOT task.Env[PATH]. Nomad interpolates its OWN variables in the task
 		// env, so ${NOMAD_TASK_DIR} resolved there and ${PATH} — not a Nomad
 		// variable — was passed through as six literal characters, leaving every

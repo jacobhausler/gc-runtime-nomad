@@ -31,8 +31,29 @@ type imageTarConfig struct {
 
 func (c imageTarConfig) enabled() bool { return c.Source != "" }
 
-// imageTarDest is the task-dir subdirectory the tarball lands in.
-const imageTarDest = "imagetar"
+// imageTarDest is the task-dir subdirectory the tarball lands in, and
+// imageTarFileName the FIXED name it lands under.
+//
+// Fixed, not inherited from the URL, for the same reason the gc artifact's name
+// is fixed: go-getter in directory mode keeps the URL's basename, and the
+// docker driver's `load` has to name an exact file. A dispatch may override the
+// tarball URL, so a basename derived from the configured URL would be wrong for
+// exactly the overrides this pack exists to support.
+const (
+	imageTarDest     = "imagetar"
+	imageTarFileName = "image.tar"
+	// imageTarRelativeDest is where NOMAD puts it (resolved against the task
+	// ROOT, so local/ is required), and imageTarLoadPath is what the DOCKER
+	// DRIVER is given — resolved against the task DIR, which is local/ itself.
+	//
+	// MEASURED, because this is not guessable and the unit test could not see
+	// it: passing "${NOMAD_TASK_DIR}/imagetar/" made the driver look for
+	// .../t/local/local/loadtest.tar — it had prefixed the task dir itself, so
+	// the interpolation doubled it. The live failure was
+	// "unable to open image archive".
+	imageTarRelativeDest = "local/" + imageTarDest + "/" + imageTarFileName
+	imageTarLoadPath     = imageTarDest + "/" + imageTarFileName
+)
 
 // sessionTaskOpt lets sessionTask and its callers take EITHER optional shape
 // without a second variadic (Go allows one) and without touching the three

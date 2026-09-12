@@ -43,8 +43,21 @@ func TestImageTarIsLoadedNotPulled(t *testing.T) {
 	if !ok {
 		t.Fatalf("the docker task declares no `load`, so the image can only come from a registry: %v", task.Config)
 	}
-	if !strings.Contains(load.(string), imageTarDest) {
-		t.Errorf("load=%v does not name the fetched tarball", load)
+	// ASSERTED AS PATH SEMANTICS, not as "contains the word". The first
+	// version of this test checked only that the string mentioned imagetar,
+	// which a value of "${NOMAD_TASK_DIR}/imagetar/" satisfies — and that
+	// value is WRONG: the driver resolves load against the task dir itself, so
+	// the live allocation looked for .../t/local/local/loadtest.tar and failed
+	// with "unable to open image archive". A containment check could not see
+	// it; only running it could.
+	if strings.Contains(load.(string), "NOMAD_TASK_DIR") {
+		t.Errorf("load=%v interpolates the task dir, which the driver already applies — it doubles the path", load)
+	}
+	if strings.HasPrefix(load.(string), "/") || strings.HasPrefix(load.(string), "local/") {
+		t.Errorf("load=%v is not relative to the task dir", load)
+	}
+	if load.(string) != imageTarLoadPath {
+		t.Errorf("load=%v, want the named file %q", load, imageTarLoadPath)
 	}
 	// image must STILL be set: load supplies the bytes, image names which tag
 	// inside the tarball to run.
