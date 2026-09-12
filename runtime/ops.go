@@ -1489,6 +1489,98 @@ func (l *lifecycle) capturePanePID(ctx context.Context, sessionName string) (int
 	return pid, nil
 }
 
+// paneLaunchSettle bounds how long verifyPaneRunsAgent waits for the pane to
+// stop being a bare shell. An agent process appears within a second or two of
+// the launch exec; this window is generous so a slow image never trips it.
+var (
+	paneLaunchSettle = 20 * time.Second
+	paneLaunchPoll   = 1 * time.Second
+)
+
+// bareShellCommands are the pane commands that mean "nothing was started here".
+// tmux reports the pane's foreground command, so a pane whose launch command
+// died back to its parent shell reads as one of these.
+var bareShellCommands = map[string]bool{
+	"sh": true, "bash": true, "dash": true, "zsh": true, "ash": true, "ksh": true,
+}
+
+// bareShellRefusalHint is the operator-facing half of the bare-shell refusal,
+// kept separate so a guard can assert it stays actionable.
+func bareShellRefusalHint() string {
+	return "the launch command started nothing in this box. A provider shaped for the orchestrator " +
+		"(argv flags, hook support, argv priming) does not survive here; the box needs gc's rendered launch " +
+		"command. Left unchecked this box reports healthy forever and claims no work (cr-8eagyh)"
+}
+
+// paneRunsAgent classifies what tmux reports for the pane. This is the judgement
+// the pack got wrong: a bare shell is not an agent, but it IS a live process, so
+// every pid-based check downstream called it healthy.
+//
+// An empty reading is NOT an answer and must never be treated as a failure —
+// the caller keeps waiting and, if it never resolves, stays silent rather than
+// inventing a cause.
+func paneRunsAgent(paneCommand string) bool {
+	c := strings.TrimSpace(paneCommand)
+	if c == "" {
+		return false
+	}
+	return !bareShellCommands[c]
+}
+
+// verifyPaneRunsAgent refuses a launch whose pane is only running a shell.
+//
+// See confirmLaunched for why this lives at launch and not in the liveness
+// probe. The error names the session, what the pane is actually running, and
+// the command that was supposed to start an agent, because the whole failure
+// this replaces was silent: the operator's only symptom was a lane that claimed
+// nothing.
+func (l *lifecycle) verifyPaneRunsAgent(ctx context.Context, sessionName string) error {
+	allocID, err := l.currentAlloc(ctx, sessionName)
+	if err != nil {
+		// Cannot read the alloc: this is a transport fault, not evidence the
+		// agent is missing. Do not fail a launch on an unreadable box.
+		return nil
+	}
+	deadline := time.Now().Add(paneLaunchSettle)
+	last := ""
+	for {
+		cmd, err := l.paneCurrentCommand(ctx, allocID)
+		if err == nil {
+			last = cmd
+			if paneRunsAgent(cmd) {
+				return nil
+			}
+		}
+		if !time.Now().Before(deadline) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(paneLaunchPoll):
+		}
+	}
+	if last == "" {
+		// No reading at all: stay silent rather than invent a failure.
+		return nil
+	}
+	return fmt.Errorf("launching session %q: the pane is running %q and no agent after %s — %s",
+		sessionName, last, paneLaunchSettle, bareShellRefusalHint())
+}
+
+// paneCurrentCommand reads the foreground command tmux reports for the pane.
+func (l *lifecycle) paneCurrentCommand(ctx context.Context, allocID string) (string, error) {
+	exitCode, out, err := l.client.execAlloc(ctx, allocID, execTaskName,
+		[]string{"tmux", "list-panes", "-t", tmuxSessionName, "-F", "#{pane_current_command}"})
+	if err != nil {
+		return "", err
+	}
+	if exitCode != 0 {
+		return "", fmt.Errorf("tmux list-panes exited %d: %s", exitCode, execExcerpt(out))
+	}
+	return strings.TrimSpace(strings.SplitN(strings.TrimSpace(string(out)), "\n", 2)[0]), nil
+}
+
 // markLaunched launches sessionName's agent and, only once that succeeds,
 // records the launched marker (and the pane pid the probe will later
 // kill -0) in the sidecar binding — shared by opStart (provision then
@@ -1566,6 +1658,29 @@ func (l *lifecycle) markTransportLaunched(ctx context.Context, sessionName strin
 // holds sessionName's lock: opStart/markLaunched hold it end-to-end, while
 // opExec acquires it only for gc's canonical transport-launch command.
 func (l *lifecycle) confirmLaunched(ctx context.Context, sessionName string, workDir, providerCommand string) error {
+	// THE PANE MUST BE RUNNING AN AGENT, not merely holding a live pid.
+	//
+	// cr-8eagyh, measured 2026-09-12: a lane whose provider was not pre-shaped
+	// for a box got a running alloc, a running tmux server, and a pane holding a
+	// bare `sh` — no agent at all. Nothing failed. `launch` had exited 0 (tmux
+	// started fine; the command inside the pane is what did not survive),
+	// capturePanePID returned the shell's pid, and probeAgentAlive's
+	// `tmux has-session && kill -0 <pid>` then answered ALIVE forever, because a
+	// shell is a perfectly live process. The lane served nothing for six minutes
+	// with a P0 routed to it and not one line in any log.
+	//
+	// That is this programme's recurring defect exactly — a dark lane that looks
+	// alive — so the check belongs here, at launch, in the layer that knows what
+	// it just started.
+	//
+	// It is deliberately NOT added to probeAgentAlive. A healthy agent shells out
+	// constantly for tool calls, so pane_current_command reads "bash"/"sh" during
+	// normal work; asserting on it continuously would reap working seats. At
+	// launch nothing has shelled out yet, which is the one moment the reading is
+	// unambiguous.
+	if err := l.verifyPaneRunsAgent(ctx, sessionName); err != nil {
+		return err
+	}
 	// Best-effort: a failure recording the pid does not fail the launch
 	// itself, since the tmux session already exists and answers exec — it
 	// just leaves the probe without a pid to kill -0 (falls back to a
