@@ -394,7 +394,12 @@ case "$cmd" in
     # two gc binaries in the box and a PATH race deciding which one a seat runs
     # — silently, and differently per image. Refused rather than ordered.
     if [ -n "${GC_TOOLCHAIN_OMIT_GC:-}" ]; then
-      [ -z "$art" ] || { rm -rf "$ctx"; die "GC_TOOLCHAIN_OMIT_GC is set AND a local gc artifact is
+      # Consult the LOCK, not $art. Reordering the branch above so omit mode is
+      # reachable means $art is never resolved in this mode — so comparing
+      # against it made this refusal dead code that reported success. Found by
+      # the test going red after the reorder, which is the only reason it was
+      # not shipped silently.
+      [ -z "$(local_artifact_path)" ] || { rm -rf "$ctx"; die "GC_TOOLCHAIN_OMIT_GC is set AND a local gc artifact is
 pinned. Pick one: an image with gc baked in, or a gc-less image whose gc arrives per-allocation.
 Doing both leaves two binaries in the box and a PATH race deciding which a seat runs."; }
       local_args=(--build-arg=GC_LOCAL_ARTIFACT= --build-arg=GC_LOCAL_SHA256= --build-arg=GC_PIN_COMMIT= --build-arg=GC_OMIT=1)
