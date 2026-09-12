@@ -2010,6 +2010,14 @@ func (l *lifecycle) warnIfBoxGCIsStale(ctx context.Context, sessionName, allocID
 	if err != nil {
 		return
 	}
+	// A gc that could not START is reported before the staleness comparison,
+	// because the comparison cannot see it: a loader failure carries no commit,
+	// reads as "could not tell", and was therefore silent — in the one mode
+	// (omit-gc plus a fetched artifact) whose documented safety net this is.
+	if w := boxGCLoadFailure(string(out)); w != "" {
+		l.logDecision("%s (session %q)", w, sessionName)
+		return
+	}
 	if w := staleBoxGCWarning(host, gcCommitFromVersionJSON(string(out))); w != "" {
 		l.logDecision("%s (session %q)", w, sessionName)
 	}

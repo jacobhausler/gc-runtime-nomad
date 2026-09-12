@@ -123,6 +123,7 @@ func TestGate4CausesAreEachNamed(t *testing.T) {
 		{"the box's own exit record is quoted", "The box's own exit record says"},
 		{"the agent's own last words are quoted", "Its stderr ended"},
 		{"orchestrator-only paths in argv are named", "PATHS THAT DO NOT EXIST IN IT"},
+		{"a fetched gc that cannot load", "THE gc IN THE BOX CANNOT START"},
 	} {
 		if !strings.Contains(src, c.phrase) {
 			t.Errorf("gate 4 cause %q is no longer named: expected a message containing %q",
