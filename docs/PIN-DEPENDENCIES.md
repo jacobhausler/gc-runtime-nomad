@@ -13,7 +13,9 @@ state, what the runtime loses without it, and the first pin that carried it.
 **But start with the tiers below.** Carrying a family is not the same as
 requiring it, and reading this table as a flat requirement list overstates the
 blocking set by roughly four to one. The measured blocking set is **two filed
-PRs plus four unfiled follow-ups that all stack on one of them**.
+PRs plus one unfiled follow-up**. Three of the four follow-ups were ported and
+pushed onto #6146 on 2026-09-12; the fourth needs a larger upstream
+contribution than #6146 carries. See Tier 1.
 
 **Pin line** (verified, not remembered — `git merge-base --is-ancestor <sha> <pin>`
 in the maintainer's pin-candidate worktree, HEAD `857ed398a` — these shas are
@@ -54,13 +56,32 @@ A seat in a box cannot claim, stamp or close work. This is the real blocker.
 |---|---|
 | `remote-worker` / `remote-worker-lifecycle` | [#6146](https://github.com/gastownhall/gascity/pull/6146) |
 | `remote-worker-env-city-target` | [#5864](https://github.com/gastownhall/gascity/pull/5864) — filed, MERGEABLE |
-| `remote-step-accept-list` | **unfiled** — stacks on #6146 |
-| `remote-worker-session-identity` | **unfiled** — stacks on #6146 |
-| `remote-worker-claim-dispatch` | **unfiled** — stacks on #6146 |
-| `policy-conditional-writer-forwarding` | **unfiled** — stacks on #6146 |
+| `remote-step-accept-list` | **unfiled** — and cannot stack on #6146; see below |
+| `remote-worker-session-identity` | **filed** — pushed onto #6146 (2026-09-12) |
+| `remote-worker-claim-dispatch` | **filed** — pushed onto #6146 (2026-09-12) |
+| `policy-conditional-writer-forwarding` | **filed** — pushed onto #6146 (2026-09-12) |
 
-**That is the whole blocking set: two filed PRs, plus four follow-ups that all
-stack on one of them.** Not nineteen families.
+**That is the whole blocking set: two filed PRs, plus one follow-up that
+cannot yet stack on either.** Not nineteen families.
+
+**Update 2026-09-12.** Three of the four follow-ups are no longer unfiled.
+They were ported onto `#6146`'s head, red-proven, and pushed to the PR branch,
+so `#6146` now carries them and reports `MERGEABLE`. They are not separate
+PRs and were never fileable as separate PRs: each one fixes code that exists
+only inside `#6146`, and the `policy-conditional-writer-forwarding` row —
+which looked standalone by file overlap, touching only `cmd/gc/bead_policy_store.go`,
+a file that DOES exist upstream — calls four symbols (`beads.ClaimFor`,
+`CommentOn`, `ActorClaimer`, `Commenter`) that exist only in the
+`remote-worker-claim-dispatch` row. Split a stack by symbol dependency, not by
+which files each commit happens to touch.
+
+A fourth commit was added in the same push: the claim-dispatch port's test
+covered the `ClaimFor` helper but nothing covered the HANDLER calling it, and
+reverting the call site left the whole `internal/api` package green. That gap
+is now guarded at the route.
+
+**So the blocking set is now: `#6146` (carrying four commits), `#5864`, and
+`remote-step-accept-list`, which needs a larger upstream contribution.**
 
 ### Tier 2 — required only for particular usage patterns
 
@@ -97,7 +118,7 @@ verbatim and you have pulled a prerequisite in behind it.
 
 ### Upstreaming the blocking four — measured, not estimated
 
-Each of the four unfiled Tier 1 rows is exactly one commit in the pin
+Each of the four then-unfiled Tier 1 rows is exactly one commit in the pin
 lineage, and all four were test-applied onto **#6146's head (`9c23324fe`)**
 on 2026-09-12:
 

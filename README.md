@@ -207,7 +207,7 @@ Provider-agnostic: what any deployment of this pack needs.
    | Key | Required | Notes |
    |---|---|---|
    | `GC_NOMAD_ADDR` | yes | Absolute Nomad API base URL |
-   | `GC_NOMAD_SIDECAR_DIR` | yes | Session→child-job-ID bindings + launched markers |
+   | `GC_NOMAD_SIDECAR_DIR` | yes | Session→child-job-ID bindings, launched markers, **and `diagnostics.log`** — this pack's own account of every failure and every dark-lane warning. Unset it and there is no durable record at all: gc's exec transport discards this pack's stderr, so the operator is left with an exit code and no cause. `gc-runtime-nomad check` prints the full path. |
    | `GC_NOMAD_TOKEN` | no | ACL token (`X-Nomad-Token`); the narrowed runtime token in normal use |
    | `GC_NOMAD_CACERT` | no | CA certificate path for direct Nomad TLS; overrides `NOMAD_CACERT` when both are set |
    | `GC_NOMAD_CLIENT_CERT` | no | Client certificate path for direct Nomad mTLS; overrides `NOMAD_CLIENT_CERT` when both are set |
