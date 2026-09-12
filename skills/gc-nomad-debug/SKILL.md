@@ -216,6 +216,33 @@ check passed, and custody-file paths. Allocation and child-job ids only when
 they correlate two observations. A token value in a transcript is an incident,
 not evidence.
 
+### Which tmux subcommand belongs to which operation
+
+An error naming a tmux subcommand tells you WHICH STEP failed, and that
+changes the diagnosis — but only if you can map it. An outside reader given
+`tmux new-window exited 1: stderr="no server running"` could not: they found
+`new-session` documented for launch and nothing attributing `new-window` to
+anything, so they could not tell whether the failing call was part of the
+launch or a probe racing a dead agent, "which matters for whether the fix is
+'the agent's own startup is broken' or 'the pack is probing too early'."
+
+That is the whole question, so here is the map:
+
+| tmux subcommand | Issued by | What its failure means |
+|---|---|---|
+| `new-session -d -s main` | **launch** — creates the session and runs the agent in its pane | the session could not be created at all: no tmux in the image, or an unusable socket dir |
+| `new-window -d -t main` | **startup prime** — a SECOND window on the same session, delivering the first prompt AFTER launch reported success | **the launch's pane is already dead.** The prime only runs once launch returned, so `no server running` here is not a prime defect: the agent exited between the two calls, taking the server with it. Go to the exit record — do not debug the prime |
+| `respawn-pane -k -t main` | **relaunch** — re-runs the agent in the EXISTING pane | the pane or session is gone; relaunch cannot recreate it (that is `start`'s job) |
+| `send-keys` | **nudge**, **interrupt**, **send-keys** | the pane is gone, or the agent is not reading its tty |
+| `capture-pane` | **peek** | same, and peek is the cheapest way to confirm it |
+| `clear-history` | **clear-scrollback** | same |
+| `list-panes` | the in-box liveness probes | the session is gone; distinguishes box-death from agent-death |
+| `kill-session` | **stop**'s in-box half | rarely interesting: `stop` proceeds to deregister regardless |
+
+The pair that matters most is the first two. **`new-session` failing is a box
+problem; `new-window` failing is almost always an AGENT problem**, because the
+prime is issued after launch has already succeeded.
+
 ### Reading the box's own account of its death
 
 When a pane's command exits, the tmux server exits with its last session, so
