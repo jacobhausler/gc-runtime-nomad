@@ -65,7 +65,7 @@ runtime-nomad/
 ├── fakenomad/      # nested Go module: in-memory fake of the Nomad API this pack calls
 │   ├── go.mod      # module github.com/gastownhall/gc-runtime-nomad/fakenomad
 │   └── cmd/fakenomad/ # standalone process wrapping the fake server, for conformance.sh + CI
-├── runtime/        # nested Go module (zero gascity imports, zero external deps in production code)
+├── runtime/        # nested Go module (zero gascity imports; one production dep, hashicorp/nomad/api)
 │   ├── go.mod      # module github.com/gastownhall/gc-runtime-nomad (test-only require on ../fakenomad)
 │   ├── main.go     # RPP op dispatch + env config
 │   ├── client.go   # Nomad API client (register/dispatch/deregister/blocking reads/alloc-exec WS)
@@ -276,13 +276,22 @@ Provider-agnostic: what any deployment of this pack needs.
 The rule, in the abstract: **the box must provide the seat's provider command on
 `PATH` exactly as `gc` renders it.** The command line the provider config
 produces for a session has to resolve and run inside the allocation, unchanged,
-with whatever siblings that command assumes present alongside it. Nothing
-provider-specific lives in the runtime: `gc-runtime-nomad` never names,
-downloads, installs, or inspects a provider — the pane it launches runs gc's
-rendered launch command and nothing else (cr-3vvnb5). If a provider needs a
-file, a binary, or a credential, that is the deployment staging it (the prebaked
-image, the value-blind secret channel). A seat that comes up but
+with whatever siblings that command assumes present alongside it. The runtime never downloads or installs a provider, and the pane it launches
+runs gc's rendered launch command and nothing else (cr-3vvnb5). If a provider
+needs a file, a binary, or a credential, that is the deployment staging it
+(the prebaked image, the value-blind secret channel). A seat that comes up but
 cannot run a tool is a toolchain-staging defect wearing a runtime costume.
+
+**One exception, and it is a real one.** `runtime/codex_home.go` is
+provider-specific: the runtime detects a Codex-shaped secret environment and
+stages that provider's home itself — `CODEX_HOME`, `config.toml`, `auth.json`,
+`model_providers`, `wire_api`. This document used to claim the runtime "never
+names … a provider", which was simply false, and the claim is worth retiring
+loudly rather than quietly: **runtime and provider are supposed to be
+independent axes.** Any lane should be able to keep its provider and change
+only its runtime. Every provider-specific branch in the runtime is a place
+that independence is not real yet, and this is the one that exists today. It
+is a known defect, not a design.
 
 **Worked example — Codex.** Stage the agent toolchain as a **full standalone
 package**: `codex-package-<target>.tar.gz` — **not** the bare
