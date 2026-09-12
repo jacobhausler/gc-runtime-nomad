@@ -59,7 +59,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -171,6 +173,24 @@ func run(args []string, stdin io.Reader, stdout, stderr *os.File) int {
 		}
 		if skipVerifyRequested() {
 			fmt.Fprintln(stderr, tlsVerificationDisabledWarning)
+		}
+		// Where this pack's own diagnostics live. An operator who needs
+		// diagnostics.log needs the directory first, and that directory is a
+		// deployment choice carried in the supervisor's environment — which
+		// is exactly where someone debugging a failure cannot look, because
+		// it is also where the tokens are. So the runtime says it out loud
+		// rather than making anyone go find it.
+		if dir := strings.TrimSpace(os.Getenv(envSidecarDir)); dir == "" {
+			fmt.Fprintf(stderr, "warning: %s is unset, so there is no sidecar directory and no "+
+				"durable %s — this pack's account of a failure will exist only on a stderr gc "+
+				"discards\n", envSidecarDir, diagnosticsFile)
+		} else {
+			path := filepath.Join(dir, diagnosticsFile)
+			if _, err := os.Stat(path); err == nil {
+				fmt.Fprintf(stderr, "diagnostics: %s\n", path)
+			} else {
+				fmt.Fprintf(stderr, "diagnostics: %s (nothing recorded yet)\n", path)
+			}
 		}
 		switch gcWorkerSurfaceForCheck(stderr) {
 		case gcWorkerSurfaceMissing:

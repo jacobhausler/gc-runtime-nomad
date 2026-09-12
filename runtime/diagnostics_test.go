@@ -69,3 +69,44 @@ func TestDiagnosticsAreBounded(t *testing.T) {
 		t.Error("the line that triggered truncation was lost")
 	}
 }
+
+// TestCheckLocatesItsOwnDiagnostics pins the gap I found in my own instrument:
+// diagnostics.log is useless if nobody can find the directory it lives in.
+//
+// That directory is a deployment choice carried in the SUPERVISOR's
+// environment — which is precisely where someone debugging a failure cannot
+// look, because it is also where the tokens are. I could not locate it in my
+// own estate without reading a secrets file, which is exactly the thing an
+// operator must not do to debug a lane.
+func TestCheckLocatesItsOwnDiagnostics(t *testing.T) {
+	run := func(dir string) string {
+		t.Helper()
+		if dir == "" {
+			t.Setenv(envSidecarDir, "")
+		} else {
+			t.Setenv(envSidecarDir, dir)
+		}
+		errFile := filepath.Join(t.TempDir(), "err")
+		f, err := os.Create(errFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close() //nolint:errcheck
+		out, err := os.Create(filepath.Join(t.TempDir(), "out"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer out.Close() //nolint:errcheck
+		run([]string{"check"}, strings.NewReader(""), out, f)
+		b, _ := os.ReadFile(errFile)
+		return string(b)
+	}
+
+	dir := t.TempDir()
+	if got := run(dir); !strings.Contains(got, filepath.Join(dir, diagnosticsFile)) {
+		t.Errorf("check does not name the diagnostics path:\n%s", got)
+	}
+	if got := run(""); !strings.Contains(got, "no durable") {
+		t.Errorf("check does not warn that an unset sidecar dir means no durable record:\n%s", got)
+	}
+}
