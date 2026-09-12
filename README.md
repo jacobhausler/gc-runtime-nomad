@@ -35,10 +35,30 @@ unset, this task is never added at all.
 > (`.github/workflows/ci.yml`).
 >
 > The blocking set is smaller than it used to look: **six families — two
-> with filed upstream PRs, and four unfiled follow-ups that all stack on
-> one of them.** The other thirteen the pin carries are not requirements of
-> this pack. [`docs/PIN-DEPENDENCIES.md`](docs/PIN-DEPENDENCIES.md) tiers
-> them and shows the work.
+> with filed upstream PRs, three more now pushed onto one of them, and one
+> that cannot stack on either.** The other thirteen the pin carries are not
+> requirements of this pack. [`docs/PIN-DEPENDENCIES.md`](docs/PIN-DEPENDENCIES.md)
+> tiers them and shows the work.
+>
+> **What is NOT blocking, contrary to earlier versions of this page.** Three
+> things were once on this list and are off it, and saying so matters because
+> each one used to imply cluster work an adopter does not have to do:
+>
+> - **No root-added host volume.** The jobspec declares none, and a test
+>   asserts it stays that way. This one is worth being explicit about: a host
+>   volume must be configured on every eligible client and the agent
+>   restarted, and `nomad validate` cannot tell you the volume is missing — so
+>   the failure would land at placement, on your cluster, about something you
+>   never configured.
+> - **No wrapper provider.** A lane onboards by naming its runtime
+>   (`runtime_provider = "nomad"` on the agent, the nomad-only half in the
+>   provider's `runtime_env.nomad`). The wrapper that used to be required is
+>   deleted.
+> - **No one-image-per-deployment limit.** `GC_NOMAD_AGENT_IMAGE` is
+>   per-session, so a codex lane and a claude lane coexist on one deployment.
+>
+> What remains is the two in the paragraph above: a `gc` you cannot obtain,
+> and an agent image you must build and host yourself.
 >
 > The pack now **refuses to start** on a `gc` missing the decisive family
 > (`remote-worker-lifecycle`) rather than going dark, and `gc-runtime-nomad
