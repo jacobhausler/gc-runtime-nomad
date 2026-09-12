@@ -104,18 +104,20 @@ func TestFetchedGCWinsThePathRace(t *testing.T) {
 		t.Errorf("artifact checksum is not interpolated from meta: %q", c)
 	}
 
-	path := task.Env[pathEnvName]
-	if path == "" {
-		t.Fatal("PATH was not set, so a gc baked into the image would win and the fetch would be " +
-			"a successful no-op")
-	}
-	fetched := "${NOMAD_TASK_DIR}/" + gcArtifactDest
-	if !strings.HasPrefix(path, fetched+":") {
-		t.Errorf("PATH = %q; the fetched gc must come FIRST, otherwise an image-baked gc shadows it "+
-			"and the staleness returns with no failure to observe", path)
-	}
-	if !strings.Contains(path, "${PATH}") {
-		t.Error("PATH does not preserve the image's own PATH; prepending must not truncate it")
+	// This assertion used to read task.Env["PATH"], require the fetched dir to
+	// be its prefix, and — the line that hurts — require the string to contain
+	// "${PATH}", CALLING THAT "preserves the image's own PATH". It measured the
+	// source text and named it the effect. The text did contain ${PATH}; the
+	// box's PATH was still truncated to one directory, because Nomad does not
+	// interpolate ${PATH} in a task env. The test passed for as long as the
+	// defect existed and went red only when the defect was removed.
+	//
+	// The property is real. It is just not decided here: PATH order is decided
+	// by the in-box shell prelude, so that is where it is asserted
+	// (TestPanePreludePrependsFetchedGCInAShell), and the task env is asserted
+	// to stay OUT of it (TestJobspecNeverSetsPATH).
+	if _, ok := task.Env[pathEnvName]; ok {
+		t.Errorf("task env sets %s; the box's PATH cannot be composed from outside the box", pathEnvName)
 	}
 }
 

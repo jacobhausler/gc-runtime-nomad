@@ -389,7 +389,16 @@ func sessionTask(agentImage string, artOpt ...gcArtifactConfig) nomadTask {
 		if task.Env == nil {
 			task.Env = map[string]string{}
 		}
-		task.Env[pathEnvName] = "${NOMAD_TASK_DIR}/" + gcArtifactDest + ":${PATH}"
+		// NOT task.Env[PATH]. Nomad interpolates its OWN variables in the task
+		// env, so ${NOMAD_TASK_DIR} resolved there and ${PATH} — not a Nomad
+		// variable — was passed through as six literal characters, leaving every
+		// box with a PATH of exactly one directory and no sh, ls, tmux or agent.
+		// Measured live in alloc 8c6b1b93: `PATH=/local/gcbin:${PATH}`.
+		//
+		// A box's PATH can only be prepended from inside the box, in a shell,
+		// where $PATH holds what the image set: boxGCPathPrelude, which the pane
+		// prelude and the in-box version probe both run. image_env.go already
+		// carried the rule this broke — the image owns PATH.
 	}
 	return task
 }

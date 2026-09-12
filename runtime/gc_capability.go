@@ -249,7 +249,11 @@ const (
 
 // inBoxVersionCommand reads the in-box gc's identity.
 func inBoxVersionCommand() []string {
-	return []string{"/bin/sh", "-c", gcVersionProbe + " 2>&1"}
+	// Same prepend as the pane: without it this probe reads the IMAGE's gc and
+	// compares THAT to the host, so a box correctly running a freshly fetched
+	// gc reports stale and a box that failed to fetch reports fresh — the
+	// staleness warning inverted, silently.
+	return []string{"/bin/sh", "-c", boxGCPathPrelude + gcVersionProbe + " 2>&1"}
 }
 
 // gcCommitFromVersionJSON pulls the commit out of `gc version --json --long`.

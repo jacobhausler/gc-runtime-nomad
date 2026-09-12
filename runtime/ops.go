@@ -312,7 +312,20 @@ exec "$@"`
 // secret — so no credential value is interpolated into argv (envArgvSafe is
 // untouched), and it drops the client-side city/rig labels the pane must not
 // act on, the same trio the proof's shim carried.
+// boxGCPathPrelude puts the gc Nomad fetched for this allocation ahead of
+// whatever gc the image carries, INSIDE the box, where $PATH expands to the
+// image's own value. It is conditional on the directory, which exists exactly
+// when the artifact was declared and fetched — so a deployment that pins no
+// artifact runs an unchanged prelude, and there is no second copy of the
+// deployment's configuration to keep in step.
+//
+// Without the prepend the download would succeed on every box while the seat
+// kept running the stale binary, with nothing failing to observe. With it in
+// the TASK ENV instead, the box lost its PATH entirely (see jobspec.go).
+const boxGCPathPrelude = `if [ -d "$NOMAD_TASK_DIR/` + gcArtifactDest + `" ]; then PATH="$NOMAD_TASK_DIR/` + gcArtifactDest + `:$PATH"; export PATH; fi; `
+
 const paneStagedEnvPrelude = `if [ -f "$NOMAD_SECRETS_DIR/env.sh" ]; then . "$NOMAD_SECRETS_DIR/env.sh"; fi; ` +
+	boxGCPathPrelude +
 	`unset GC_CITY GC_CITY_PATH GC_RIG; `
 
 // paneCwdPrelude is the shell the launched pane runs to choose its working
