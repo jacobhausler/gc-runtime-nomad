@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -82,4 +84,47 @@ func TestNoNamesMeansAlive(t *testing.T) {
 		t.Error("nothing was observed, so observed must be false — otherwise a later change could " +
 			"start reporting a definitive answer from no evidence")
 	}
+}
+
+// TestSkillDocumentsTheFailOpenProbe closes the loop on a defect I introduced
+// by implementing process-alive well and documenting it not at all.
+//
+// The op answers `true` whenever it could not measure — no `ps` in the image, a
+// transport fault, no allocation. That is the correct choice: gc reaps on an
+// explicit `false`, so a probe that cannot see must never be able to kill a
+// live seat. But it makes the op a SECOND, independent manufacturer of the
+// hardest symptom this pack has — a seat that reports healthy and claims
+// nothing — and the shipped runbook had no row for it and did not list it among
+// the signals. A third outside SRE found that by reading the source.
+//
+// A fail-open path that is not on the diagnostic surface is a dark lane with
+// extra steps.
+func TestSkillDocumentsTheFailOpenProbe(t *testing.T) {
+	body, err := os.ReadFile(filepath.Join("..", "skills", "gc-nomad-debug", "SKILL.md"))
+	if err != nil {
+		t.Fatalf("reading SKILL.md: %v", err)
+	}
+	doc := string(body)
+
+	if !strings.Contains(doc, "process-alive") {
+		t.Fatal("SKILL.md does not mention process-alive at all, though it is in lifecycleOps and " +
+			"can report a dead seat as healthy")
+	}
+	for _, want := range []struct{ needle, why string }{
+		{"FAILED OPEN", "the runbook does not say the probe fails open, which is the whole hazard"},
+		{"REAPS", "it does not explain WHY it fails open, so a reader may think it a bug and 'fix' it"},
+		{"ps", "it does not name the in-box dependency that makes the op unanswerable"},
+	} {
+		if !strings.Contains(doc, want.needle) {
+			t.Errorf("SKILL.md's process-alive coverage lacks %q: %s", want.needle, want.why)
+		}
+	}
+
+	// The live fail-open behaviour is asserted by
+	// TestProcessAliveOpAnswersTrueWhenUnobserved (the op's wiring) and
+	// TestNoNamesMeansAlive. Deliberately not re-asserted here with a
+	// hand-built lifecycle: namedProcessAlive resolves an allocation through
+	// l.client, so a zero-value lifecycle panics rather than exercising the
+	// fail-open path. A test that has to construct an invalid object to reach
+	// a behaviour is testing the constructor, not the behaviour.
 }
