@@ -247,6 +247,36 @@ nomad alloc exec -namespace "$NS" -task agent "$ALLOC" \
   /bin/sh -c 'cat "$NOMAD_ALLOC_DIR"/data/agent.exit "$NOMAD_ALLOC_DIR"/data/agent.paths 2>&1'
 ```
 
+**AFTER the allocation is gone — and this is the case you are usually in.** An
+on-call page for "the lane has been dark for days" means every incarnation that
+could have been read live is already collected and gone. The evidence is not
+lost: the stop path **egresses these files off the box before deregistering
+it**, into `GC_NOMAD_EGRESS_DIR`, named by allocation id.
+
+```sh
+ls -lt "$GC_NOMAD_EGRESS_DIR" | head            # newest first
+cat "$GC_NOMAD_EGRESS_DIR"/<alloc-id>-agent.exit
+cat "$GC_NOMAD_EGRESS_DIR"/<alloc-id>-agent.stdout
+```
+
+Two caveats that decide whether this works for you, and you should check them
+BEFORE you need them:
+
+- **`GC_NOMAD_EGRESS_DIR` unset means egress is disabled** and the evidence
+  really does die with the box. `gc-runtime-nomad check` reports it. A
+  deployment that has never set it has no post-mortem story at all, which is
+  worth fixing on a quiet afternoon rather than at 3am.
+- Egress is **best effort with bounded retries**, and a stop that exhausts them
+  writes an `evidence_lost` marker instead. Its presence is the answer to "why
+  is there nothing here" — it means the pack tried and says so, rather than
+  never having tried.
+
+This section was added because an outside reader, given the "dark for days"
+symptom and only these docs, reached the mechanism and then stopped: the recipe
+above was "only guaranteed readable while the allocation still exists," with no
+fallback written down. The fallback existed the whole time and was documented
+somewhere else, which is the same as not being documented.
+
 The pack reads these itself and quotes them in the failure it reports, so in
 the normal case you do not go looking — the error already contains them. Go
 looking when the pack says it found **no usable record**: that means the pane

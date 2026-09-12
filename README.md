@@ -279,6 +279,9 @@ Provider-agnostic: what any deployment of this pack needs.
    | `GC_NOMAD_LOG_SINK` | no | The one key that adds the `log-shipper` task; unset ⇒ session logs are not shipped |
    | `GC_NOMAD_LOG_SINK_TOKEN_FILE` | no | In-box path the shipper reads its bearer token from |
    | `GC_NOMAD_LOG_LABELS` | no | `k=v,k=v` labels merged onto the fixed `session_name`/`alloc_id`/`node`/`runtime=nomad` set |
+   | `GC_NOMAD_GC_ARTIFACT_URL` | no | URL **template** for the linux/amd64 `gc` each box fetches per allocation. `{commit}` is substituted with the commit of the `gc` DRIVING this pack, so the URL follows your pin without being edited. Nomad verifies it against a `.sha256` sidecar published beside it before the task starts, and the fetched copy goes first on the box's PATH. Unset ⇒ boxes use whatever `gc` the image carries, which only WARNS when it is older than the host. **A pin roll that does not publish an artifact for its new commit leaves every box fetching a 404 and dying before the task runs** — see `skills/gc-nomad-debug/SKILL.md` and the publishing note below the table |
+   | `GC_NOMAD_AGENT_IMAGE_TAR` | no | URL of a `docker save` tarball of the agent image, fetched per allocation and imported with the docker driver's own `load`. Removes the need for a registry AND the hidden placement pin a bare local tag creates (only the node that built it can run it). Checksum-verified before load; pair with `GC_NOMAD_AGENT_IMAGE_TAR_SHA256`, or publish a `.sha256` sidecar and let it be derived |
+   | `GC_NOMAD_AGENT_IMAGE_TAR_SHA256` | no | Explicit checksum for the tarball above; unset derives `file:<url>.sha256` |
    | `GC_NOMAD_LOG_SHIPPER_ARTIFACT` | no | URL or local path for the pinned Vector archive; unset uses the upstream release URL |
 
    The runtime also honors Nomad's standard `NOMAD_CACERT`,
@@ -286,6 +289,32 @@ Provider-agnostic: what any deployment of this pack needs.
    variables. The `GC_NOMAD_*` aliases take precedence per variable when both
    forms are present. Values are paths only: certificate and key contents stay
    in deployment custody and never enter a jobspec, argv, log, or receipt.
+
+   **Publishing the per-allocation `gc` (and what happens if you don't).**
+   `GC_NOMAD_GC_ARTIFACT_URL` is the one key whose correctness is a function of
+   your PIN rather than of your config, and that asymmetry has bitten: the
+   template resolves `{commit}` to the live pin, so **the moment you roll the
+   pin, every box starts fetching a URL that must already exist.** If it does
+   not, allocations fail with `Failed Artifact Download` before the agent task
+   starts — which is worse than a stale in-box `gc`, because that only warns.
+   Two things follow, and neither is optional:
+
+   - **Publish for the new commit as part of the roll, not after it.** Build the
+     linux/amd64 `gc` for that commit, publish it plus a `.sha256` sidecar at
+     the path your template resolves to, and only then move the pin. If your
+     roll is scripted, the publish belongs in the same script — and it must NOT
+     be conditional on a post-roll health check, because the URL is already live
+     the instant the pin moves. (That exact coupling caused an outage here.)
+   - **Build it against the agent image's own base.** A `gc` compiled on a
+     different distribution links a different ICU soname, loads cleanly on its
+     build host, and dies in the box with
+     `libicui18n.so.NN: cannot open shared object file`. Verify by RUNNING it in
+     the image (`docker run --rm -v …:/out <image> /out/gc version --json`), not
+     on the machine that built it.
+
+   **Immediate mitigation** if you are already in this state: unset
+   `GC_NOMAD_GC_ARTIFACT_URL` and cycle the supervisor. Boxes fall back to the
+   image's `gc`, which the pack reports as stale rather than failing on.
 
    **How you actually get an image.** This was the most common dead end for
    people trying to install this pack, because the answer was scattered across
