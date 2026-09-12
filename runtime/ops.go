@@ -2237,6 +2237,13 @@ func stagesAnything(cfg stageConfig) bool {
 	// No warning here: this is a pure predicate that decides whether stage()
 	// has work to do, and it can be consulted more than once. The declared-but-
 	// absent report belongs on the staging path itself, which runs once.
+	// Argument-named files are a payload too. Without this, a deployment with
+	// no secret env and no CopyFiles skipped stage() outright and the files the
+	// agent's own arguments name never reached the box — silently, which is the
+	// one failure shape this pack exists to stop producing.
+	if len(argFilesToStage(cfg.Command)) > 0 {
+		return true
+	}
 	secretEnv, _, _ := mergeExtraSecretEnv(cfg.Env, extraSecretKeys)
 	secretEnv = stripLocalCityStoreEnv(secretEnv)
 	secretEnv = mergeLaunchOptionEnv(secretEnv, cfg.Command)
@@ -2279,6 +2286,22 @@ func (l *lifecycle) stage(ctx context.Context, sessionName string, cfg stageConf
 				return fmt.Errorf("staging workspace for %q: %s: %w", sessionName, detail, err)
 			}
 			return fmt.Errorf("staging workspace for %q: %w", sessionName, err)
+		}
+	}
+
+	// Files the agent's OWN ARGUMENTS name, placed at the same absolute path
+	// they have here. See arg_file_stage.go: an argument is rendered on this
+	// side, where its paths exist, and runs in a box, where they do not, and an
+	// argument cannot be stripped the way image_env.go strips a host path from
+	// the environment without changing what the agent does.
+	//
+	// Best effort, one exec each, and a failure is logged rather than returned:
+	// the BOX reports a path that did not make it (agent.paths), and failing
+	// the launch here would turn a diagnosable condition into a session that
+	// never starts.
+	for _, f := range argFilesToStage(cfg.Command) {
+		if err := l.execStage(ctx, sessionName, argFileStageCommand(f.Path), f.Content); err != nil {
+			l.logDecision("staging the argument-named file %q for %q failed, so the box will report it missing: %v", f.Path, sessionName, err)
 		}
 	}
 
