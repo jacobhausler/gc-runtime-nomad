@@ -8,6 +8,20 @@ Read this before `install.sh`. The single most important line is the
 first one under **Gas City (`gc`)**: today this pack does **not** run on a
 released upstream `gc`.
 
+**Three things that stop a deployment dead, stated here so you do not read 200
+lines to find them:**
+
+1. **A pinned `gc`, not an upstream release** — see the next section. A build
+   is published; running it is a decision, not a download.
+2. **linux/amd64 only**, enforced as a hard constraint on `${attr.cpu.arch}`.
+   There is no arm64 path anywhere in the stack — not the agent image, not the
+   in-box `gc`, not the log shipper. On an all-arm64 fleet every dispatch stays
+   pending with a constraint failure. If your cluster is Apple Silicon or Pi
+   nodes, stop here. (Detail under **Nomad clients**.)
+3. **The `docker` task driver on every eligible client**, plus `exec` if you
+   enable log shipping. The session task IS a docker task and there is no other
+   session shape to fall back to.
+
 ---
 
 ## Gas City (`gc`) — READ THIS FIRST
@@ -164,6 +178,21 @@ declares exactly two capabilities:
 ```
 {"version":0,"capabilities":["proc.provision","proc.exec"]}
 ```
+
+**What a NEWER `gc` sees.** RPP is versioned for forward compatibility and the
+pack holds up its end: an operation this build does not implement exits **2 and
+prints nothing**, which is the protocol's "not implemented" answer and not an
+error. A `gc` speaking a later protocol therefore degrades op-by-op rather than
+failing wholesale — it loses whatever it asked for that this build lacks, and
+keeps everything else. Two consequences worth knowing before you debug one:
+
+- An op you expected to work being a silent no-op is this contract, not a
+  fault. `gc-runtime-nomad help` lists exactly what this build serves.
+- The pack does **not** negotiate downward. It declares v0 and two
+  capabilities; it does not inspect what `gc` asked for and adapt. If a future
+  `gc` requires a capability listed below as deliberately undeclared, the honest
+  answer is that this pack has not implemented it, and the version to change is
+  this one.
 
 `env.workspace`, `env.tooling`, `env.identity` and `env.transcripts` are
 deliberately **not** declared. Workspace and secret staging do happen —
