@@ -2784,8 +2784,25 @@ const (
 	// logShipperFlushTimeout bounds the wait for the vector process to finish
 	// its graceful shutdown after it has been signaled. It is deliberately
 	// the same bounded window Nomad gives the shipper after the agent task.
+	logShipperPollIntervalDefault = 25 * time.Millisecond
+)
+
+// logShipperFlushTimeout and logShipperPollInterval are VARIABLES, not
+// constants, so a test can shrink them. Production values are unchanged.
+//
+// WHY, and it is not tidiness: the test for this path inherited the production
+// 15-second flush window and therefore measured the MACHINE as much as the
+// code. It passed alone, twice, and failed inside a full suite run at 15.29 s
+// — the wall clock exactly — on a host that was simultaneously running nine
+// session boxes and several other jobs. A verdict that depends on load is the
+// "env-dependent behaviour" gate 7 forbids, and it is worse than a skip: a red
+// that a reader learns to re-run past is a red that has stopped being read.
+//
+// Same precedent as awaitExecAllocReadyWithin in this file, whose budget is a
+// parameter "so the wait can be tested at second scale instead of 180 s".
+var (
 	logShipperFlushTimeout = logShipperFlushWindow
-	logShipperPollInterval = 25 * time.Millisecond
+	logShipperPollInterval = logShipperPollIntervalDefault
 )
 
 // logShipperFlushCommand requests a graceful vector shutdown. The wrapper

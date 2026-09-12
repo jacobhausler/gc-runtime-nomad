@@ -1274,6 +1274,25 @@ func countFSCat(trace []string) int {
 // shipper flush command, then the transcript/evidence egress, and only then
 // the child-job deregister.
 func TestOpStopFlushesLogShipperBeforeEgress(t *testing.T) {
+	// SHRINK THE FLUSH BUDGET. This test used to inherit the production
+	// 15-second window, so its verdict depended on machine load: it passed
+	// alone, twice, and failed inside a full suite run at 15.29 s — the wall
+	// clock exactly — on a host also running nine session boxes. A red that a
+	// reader learns to re-run past is a red that has stopped being read, and
+	// gate 7 calls that out by name as env-dependent behaviour.
+	//
+	// 5s, not 1s, and not the production 15s. I first wrote "the fake answers
+	// immediately, so a second is generous" — asserted, not measured, and
+	// wrong: at one second the flush timed out and the receipt came back
+	// EvidenceLost:true. The fake's flush genuinely takes about a second, so
+	// the budget has to clear that with room while staying far enough under
+	// production that a busy host cannot reach it.
+	prevTimeout, prevInterval := logShipperFlushTimeout, logShipperPollInterval
+	logShipperFlushTimeout, logShipperPollInterval = 5*time.Second, 5*time.Millisecond
+	t.Cleanup(func() {
+		logShipperFlushTimeout, logShipperPollInterval = prevTimeout, prevInterval
+	})
+
 	l, srv := newTestLifecycle(t)
 	l.egressDir = t.TempDir()
 	l.logShipper = logShipperConfig{Sink: "https://logs.example.internal/ingest"}
