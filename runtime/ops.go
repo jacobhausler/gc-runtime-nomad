@@ -2510,6 +2510,17 @@ func (l *lifecycle) opIsRunning(ctx context.Context, sessionName string) (bool, 
 // An error is returned rather than a guess. The caller keeps reporting the
 // child as running when it cannot tell, because a read failure is not evidence
 // of death.
+// deadChildReason asks Nomad why a child job's box is no longer live, reusing
+// the same task-event reading that names an absent image on the provision path.
+// Empty means Nomad offered no reason — report nothing rather than invent one.
+func (l *lifecycle) deadChildReason(ctx context.Context, childJobID string) string {
+	allocs, _, err := l.client.listAllocsForJob(ctx, childJobID, 0, 0)
+	if err != nil || len(allocs) == 0 {
+		return ""
+	}
+	return allocFailureDiagnosis(l.agentImage, allocs, execTaskName)
+}
+
 // allocFailureDiagnosis turns an allocation's OWN task state into a sentence that
 // names the cause of a failed provision.
 //
@@ -2698,6 +2709,17 @@ func (l *lifecycle) opListRunning(ctx context.Context, prefix string) ([]string,
 		// release live work everywhere at once, which is far worse than holding
 		// one claim too long.
 		if live, err := l.childHasLiveAlloc(ctx, c.ID); err == nil && !live {
+			// SAY WHY THE SEAT VANISHED. Dropping it silently is correct for the
+			// caller — the seat is gone and must not be reported alive — but it
+			// leaves an operator with a lane that quietly shrank and no cause
+			// anywhere. Nomad already knows: the allocation's task events carry
+			// OOM kills, constraint evictions, a failed pull, a bad entrypoint.
+			// Asking costs one read on a path that runs only when a box has
+			// actually died (cr-8eagyh gate 4: every failure names its cause at
+			// the layer that knows).
+			if why := l.deadChildReason(ctx, c.ID); why != "" {
+				fmt.Fprintf(os.Stderr, "gc-runtime-nomad: seat %q is gone: %s\n", name, why) //nolint:errcheck
+			}
 			continue
 		}
 		names = append(names, name)
