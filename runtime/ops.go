@@ -1534,6 +1534,27 @@ func paneRunsAgent(paneCommand string) bool {
 // the command that was supposed to start an agent, because the whole failure
 // this replaces was silent: the operator's only symptom was a lane that claimed
 // nothing.
+// warnIfPaneRunsNoAgent reports — loudly, on stderr, where the supervisor log
+// will carry it — that a launch left the pane holding a bare shell.
+//
+// IT DOES NOT FAIL THE LAUNCH, and that is a correction to my first version of
+// this check (67d6360), which did. Measured 2026-09-12: a legitimate relaunch
+// whose pane body wraps the command in a shell leaves the SHELL as the pane's
+// foreground process while the agent runs beneath it, so a refusal there breaks
+// a healthy lane. TestFaultReplacementAlloc caught exactly that, and I could not
+// rule out the same shape behind a production wrapper.
+//
+// A check that can refuse a healthy launch is worse than the dark lane it
+// replaces: it converts a silent failure into a broken one. The diagnosis was
+// always the valuable half — the empty box in cr-8eagyh went six minutes with a
+// P0 routed to it and NOTHING in any log — so the warning stays and the refusal
+// goes.
+func (l *lifecycle) warnIfPaneRunsNoAgent(ctx context.Context, sessionName string) {
+	if err := l.verifyPaneRunsAgent(ctx, sessionName); err != nil {
+		fmt.Fprintf(os.Stderr, "gc-runtime-nomad: WARNING: %v\n", err) //nolint:errcheck
+	}
+}
+
 func (l *lifecycle) verifyPaneRunsAgent(ctx context.Context, sessionName string) error {
 	allocID, err := l.currentAlloc(ctx, sessionName)
 	if err != nil {
@@ -1678,9 +1699,7 @@ func (l *lifecycle) confirmLaunched(ctx context.Context, sessionName string, wor
 	// normal work; asserting on it continuously would reap working seats. At
 	// launch nothing has shelled out yet, which is the one moment the reading is
 	// unambiguous.
-	if err := l.verifyPaneRunsAgent(ctx, sessionName); err != nil {
-		return err
-	}
+	l.warnIfPaneRunsNoAgent(ctx, sessionName)
 	// Best-effort: a failure recording the pid does not fail the launch
 	// itself, since the tmux session already exists and answers exec — it
 	// just leaves the probe without a pid to kill -0 (falls back to a
