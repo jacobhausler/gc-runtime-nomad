@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"strings"
+	"testing"
+)
 
 // TestReadinessFactsCanRideRuntimeEnv is gate 3's blocker, removed without
 // adding a single field to gc's launch wire.
@@ -107,6 +111,42 @@ func TestPrimeFilesCarryTheRuntimeOverrides(t *testing.T) {
 		}
 		if f.Path == primeDelayFile && string(f.Content) != "111" {
 			t.Errorf("without an override the delay = %q, want the wire value", f.Content)
+		}
+	}
+}
+
+// TestPrimeSpawnFailureCarriesStderr pins the one call site that was still
+// throwing away the cause.
+//
+// tmux writes the reason it cannot open a window to STDERR. execAlloc returns
+// only stdout, so this spawn — the failure an operator actually meets —
+// rendered as "tmux new-window exited 1:" with nothing after the colon. Three
+// diagnosis attempts were spent on that empty half while the cause sat in a
+// stream the code had in hand and dropped.
+//
+// The message also states the contradiction, because that is the actionable
+// part: confirmLaunched has ALREADY verified this session exists, so a spawn
+// that cannot reach it is not "the box is not ready yet".
+func TestPrimeSpawnFailureCarriesStderr(t *testing.T) {
+	src, err := os.ReadFile("prime.go")
+	if err != nil {
+		t.Fatalf("reading prime.go: %v", err)
+	}
+	s := string(src)
+
+	spawn := s[strings.Index(s, "spawnCmd := []string{"):]
+	if end := strings.Index(spawn, "\nfunc "); end > 0 {
+		spawn = spawn[:end]
+	}
+	if strings.Contains(spawn, "l.client.execAlloc(ctx") {
+		t.Error("the prime spawn still uses execAlloc, which returns no stderr — tmux writes its reason there")
+	}
+	if !strings.Contains(spawn, "execAllocObserved") {
+		t.Error("the prime spawn does not use the observed variant that captures stderr")
+	}
+	for _, want := range []string{"stderr=", "already confirmed"} {
+		if !strings.Contains(spawn, want) {
+			t.Errorf("the prime spawn failure does not report %q", want)
 		}
 	}
 }

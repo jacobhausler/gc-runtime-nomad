@@ -378,12 +378,28 @@ func (l *lifecycle) startupPrimeDetached(ctx context.Context, sessionName string
 		fmt.Sprintf(`tmux new-window -d -t %s -n %s '/bin/sh "$NOMAD_SECRETS_DIR/%s/%s"'`,
 			tmuxSessionName, primeWindowName, primeDirName, primeScriptFile),
 	}
-	exitCode, out, err := l.client.execAlloc(ctx, allocID, execTaskName, spawnCmd)
+	// execAllocObserved, not execAlloc: tmux writes the reason it could not
+	// open a window to STDERR, and execAlloc returns only stdout. This spawn
+	// was the last call site still discarding it, which made it the one
+	// failure an operator actually meets that reads
+	//     spawning prime window: tmux new-window exited 1:
+	// with nothing after the colon. The launch path and the exec op already
+	// report both streams; this now matches them.
+	exitCode, out, boxErr, err := l.client.execAllocObserved(ctx, allocID, execTaskName, spawnCmd, nil)
 	if err != nil {
 		return fmt.Errorf("spawning prime window for %q: %w", sessionName, err)
 	}
 	if exitCode != 0 {
-		return fmt.Errorf("spawning prime window for %q: tmux new-window exited %d: %s", sessionName, exitCode, out)
+		// The contradiction is worth stating outright: confirmLaunched has
+		// already verified this tmux session exists, so a spawn that cannot
+		// reach it is not "the box is not ready yet" — it means the session
+		// went away, or this exec is looking at a different tmux socket than
+		// the launch used.
+		return fmt.Errorf("spawning prime window for %q: tmux new-window exited %d: stdout=%s stderr=%s "+
+			"(the launch of this session was already confirmed, so tmux was reachable moments ago — "+
+			"a socket path difference between the launch env and this exec, or a server that exited, "+
+			"are the two shapes that produce this)",
+			sessionName, exitCode, execExcerpt(out), execExcerpt(boxErr))
 	}
 	l.logDecision("startup-prime session=%s window=spawned", sessionName)
 	return nil
