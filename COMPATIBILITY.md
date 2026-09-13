@@ -106,7 +106,11 @@ asserted it thirty lines after saying the same family "turns out not to
 be required" — the page contradicted itself, and the wrong half was the
 one written as measured fact. Upstream resolves `session = "nomad"`
 through its own pack-runtime registry; the selection path is present on
-`origin/main`. The retraction is recorded rather than deleted because a
+`origin/main`. What remains true, and is the honest version of the same
+point: `runtime_provider` IS pin-only as a config key (zero occurrences at
+`6ba434271`), so per-LANE selection needs the pin even though selecting the
+pack at all does not. Upstream's route is the city-wide `[session] provider`,
+which moves every session onto this runtime. See docs/PIN-DEPENDENCIES.md. The retraction is recorded rather than deleted because a
 doc that overstates what it needs from its host is the specific way this
 kind of page misleads an adopter, and the shape is worth keeping visible.
 
@@ -484,7 +488,7 @@ discovered later.
    `GC_NOMAD_AGENT_IMAGE` from each session's own start payload
    (`sessionAgentImage`), carries it as Nomad meta `gc_image`, and
    interpolates it into the child job's image; empty means inherit the
-   deployment default. Set it in a provider's `runtime_env.nomad` and that
+   deployment default. Set it in a provider's `env` block and that
    role gets its own toolchain while every other lane is untouched. See
    README §"Per-role images".
 

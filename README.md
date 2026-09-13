@@ -63,10 +63,23 @@ unset, this task is never added at all.
 >   restarted, and `nomad validate` cannot tell you the volume is missing — so
 >   the failure would land at placement, on your cluster, about something you
 >   never configured.
-> - **No wrapper provider.** A lane onboards by naming its runtime
->   (`runtime_provider = "nomad"` on the agent, the nomad-only half in the
->   provider's `runtime_env.nomad`). The wrapper that used to be required is
->   deleted.
+> - **No wrapper provider.** The wrapper that used to be required is deleted.
+>   A lane onboards by naming its runtime. **But the per-lane spelling is
+>   pin-only, and this bullet used to hand it to you as though it were not.**
+>   On the pin that is `runtime_provider = "nomad"` on the agent; on a stock
+>   `gc` that key does not exist. What upstream has is the city-wide
+>   `[session] provider = "nomad"`, resolved through its own pack-runtime
+>   registry — so on an upstream `gc` this pack is an ALL-OR-NOTHING choice:
+>   every session in the city runs on Nomad, or none does. Mixing a local lane
+>   and a Nomad lane in one city is the thing the pin buys.
+>
+>   Putting `session = "nomad"` on a single agent does not work and does not
+>   pretend to: upstream's per-agent `session` key is a two-way
+>   tmux/acp transport switch, and any other value is refused at build time
+>   with `unknown session transport "nomad"`. That refusal is the one piece of
+>   good news here — it is loud, so you cannot end up believing a lane is on
+>   Nomad when it is not. Measured at `6ba434271`; both spellings and the exact
+>   code paths are in docs/PIN-DEPENDENCIES.md.
 > - **No one-image-per-deployment limit.** `GC_NOMAD_AGENT_IMAGE` is
 >   per-session, so a codex lane and a claude lane coexist on one deployment.
 >
@@ -380,11 +393,29 @@ Provider-agnostic: what any deployment of this pack needs.
    **Per-role images.** `GC_NOMAD_AGENT_IMAGE` is not only a deployment-wide
    default. The pack reads it from each session's own start payload
    (`sessionAgentImage`), carries it as Nomad meta `gc_image`, and interpolates
-   it into the child job's `config.image`. Set it in a provider's
-   `runtime_env.nomad` and that role gets its own toolchain while every other
-   lane keeps the default:
+   it into the child job's `config.image`. Set it on the provider and that role
+   gets its own toolchain while every other lane keeps the default.
+
+   **On a stock `gc`, use the unscoped `env` block.** `runtime_env` is
+   pin-only — see docs/PIN-DEPENDENCIES.md, where the whole path is traced hop
+   by hop — and an unknown TOML key is dropped in SILENCE, so the scoped
+   spelling on an upstream `gc` leaves every lane on the deployment default
+   with nothing reporting why:
 
    ```toml
+   # stock gc, and it works on the pin too
+   [providers.my-codex-lane.env]
+   GC_NOMAD_AGENT_IMAGE = "registry.example/agent-codex:1.4"
+   ```
+
+   The pin's `runtime_env.<runtime>` buys one thing over this: scoping. The
+   unscoped block applies whenever that provider is used, on every runtime;
+   the scoped one applies only when it is driven by that runtime. If the
+   provider only ever runs on Nomad, they are equivalent. Pin-only spelling,
+   for completeness:
+
+   ```toml
+   # PIN-ONLY — silently ignored by an upstream gc
    [providers.my-codex-lane.runtime_env.nomad]
    GC_NOMAD_AGENT_IMAGE = "registry.example/agent-codex:1.4"
    ```

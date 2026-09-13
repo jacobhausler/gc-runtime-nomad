@@ -210,6 +210,56 @@ de-conflation completes"). But a deployment willing to write `session =
 "nomad"` selects this pack on stock gc today. The seam is an improvement to
 upstream, not a precondition for this pack.
 
+### Correction: `runtime_env` is not a blocker either
+
+The same mistake as `runtime_provider`, one key over, and worth stating
+separately because the two are usually written together and a reader who
+accepts the correction above will still assume this one blocks.
+
+`[providers.<name>.runtime_env.<runtime>]` is **pin-only**: `RuntimeEnv
+map[string]map[string]string` with `toml:"runtime_env"` appears in
+`internal/config/provider.go`, `config.go` and `patch.go` at the pin and has
+**zero occurrences** at `6ba434271`. A stranger who writes it on stock gc gets
+the key silently dropped — no error, no warning — and a box with no city
+context at all. That is the worst shape this pack has, so it looks like a
+blocker.
+
+It is not, because the **unscoped** provider env is fully present upstream and
+reaches the runtime. Traced at `6ba434271`, both entry points, each hop read
+rather than inferred:
+
+```
+[providers.<name>.env]            provider.go:91    toml:"env,omitempty"
+  → ProviderSpec.Env              config.go:225     decoded at config.go:4658
+  → ResolvedProvider.Env          resolve.go:696    specToResolved copies key by key
+  → session env map               session_runtime.go:66   (API create/resume)
+                                  template_resolve.go:476 (CLI create)
+  → convergence.ScrubTokenEnv     acl.go:47         pins ONE key, see below
+  → runtime.Config.Env            session_runtime.go:115 / template_resolve.go:722
+  → startConfig.Env → JSON "env"  exec/json.go:54   the wire this pack reads
+```
+
+The `exec` runtime kind is the one that matters: a pack runtime is resolved as
+`"<pack runtime>" → exec proxy bound to the pack's declared command`
+(`cmd/gc/providers.go`), so `exec/json.go` is this pack's own start wire.
+
+**The one transformation.** `ScrubTokenEnv` unconditionally sets
+`GC_CONTROLLER_TOKEN` to the empty string — the key is present and blank, not
+removed. Nothing else is touched on this path: the pattern filter
+`execenv.IsSensitiveKey` (PASSWORD/TOKEN/SECRET/…) is **not** in it, so a
+`*_TOKEN`-shaped key written into `[providers.<name>.env]` does arrive. Do not
+read that as permission — see this pack's own `_PEM`/`GC_NOMAD_ACL_FILE`
+convention and `COMPATIBILITY.md` for why a credential should travel as a path
+to a 0600 file rather than as a value in a config file — but it does mean the
+city-target keys arrive untouched.
+
+**So the stock-gc spelling is the unscoped block**, and what the pin's seam
+buys is scoping: `runtime_env.<runtime>` applies only when that provider is
+driven by that runtime, so one provider can carry different env for a local
+lane and a Nomad lane. Without it you set the env for every runtime the
+provider is used with, which is a real limitation and not a failure. An
+adopter running the provider on exactly one runtime loses nothing.
+
 ## Every family the pin carries
 
 | family | upstream PR | state | why the runtime needs it | first pin carrying it |
