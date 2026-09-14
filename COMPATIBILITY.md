@@ -880,6 +880,13 @@ description/metadata), and a host-side step should perform the actual
 close. If your `gc` gains a remote work-record write surface, wiring this
 pack to it is future work, not something the checkout knob above implies.
 
+See [`docs/typed-close-bridge.md`](docs/typed-close-bridge.md) for the
+current, pin-dependent split of what the remote worker API does and does not
+serve today (metadata + close works, `--outcome` does not, escalation
+creation does not, and the remote close handler's ADR-0009 ancestry-gate
+parity with the local close path) — that file is the one to re-check after a
+pin roll, not this paragraph.
+
 ## Reporting a mismatch
 
 Include all four of these. The first two are the ones that actually

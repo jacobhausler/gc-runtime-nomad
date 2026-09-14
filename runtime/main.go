@@ -33,6 +33,7 @@
 //
 //	GC_NOMAD_ADDR         required for lifecycle ops: absolute base URL of the Nomad API (e.g. http://127.0.0.1:4646)
 //	GC_NOMAD_TOKEN        optional: ACL token sent as X-Nomad-Token
+//	GC_NOMAD_ACL_FILE     optional: path to a FILE holding the ACL token, for a deployment that cannot deliver GC_NOMAD_TOKEN by inheritance because gc's own env filter drops any key containing "TOKEN"; GC_NOMAD_TOKEN wins when both are set; named but unreadable, or empty, is a config error, not a silent unauthenticated fall-through (see resolveNomadToken)
 //	GC_NOMAD_CACERT       optional: CA certificate path for the Nomad API; alias of NOMAD_CACERT
 //	GC_NOMAD_CLIENT_CERT  optional: client certificate path for Nomad mTLS; alias of NOMAD_CLIENT_CERT
 //	GC_NOMAD_CLIENT_KEY   optional: client private-key path for Nomad mTLS; alias of NOMAD_CLIENT_KEY
@@ -53,6 +54,13 @@
 //	GC_NOMAD_NODE_CONSTRAINT  optional: Nomad-syntax node constraints appended to the parent job, e.g. "${node.unique.name} != prod-nomad"; several separated by ";" (Nomad list operands already use commas). Unset adds only the pack's own linux-kernel fatal rule
 //	GC_NOMAD_CITY_MIRROR_URL  optional: a read-only git URL (e.g. "git://mirror.internal:9418/city.git") the pane clones into its session working directory before the agent launches, giving the box a CURRENT city checkout without any repository credential crossing into it (git:// is anonymous and read-only by protocol). Unset means no checkout: the box gets the same scratch-shaped working directory it always has. Present but unreachable at pane start is a soft failure — the pane logs the git error and falls through to the scratch directory rather than failing the launch, because an agent that cannot start is worse than an agent with no checkout.
 //	GC_NOMAD_CITY_MIRROR_BRANCH  optional: branch to clone/fetch from GC_NOMAD_CITY_MIRROR_URL; unset uses the mirror's own default branch (HEAD)
+//	GC_NOMAD_DRAIN_ACK_MARKER  optional: overrides the case-insensitive regex is-running greps a lifecycle:"one_shot" session's captured pane transcript for to detect a completed remote drain ack (default matches `"drain_ack":true`) and self-retire the session through the ordinary stop path; unset uses the default marker
+//	GC_NOMAD_EXEC_TASK    optional: task name alloc-exec targets, when it is not the pack's own session task
+//	GC_NOMAD_EXTRA_SECRET_KEYS  optional: comma-separated names bridged from the supervisor's own process env into $NOMAD_SECRETS_DIR; unset stages nothing extra
+//	GC_NOMAD_GC_ARTIFACT_URL  optional: URL template (with a {commit} placeholder) for the linux/amd64 gc each box fetches per allocation; unset keeps the gc baked into the agent image
+//	GC_NOMAD_AGENT_IMAGE_TAR  optional: URL of a `docker save` tarball of the agent image, fetched per allocation and loaded by the docker driver instead of pulled from a registry; unset pulls the image named by GC_NOMAD_AGENT_IMAGE normally
+//	GC_NOMAD_AGENT_IMAGE_TAR_SHA256  optional: checksum for GC_NOMAD_AGENT_IMAGE_TAR; unset derives file:<url>.sha256
+//	GC_NOMAD_SKIP_GC_CAPABILITY_GATE  optional: "1" (or any non-empty value) disables the gc-capability box-minting gate for an offline harness that mints no real sessions; unset (default) keeps the gate enforced — warns loudly on every use, and restores the dark-lane refusal in a real deployment when unset again
 package main
 
 import (
