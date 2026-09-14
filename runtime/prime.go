@@ -535,18 +535,36 @@ func (l *lifecycle) syncCityCheckoutMarker(ctx context.Context, sessionName stri
 	if err != nil {
 		return
 	}
-	cmd := fmt.Sprintf(`cat "$NOMAD_SECRETS_DIR/%s/%s" 2>/dev/null`, cityMirrorDirName, cityMirrorShaFile)
+	cmd := fmt.Sprintf(`cat "$NOMAD_SECRETS_DIR/%s/%s" 2>/dev/null; printf '\036'; cat "$NOMAD_SECRETS_DIR/%s/%s" 2>/dev/null`,
+		cityMirrorDirName, cityMirrorShaFile, cityMirrorDirName, cityMirrorStatusFile)
 	exitCode, out, err := l.client.execAlloc(ctx, allocID, execTaskName, []string{"/bin/sh", "-c", cmd})
 	if err != nil || exitCode != 0 {
 		return
 	}
-	sha := strings.TrimSpace(string(out))
-	if sha == "" || sha == b.CityCheckoutSHA {
+	parts := strings.SplitN(string(out), "\x1e", 2)
+	sha := strings.TrimSpace(parts[0])
+	status := ""
+	if len(parts) > 1 {
+		status = strings.TrimSpace(parts[1])
+	}
+	if sha == "" && status == "" {
+		return // the prelude has not run (or reported back) yet
+	}
+	// A durable, one-line diagnostics.log entry on EVERY status change —
+	// success (ok) included, not just failure — because a box that silently
+	// never checks out is exactly as invisible as one that silently breaks,
+	// and this pack's diagnostics.log is the one place an operator without
+	// alloc-exec access can see either.
+	if status != "" && status != b.CityCheckoutStatus {
+		l.logDecision("city-mirror session=%s status=%s sha=%s", sessionName, status, sha)
+	}
+	if sha == b.CityCheckoutSHA && status == b.CityCheckoutStatus {
 		return
 	}
 	b.CityCheckoutSHA = sha
+	b.CityCheckoutStatus = status
 	if err := l.sidecar.save(*b); err != nil {
-		l.logDecision("city-mirror session=%s checkout sha sync could not save: %v", sessionName, err)
+		l.logDecision("city-mirror session=%s checkout sha/status sync could not save: %v", sessionName, err)
 	}
 }
 

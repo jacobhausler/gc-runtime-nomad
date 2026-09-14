@@ -162,6 +162,14 @@ type binding struct {
 	// either the knob is unset (no checkout attempted — the default) or a
 	// checkout was attempted but no sha has been read back yet.
 	CityCheckoutSHA string `json:"city_checkout_sha,omitempty"`
+
+	// CityCheckoutStatus is the outcome cityMirrorPrelude recorded for its
+	// clone/fetch attempt: "ok", "no_git" (the image has no git binary),
+	// "skipped_nonempty" (the working directory was neither empty nor
+	// already a git checkout), or "error" (git ran but the clone/fetch
+	// itself failed — unreachable mirror, bad branch, timeout). Empty means
+	// either the knob is unset or the prelude has not reported back yet.
+	CityCheckoutStatus string `json:"city_checkout_status,omitempty"`
 }
 
 // exitReasonDrainAck is the one ExitReason value this pack writes today.

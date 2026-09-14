@@ -518,14 +518,20 @@ func paneCwdPrelude(workDir string) string {
 	return cd + cityMirrorPrelude()
 }
 
-// cityMirrorDirName and cityMirrorShaFile name the marker file
-// cityMirrorPrelude drops so syncCityCheckoutMarker can read the resulting
-// HEAD sha back into the sidecar binding — the same detached hand-off
-// prime.go's PromptedAt marker files use (nothing in this process survives
-// the pane's shell to run Go code here).
+// cityMirrorDirName, cityMirrorShaFile and cityMirrorStatusFile name the
+// marker files cityMirrorPrelude drops so syncCityCheckoutMarker can read
+// the resulting HEAD sha and outcome back into the sidecar binding — the
+// same detached hand-off prime.go's PromptedAt marker files use (nothing in
+// this process survives the pane's shell to run Go code here).
 const (
-	cityMirrorDirName = "gc-city-checkout"
-	cityMirrorShaFile = "sha"
+	cityMirrorDirName    = "gc-city-checkout"
+	cityMirrorShaFile    = "sha"
+	cityMirrorStatusFile = "status"
+
+	cityMirrorStatusOK              = "ok"
+	cityMirrorStatusNoGit           = "no_git"
+	cityMirrorStatusSkippedNonEmpty = "skipped_nonempty"
+	cityMirrorStatusError           = "error"
 )
 
 // cityMirrorPrelude implements the box-checkout policy: a box gets the city
@@ -548,13 +554,27 @@ const (
 // nor already a git checkout (workDir pointed somewhere with unrelated
 // content) is left alone — this never deletes anything.
 //
-// Failure is soft by design: an unreachable mirror or a shallow-fetch error
-// logs to the pane's stderr (captured in agentCaptureBody's log, not this
-// script's own exit code) and falls through to whatever directory the pane
-// already has — an agent that cannot start is worse than an agent with no
-// (or a stale) checkout. The image-baked content already sitting in that
-// directory from `gc build-image`, if any, is the cache this refreshes; nothing
-// here treats its absence as an error.
+// Failure is soft by design: an unreachable mirror, a missing `git` in the
+// image, or a shallow-fetch/clone error logs to the pane's stderr (captured
+// in agentCaptureBody's log) and falls through to whatever directory the
+// pane already has — an agent that cannot start is worse than an agent with
+// no (or a stale) checkout. The image-baked content already sitting in that
+// directory from `gc build-image`, if any, is the cache this refreshes;
+// nothing here treats its absence as an error. `timeout` bounds the
+// clone/fetch call, when available, so an unreachable mirror cannot run out
+// the startup-prime readiness budget (startup.go) — a hung dial is exactly
+// the kind of failure this prelude must not allow to become a hung launch.
+//
+// A parenthesized SUBSHELL, not a `{ }` group — this went out as a `{ }`
+// group once and broke every worker-local box: paneCwdPrelude concatenates
+// this string directly onto agentCaptureBody's next command with nothing
+// but a space in between, and `}` (unlike `)`) is not itself a command
+// terminator — `{ echo hi; } echo bye` is a shell SYNTAX ERROR, not two
+// commands. That syntax error killed the pane's `/bin/sh -c` script before
+// even agentCaptureBody's own `trap`/exit-record wrapper ran, so every box
+// died in the first fraction of a second with no agent.exit record and no
+// diagnostic — indistinguishable from the outside from "tmux itself is
+// broken". The trailing `;` after `)` is not decorative: it is the fix.
 func cityMirrorPrelude() string {
 	url := strings.TrimSpace(os.Getenv(envCityMirrorURL))
 	if url == "" {
@@ -564,18 +584,33 @@ func cityMirrorPrelude() string {
 	if branch := strings.TrimSpace(os.Getenv(envCityMirrorBranch)); branch != "" {
 		branchArgs = "--branch " + shellQuote(branch) + " "
 	}
+	dir := `"$NOMAD_SECRETS_DIR/` + cityMirrorDirName + `"`
 	shaFile := `"$NOMAD_SECRETS_DIR/` + cityMirrorDirName + `/` + cityMirrorShaFile + `"`
-	return `{ ` +
-		`if [ -n "${NOMAD_SECRETS_DIR:-}" ]; then mkdir -p "$NOMAD_SECRETS_DIR/` + cityMirrorDirName + `" 2>/dev/null; fi; ` +
+	statusFile := `"$NOMAD_SECRETS_DIR/` + cityMirrorDirName + `/` + cityMirrorStatusFile + `"`
+	warn := `echo "gc-runtime-nomad: ` + envCityMirrorURL + ` is set but `
+	return `( ` +
+		`__gc_mirror_status=` + cityMirrorStatusError + `; ` +
+		`if command -v git >/dev/null 2>&1; then ` +
+		`__gc_mirror_to=""; ` +
+		`if command -v timeout >/dev/null 2>&1; then __gc_mirror_to="timeout 60"; fi; ` +
 		`if [ -d .git ]; then ` +
-		`git fetch --depth 1 origin 1>&2 2>&1 && git reset --hard FETCH_HEAD 1>&2 2>&1; ` +
+		`if $__gc_mirror_to git fetch --depth 1 origin >&2 && git reset --hard FETCH_HEAD >&2; then __gc_mirror_status=` + cityMirrorStatusOK + `; fi; ` +
 		`elif [ -z "$(ls -A . 2>/dev/null)" ]; then ` +
-		`git clone --depth 1 ` + branchArgs + shellQuote(url) + ` . 1>&2 2>&1; ` +
+		`if $__gc_mirror_to git clone --depth 1 ` + branchArgs + shellQuote(url) + ` . >&2; then __gc_mirror_status=` + cityMirrorStatusOK + `; fi; ` +
 		`else ` +
-		`echo "gc-runtime-nomad: ` + envCityMirrorURL + ` is set but the working directory is non-empty and not a git checkout; skipping clone" 1>&2; ` +
+		warn + `the working directory is non-empty and not a git checkout; skipping clone" >&2; ` +
+		`__gc_mirror_status=` + cityMirrorStatusSkippedNonEmpty + `; ` +
 		`fi; ` +
-		`if [ -n "${NOMAD_SECRETS_DIR:-}" ]; then git rev-parse HEAD > ` + shaFile + ` 2>/dev/null || : > ` + shaFile + `; fi; ` +
-		`} `
+		`else ` +
+		warn + `no git binary is on PATH in this image; skipping clone" >&2; ` +
+		`__gc_mirror_status=` + cityMirrorStatusNoGit + `; ` +
+		`fi; ` +
+		`if [ -n "${NOMAD_SECRETS_DIR:-}" ]; then ` +
+		`mkdir -p ` + dir + ` 2>/dev/null; ` +
+		`git rev-parse HEAD > ` + shaFile + ` 2>/dev/null || : > ` + shaFile + `; ` +
+		`printf '%s\n' "$__gc_mirror_status" > ` + statusFile + ` 2>/dev/null || true; ` +
+		`fi; ` +
+		`) ; `
 }
 
 // extraSecretKeys is the parsed name list from GC_NOMAD_EXTRA_SECRET_KEYS
