@@ -51,6 +51,8 @@
 //	GC_NOMAD_AGENT_IMAGE  required: Docker image for the session agent task, normally produced by gc build-image; unset fails every lifecycle op closed at startup (the legacy exec task, and the GC_NOMAD_ARTIFACT_VOLUME host-volume shape that used to carry its toolchain, have been deleted). The prebaked image owns the agent toolchain: the launched pane runs gc's rendered launch command, there is no deployment-bootstrap seam left to consult, and an empty rendered command fails the launch closed, and staged runtime secrets go to the mount point the box reports for $NOMAD_SECRETS_DIR; because no bootstrap survives to do it, the pack then owns the agent home: CODEX_HOME is exported inside that mount, overriding the orchestrator value the provider env staged, the Codex provider config is rendered from the seat's staged environment (GC_CODEX_MODEL_PROVIDER / GC_CODEX_MODEL_PROVIDER_BASE_URL), and auth arrives from the staged CODEX_AUTH_JSON (codex_home.go); the box owns its filesystem too, so PATH, HOME, TMP/TMPDIR/TEMP, the XDG_* family, GC_HOME and any staged value naming the orchestrator's own HOME or TMPDIR are stripped from env.sh and the launch `-e` pairs rather than shadowed (image_env.go)
 //	GC_NOMAD_DNS_SERVERS  optional: comma-separated resolver IP addresses the session group's bridge network writes into the alloc's /etc/resolv.conf (e.g. "192.168.0.202"); unset means Nomad declares no dns stanza and the alloc inherits the CLIENT HOST's resolv.conf — on a systemd-resolved host that is the unreachable 127.0.0.53 stub, so nothing in the box can resolve a name
 //	GC_NOMAD_NODE_CONSTRAINT  optional: Nomad-syntax node constraints appended to the parent job, e.g. "${node.unique.name} != prod-nomad"; several separated by ";" (Nomad list operands already use commas). Unset adds only the pack's own linux-kernel fatal rule
+//	GC_NOMAD_CITY_MIRROR_URL  optional: a read-only git URL (e.g. "git://mirror.internal:9418/city.git") the pane clones into its session working directory before the agent launches, giving the box a CURRENT city checkout without any repository credential crossing into it (git:// is anonymous and read-only by protocol). Unset means no checkout: the box gets the same scratch-shaped working directory it always has. Present but unreachable at pane start is a soft failure — the pane logs the git error and falls through to the scratch directory rather than failing the launch, because an agent that cannot start is worse than an agent with no checkout.
+//	GC_NOMAD_CITY_MIRROR_BRANCH  optional: branch to clone/fetch from GC_NOMAD_CITY_MIRROR_URL; unset uses the mirror's own default branch (HEAD)
 package main
 
 import (
@@ -95,6 +97,14 @@ const (
 	envAdoptMaxAge      = "GC_NOMAD_ADOPT_MAX_AGE"
 	envDNSServers       = "GC_NOMAD_DNS_SERVERS"
 	envNodeConstraint   = "GC_NOMAD_NODE_CONSTRAINT"
+	// envCityMirrorURL and envCityMirrorBranch are the read side of the
+	// box-checkout knob: absent = no checkout (today's
+	// behavior, unchanged); set = paneCwdPrelude clones/fetches this URL
+	// into the session working directory before the agent launches. Neither
+	// value is a credential — git:// is anonymous and read-only by
+	// protocol — so both are plain runtime config, not a staged secret.
+	envCityMirrorURL    = "GC_NOMAD_CITY_MIRROR_URL"
+	envCityMirrorBranch = "GC_NOMAD_CITY_MIRROR_BRANCH"
 
 	defaultParentJob = "gc-sessions"
 

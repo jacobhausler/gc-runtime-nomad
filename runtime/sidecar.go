@@ -154,6 +154,14 @@ type binding struct {
 	// self-initiated the session's end — every other stop (an operator, gc
 	// itself) leaves it unset.
 	ExitReason string `json:"exit_reason,omitempty"`
+
+	// CityCheckoutSHA is the HEAD commit sha cityMirrorPrelude's clone/fetch
+	// step produced in the pane's working directory, read back by
+	// syncCityCheckoutMarker (the box's checkout from the read-only city
+	// mirror, GC_NOMAD_CITY_MIRROR_URL). Empty means
+	// either the knob is unset (no checkout attempted — the default) or a
+	// checkout was attempted but no sha has been read back yet.
+	CityCheckoutSHA string `json:"city_checkout_sha,omitempty"`
 }
 
 // exitReasonDrainAck is the one ExitReason value this pack writes today.

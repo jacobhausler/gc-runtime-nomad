@@ -804,6 +804,82 @@ credential-sensitive storage, scope the credentials you stage as
 narrowly as you can, and prefer the `_PEM` pointer form wherever the
 credential shape allows it.
 
+## Box checkout of the deployment repository
+
+A box's session working directory is scratch by default (see
+`env.workspace` above) — no `.git`, nothing the deployment's own repo-bound
+formulas can read or write. `GC_NOMAD_CITY_MIRROR_URL` closes the READ half
+of that gap; this section documents the full boundary: what crosses, what
+does not, and what to do instead of writing.
+
+### READ — cloned at prime, behind an operator knob
+
+Set `GC_NOMAD_CITY_MIRROR_URL` (optionally `GC_NOMAD_CITY_MIRROR_BRANCH`) to
+a read-only git URL — `git://`, or any transport your box's image can reach
+without a credential. `paneCwdPrelude` clones (or, on an adopted/relaunched
+box that already holds a prior clone, fetches and hard-resets) it into the
+session working directory before the agent launches. The resulting HEAD sha
+is read back into the sidecar binding as `city_checkout_sha`.
+
+**What crosses:** the URL and branch name, exactly as `workDir` already
+crosses today — plain runtime config, not a credential. **What does not
+cross:** anything. `git://` is anonymous and read-only by protocol; nothing
+in this pack stages a token, key, or `.netrc` for it. If your mirror needs
+authentication, this knob is the wrong tool — it has no credential path and
+will not grow one; put an authenticating proxy in front of a URL this box
+can reach unauthenticated instead.
+
+**Image-baked content as a cache.** `gc build-image` can bake repository
+content into the agent image at build time (see *The agent image* above).
+That is compatible with this knob: image content is what a fresh box's
+working directory starts with, and the prime-time fetch (the `git fetch` +
+hard-reset branch of `cityMirrorPrelude`, taken because the directory is
+already a git checkout) refreshes it in place. Treat the image as the cache
+and the knob as what keeps the cache from going stale, not as two competing
+mechanisms.
+
+**Rollback:** unset `GC_NOMAD_CITY_MIRROR_URL`. The pane's cwd logic reverts
+to exactly its pre-knob behavior — `cityMirrorPrelude` returns `""` and is
+never invoked with a non-empty body.
+
+**Failure mode:** soft, deliberately. An unreachable mirror, a shallow-fetch
+error, or a working directory that is neither empty nor already a git
+checkout logs to the pane's own stderr capture and the launch proceeds on
+whatever directory it already had — never fails the launch. `is-running`'s
+best-effort marker sync (`syncCityCheckoutMarker`) costs nothing when the
+knob is unset: no exec call at all.
+
+### WRITE — no repository credential ever enters a box
+
+This pack implements no write path for the deployment repository, and does
+not intend to grow one behind this knob or any other: `git://` carries no
+credential to stage, and nothing here escalates it into one. A deployment
+that needs a box's work to reach the repository has two conventions
+available today, neither of which this pack mediates:
+
+- **A public upstream repository:** through whatever seat/provider token
+  your `gc` config already stages into the box's environment (e.g. a GitHub
+  token staged as a provider env value) — branch push and PR/MR, the normal
+  flow for that token, entirely outside this pack's surface.
+- **The deployment's own (private) repository:** as a patch (`git
+  format-patch` or equivalent) the box's session records as its output —
+  session description, metadata, or a receipt endpoint your deployment
+  defines — for a host-side lane with real write credentials to apply and
+  commit. This pack does not implement that apply step; it is deployment
+  convention layered on top of whatever channel your `gc` formulas already
+  use to carry a session's output back out (comments, metadata, artifacts).
+
+### BRIDGE / typed close — not implemented in this pack
+
+A box session that ends its atom under a remote `gc` contract may be unable
+to land a typed work-record close (outcome/commit/branch) if that surface
+is not available to a remote/box-side caller in your `gc` version. This pack
+does not implement a bridge for that today: a box in that position should
+end its atom with whatever typed hand-off *is* available to it (its own
+description/metadata), and a host-side step should perform the actual
+close. If your `gc` gains a remote work-record write surface, wiring this
+pack to it is future work, not something the checkout knob above implies.
+
 ## Reporting a mismatch
 
 Include all four of these. The first two are the ones that actually

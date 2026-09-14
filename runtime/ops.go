@@ -508,10 +508,74 @@ func agentCaptureBody(paneCommand string) string {
 // data when it reaches the pane's shell.
 func paneCwdPrelude(workDir string) string {
 	scratch := `if [ -n "${NOMAD_ALLOC_DIR:-}" ]; then mkdir -p "$NOMAD_ALLOC_DIR/work" 2>/dev/null && cd "$NOMAD_ALLOC_DIR/work" 2>/dev/null; fi; `
+	cd := scratch
 	if wd := strings.TrimSpace(workDir); wd != "" {
-		return "cd " + shellQuote(wd) + " 2>/dev/null || " + scratch
+		cd = "cd " + shellQuote(wd) + " 2>/dev/null || " + scratch
 	}
-	return scratch
+	// Runs AFTER whichever cd path was taken, so it always operates on the
+	// pane's actual cwd (workDir when it existed, scratch otherwise) — see
+	// cityMirrorPrelude.
+	return cd + cityMirrorPrelude()
+}
+
+// cityMirrorDirName and cityMirrorShaFile name the marker file
+// cityMirrorPrelude drops so syncCityCheckoutMarker can read the resulting
+// HEAD sha back into the sidecar binding — the same detached hand-off
+// prime.go's PromptedAt marker files use (nothing in this process survives
+// the pane's shell to run Go code here).
+const (
+	cityMirrorDirName = "gc-city-checkout"
+	cityMirrorShaFile = "sha"
+)
+
+// cityMirrorPrelude implements the box-checkout policy: a box gets the city
+// checkout from a read-only mirror, cloned at prime behind an operator knob
+// (absent = no checkout). GC_NOMAD_CITY_MIRROR_URL
+// is read from THIS process's (the supervisor's) own environment — same
+// deployment contract as every other GC_NOMAD_* key (main.go's doc comment)
+// — never from the box, and never a credential: git:// is anonymous and
+// read-only by protocol, so nothing crosses into the box here except the URL
+// value itself, exactly as workDir already does.
+//
+// Unset (the default) returns "": no checkout, byte-identical to this pack's
+// behavior before this knob existed.
+//
+// Set: clones (fresh directory) or fetches+hard-resets (an adopted/relaunched
+// box whose scratch dir already holds this pack's own prior clone) into the
+// pane's CURRENT working directory, so a bare `git rev-parse --git-common-dir`
+// in the agent's cwd succeeds the way formulas/mol-verified-work.toml's
+// prepare-worktree step requires. A working directory that is neither empty
+// nor already a git checkout (workDir pointed somewhere with unrelated
+// content) is left alone — this never deletes anything.
+//
+// Failure is soft by design: an unreachable mirror or a shallow-fetch error
+// logs to the pane's stderr (captured in agentCaptureBody's log, not this
+// script's own exit code) and falls through to whatever directory the pane
+// already has — an agent that cannot start is worse than an agent with no
+// (or a stale) checkout. The image-baked content already sitting in that
+// directory from `gc build-image`, if any, is the cache this refreshes; nothing
+// here treats its absence as an error.
+func cityMirrorPrelude() string {
+	url := strings.TrimSpace(os.Getenv(envCityMirrorURL))
+	if url == "" {
+		return ""
+	}
+	branchArgs := ""
+	if branch := strings.TrimSpace(os.Getenv(envCityMirrorBranch)); branch != "" {
+		branchArgs = "--branch " + shellQuote(branch) + " "
+	}
+	shaFile := `"$NOMAD_SECRETS_DIR/` + cityMirrorDirName + `/` + cityMirrorShaFile + `"`
+	return `{ ` +
+		`if [ -n "${NOMAD_SECRETS_DIR:-}" ]; then mkdir -p "$NOMAD_SECRETS_DIR/` + cityMirrorDirName + `" 2>/dev/null; fi; ` +
+		`if [ -d .git ]; then ` +
+		`git fetch --depth 1 origin 1>&2 2>&1 && git reset --hard FETCH_HEAD 1>&2 2>&1; ` +
+		`elif [ -z "$(ls -A . 2>/dev/null)" ]; then ` +
+		`git clone --depth 1 ` + branchArgs + shellQuote(url) + ` . 1>&2 2>&1; ` +
+		`else ` +
+		`echo "gc-runtime-nomad: ` + envCityMirrorURL + ` is set but the working directory is non-empty and not a git checkout; skipping clone" 1>&2; ` +
+		`fi; ` +
+		`if [ -n "${NOMAD_SECRETS_DIR:-}" ]; then git rev-parse HEAD > ` + shaFile + ` 2>/dev/null || : > ` + shaFile + `; fi; ` +
+		`} `
 }
 
 // extraSecretKeys is the parsed name list from GC_NOMAD_EXTRA_SECRET_KEYS
@@ -3099,6 +3163,11 @@ func (l *lifecycle) opIsRunning(ctx context.Context, sessionName string) (bool, 
 	// once PromptedAt is set or no prompt was ever staged, so this costs
 	// nothing on the common path and never affects the liveness answer.
 	l.syncPromptedMarker(ctx, sessionName)
+	// Best-effort, same shape as syncPromptedMarker above: pick up the city
+	// checkout sha cityMirrorPrelude recorded, when the operator knob is
+	// configured. A no-op (no exec call) whenever GC_NOMAD_CITY_MIRROR_URL
+	// is unset, so this costs nothing on the unconfigured (default) path.
+	l.syncCityCheckoutMarker(ctx, sessionName)
 	// A detached prime that exhausted its readiness budget is not a healthy
 	// agent session. The sidecar status is the bounded startup check's durable
 	// result; return false so gc can apply its ordinary repair/retry path rather

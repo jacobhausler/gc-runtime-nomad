@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 )
@@ -507,6 +508,45 @@ func (l *lifecycle) syncPromptedMarker(ctx context.Context, sessionName string) 
 	b.PromptPaneTail = tail
 	if err := l.sidecar.save(*b); err != nil {
 		l.logDecision("startup-prime session=%s marker sync could not save: %v", sessionName, err)
+	}
+}
+
+// syncCityCheckoutMarker is cityMirrorPrelude's other half (ops.go): it
+// reads the HEAD sha marker file the pane's clone/fetch step drops under
+// $NOMAD_SECRETS_DIR/gc-city-checkout/sha and copies it onto the sidecar
+// binding's CityCheckoutSHA field, following syncPromptedMarker's pattern
+// exactly — nothing in this process survives the pane's shell to run Go
+// code there, so a marker file plus a later read-back is the only channel.
+//
+// A no-op (no exec call at all) when GC_NOMAD_CITY_MIRROR_URL is unset, so
+// this costs nothing on the unconfigured (default, unchanged) path. An empty
+// or unchanged marker is also a no-op — the sidecar is only rewritten when
+// the sha actually moved (a fresh clone, or a fetch that landed a new
+// commit), not on every opIsRunning poll.
+func (l *lifecycle) syncCityCheckoutMarker(ctx context.Context, sessionName string) {
+	if strings.TrimSpace(os.Getenv(envCityMirrorURL)) == "" {
+		return
+	}
+	b, ok, err := l.sidecar.load(sessionName)
+	if err != nil || !ok {
+		return
+	}
+	allocID, err := l.currentAlloc(ctx, sessionName)
+	if err != nil {
+		return
+	}
+	cmd := fmt.Sprintf(`cat "$NOMAD_SECRETS_DIR/%s/%s" 2>/dev/null`, cityMirrorDirName, cityMirrorShaFile)
+	exitCode, out, err := l.client.execAlloc(ctx, allocID, execTaskName, []string{"/bin/sh", "-c", cmd})
+	if err != nil || exitCode != 0 {
+		return
+	}
+	sha := strings.TrimSpace(string(out))
+	if sha == "" || sha == b.CityCheckoutSHA {
+		return
+	}
+	b.CityCheckoutSHA = sha
+	if err := l.sidecar.save(*b); err != nil {
+		l.logDecision("city-mirror session=%s checkout sha sync could not save: %v", sessionName, err)
 	}
 }
 
