@@ -535,7 +535,12 @@ bash toolchain/build-image.sh check
 #    The gate below is not ceremony: this builds an image, and a build that
 #    runs inside an agent allocation would be a session building its own
 #    successor. Run it on a build host, never in a box.
-GC_TOOLCHAIN_HOST_STEP=1 bash toolchain/build-image.sh build --published
+#
+#    --gc-release=<commit> is what makes this image RUNNABLE: it fetches the gc
+#    published for that pin and verifies it against its own sha256 sidecar.
+#    Use the commit from the status banner at the top of this file. Do NOT use
+#    --published here — see the bullet below.
+GC_TOOLCHAIN_HOST_STEP=1 bash toolchain/build-image.sh build --gc-release=<commit>
 
 # 2. compose city content onto that base -- this is `gc build-image`, and it
 #    is the step that produces the tag you actually run
@@ -551,12 +556,25 @@ Three things that will bite you:
   `gc build-image` copies the whole directory and excludes only secrets, so
   pointing it at a live working checkout ships that whole checkout into an
   image. The script refuses it.
-- **`--published` builds against the published upstream `gc` release.** That
-  is the portable path, and today it produces an image whose in-box `gc`
-  cannot run this pack — see the status banner at the top of this file. This
-  is the same blocker, not a second one. Without `--published`, `build`
-  prefers a locally staged pin binary named in `TOOLCHAIN.lock`, which only
-  exists on a host that stages one.
+- **`--published` produces an image that CANNOT RUN THIS PACK. Do not use it
+  to build a deployable image.** It builds against the published *upstream*
+  `gc` release, which carries none of the required worker families, so a seat
+  in a box built from it cannot claim — it comes up, looks healthy, and drains
+  `no_work` forever. That is not staleness and no configuration fixes it; it
+  is the same blocker as the status banner at the top of this file, not a
+  second one. `--published` exists to exercise the TOOLCHAIN layer, which is
+  what the public CI does, and the script now says all of this when you pass
+  it.
+
+  This bullet used to describe `--published` as "the portable path" while the
+  worked example above used it — so the one runnable recipe in this file
+  produced a broken image, and the correction was fourteen lines below the
+  command. Two independent outside readers evaluating this pack from its docs
+  alone both stopped at exactly that. Use `--gc-release=<commit>`, which is
+  equally portable: it needs nothing staged locally, only `curl` and a
+  published pin. Without either flag, `build` prefers a locally staged pin
+  binary named in `TOOLCHAIN.lock`, which exists only on a host that stages
+  one.
 - **The in-box `gc` must be built for the image it runs in.** A `gc` compiled
   against a different libc or ICU major links cleanly and dies at the first
   seat command; `build-image.sh` refuses a `gc` that is not an x86-64 ELF for

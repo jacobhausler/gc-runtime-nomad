@@ -293,7 +293,7 @@ case "$cmd" in
         printf 'toolchain lock: gc LOCAL absent on this host — build must run where %s is staged (or pass --published)\n' "$(lock_get gc_local_artifact)"
       fi
     else
-      echo "toolchain lock: no gc_local_artifact — a build would ship published gc $(lock_version gc), which may be older than the live pin; refresh-pin to carry the pin"
+      echo "toolchain lock: no gc_local_artifact — a build would ship published gc $(lock_version gc), which CANNOT RUN THIS PACK (it carries none of the required worker families, so a seat cannot claim; not a staleness problem). Use --gc-release=<commit>, or refresh-pin to carry the pin"
     fi
     echo "toolchain lock: six components sha256-pinned (the local gc shared-library dep included), base digest-pinned, Codex standalone layout asserted, rollback named"
     ;;
@@ -406,7 +406,25 @@ case "$cmd" in
       art_sha="$(file_sha256 "$art")"
       echo "toolchain gc source: PUBLISHED PIN ${art_pin} fetched from $(release_base) (sha256 ${art_sha}, verified against its sidecar)"
     elif [ "$PUBLISHED" = 1 ]; then
-      echo "toolchain gc source: PUBLISHED gc $(lock_version gc) (--published; the image will NOT carry the live pin)"
+      # NOT A STALENESS WARNING. This used to read "the image will NOT carry
+      # the live pin", which an adopter reads as "slightly behind" — and two
+      # independent outside readers evaluating this pack from its docs both
+      # stopped at exactly this path and reported the same thing: --published
+      # is the only route that does not require trusting a fork binary, it is
+      # described as "the portable path", and the image it produces cannot run
+      # the pack at all. The upstream release carries none of the Tier 1
+      # families (docs/PIN-DEPENDENCIES.md), so the in-box gc is not old, it is
+      # incapable: a seat built on it drains no_work forever while the city
+      # lists its work as ready. The tool knows that here and has to say it.
+      echo "toolchain gc source: PUBLISHED gc $(lock_version gc) (--published)"
+      echo "toolchain WARNING: the image this produces CANNOT RUN THIS PACK. The upstream"
+      echo "                   published gc carries none of the required worker families, so a"
+      echo "                   seat in a box built from it cannot claim: it comes up, looks"
+      echo "                   healthy, and drains no_work forever. This is not staleness and"
+      echo "                   no configuration fixes it."
+      echo "                   Use --gc-release=<commit> for an image that works; --published is"
+      echo "                   for exercising the TOOLCHAIN layer (what public CI does), not for"
+      echo "                   producing a deployable agent image."
     else
       art="$(local_artifact_path)"
       if [ -z "$art" ]; then
