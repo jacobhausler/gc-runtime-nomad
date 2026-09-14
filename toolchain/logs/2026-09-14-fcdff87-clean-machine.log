@@ -1,0 +1,313 @@
+nomad-run job=builders/dispatch-1789376947-c29e8433 repo=/Users/home/westlands/work/gc-runtime-nomad-main rev=fcdff87a427519fe431590bd84563e18f3c7b5fa cmd=sh -c 'echo IyEvdXNyL2Jpbi9lbnYgYmFzaAojIFBoYXNlLTEgY29uZm9ybWFuY2UgbGFkZGVyLCBjbGVhbi1tYWNoaW5lOiBmcmVzaCB0cmFja2VkLW9ubHkgdHJlZSBhdCBIRUFELAojIGNvbGQgR28gY2FjaGVzLCBwdWJsaXNoZWQgcGlubmVkIGdjICg3NWZiYzJjZjViKSB2ZXJpZmllZCBhZ2FpbnN0IGl0cyBzaWRlY2FyLgpzZXQgLXVvIHBpcGVmYWlsCmV4cG9ydCBIT01FPS90bXAKZXhwb3J0IEdPQ0FDSEU9L3RtcC9nb2NhY2hlIEdPTU9EQ0FDSEU9L3RtcC9nb21vZGNhY2hlIEdPVE1QRElSPS90bXAvZ290bXAKbWtkaXIgLXAgIiRHT0NBQ0hFIiAiJEdPTU9EQ0FDSEUiICIkR09UTVBESVIiCmNkIC9sb2NhbC9yZXBvL3VucGFja2VkIHx8IGV4aXQgMwplY2hvICI9PSB0cmVlIHByb3ZlbmFuY2UgPT0iCmdpdCByZXYtcGFyc2UgSEVBRDsgZ2l0IHN0YXR1cyAtLXBvcmNlbGFpbiB8IGhlYWQgLTUKZ2l0IGxvZyAtLW9uZWxpbmUgLTEKZWNobyAiPT0gZ2Mgc3RhZ2UgKHB1Ymxpc2hlZCBwaW4gNzVmYmMyY2Y1YikgPT0iCkdDPS90bXAvZ2MtcmVjZWlwdC03NWZiYzJjZjViCkJBU0U9aHR0cHM6Ly9naXRodWIuY29tL2phY29iaGF1c2xlci9nYXNjaXR5L3JlbGVhc2VzL2Rvd25sb2FkL2djLTc1ZmJjMmNmNWIKY3VybCAtZnNTTCAiJEJBU0UvZ2MtbGludXgtYW1kNjQiIC1vICIkR0MiIHx8IHsgZWNobyAiR0NfRkVUQ0hfRkFJTEVEIjsgZXhpdCA0OyB9CmN1cmwgLWZzU0wgIiRCQVNFL2djLWxpbnV4LWFtZDY0LnNoYTI1NiIgLW8gIiRHQy5zaGEyNTYiIHx8IHsgZWNobyAiU0lERUNBUl9GRVRDSF9GQUlMRUQiOyBleGl0IDQ7IH0Kd2FudD0kKGF3ayAne3ByaW50ICQxOyBleGl0fScgIiRHQy5zaGEyNTYiKTsgZ290PSQoc2hhMjU2c3VtICIkR0MiIHwgYXdrICd7cHJpbnQgJDF9JykKZWNobyAiZ2Nfc2hhX3dhbnQ9JHdhbnQiOyBlY2hvICJnY19zaGFfZ290PSRnb3QiClsgIiR3YW50IiA9ICIkZ290IiBdIHx8IHsgZWNobyAiR0NfU0hBX01JU01BVENIIjsgZXhpdCA0OyB9CmNobW9kICt4ICIkR0MiCmVjaG8gIj09IGljdTc0IHN0YWdlIChwdWJsaXNoZWQgZ2MgaXMgYnVpbHQgb24gdWJ1bnR1OjI0LjA0IEFCSTsgYnVpbGRlciBpbWFnZSBpcyB0cml4aWUvaWN1NzYpID09IgpJQ1U9JChjdXJsIC1mc1NMIGh0dHA6Ly9hcmNoaXZlLnVidW50dS5jb20vdWJ1bnR1L3Bvb2wvbWFpbi9pL2ljdS8gfCBncmVwIC1vRSAnbGliaWN1NzRfWzAtOV1bMC05YS16Lit+LV0qX2FtZDY0XC5kZWInIHwgc29ydCAtdSB8IHRhaWwgLTEpCmVjaG8gImljdV9kZWI9JElDVSIKWyAtbiAiJElDVSIgXSB8fCB7IGVjaG8gIklDVV9ERUJfTk9UX0ZPVU5EIjsgZXhpdCA1OyB9CmN1cmwgLWZzU0wgImh0dHA6Ly9hcmNoaXZlLnVidW50dS5jb20vdWJ1bnR1L3Bvb2wvbWFpbi9pL2ljdS8kSUNVIiAtbyAvdG1wL2xpYmljdTc0LmRlYiB8fCB7IGVjaG8gIklDVV9GRVRDSF9GQUlMRUQiOyBleGl0IDU7IH0KbWtkaXIgLXAgL3RtcC9pY3U3NCAmJiBkcGtnLWRlYiAteCAvdG1wL2xpYmljdTc0LmRlYiAvdG1wL2ljdTc0IHx8IHsgZWNobyAiSUNVX0VYVFJBQ1RfRkFJTEVEIjsgZXhpdCA1OyB9CmV4cG9ydCBMRF9MSUJSQVJZX1BBVEg9L3RtcC9pY3U3NC91c3IvbGliL3g4Nl82NC1saW51eC1nbnUKZWNobyAiPT0gZ2MgaWRlbnRpdHkgYXMgdGhlIHJlY2VpcHQgd2lsbCBhdHRyaWJ1dGUgaXQgPT0iCiIkR0MiIHZlcnNpb24gLS1qc29uIHx8IHsgZWNobyAiR0NfQ0FOTk9UX0VYRUNVVEUiOyBleGl0IDU7IH0KZWNobyAiPT0gbGFkZGVyID09IgpSRUNFSVBUX1JVTk5FUl9MT0c9dG9vbGNoYWluL2xvZ3MvMjAyNi0wOS0xNC1mY2RmZjg3LWNsZWFuLW1hY2hpbmUubG9nIEdDX0JJTj0iJEdDIiAuL3JlY2VpcHQuc2ggLS1qc29uLXN0ZG91dCA+IC90bXAvcmVjZWlwdC5qc29uIDI+L3RtcC9yZWNlaXB0Lmh1bWFuLmxvZwpyYz0kPwplY2hvICJMQURERVJfRVhJVD0kcmMiCmVjaG8gIi0tLS0gaHVtYW4gY2hhbm5lbCB0YWlsICg0MDApIC0tLS0iOyB0YWlsIC00MDAgL3RtcC9yZWNlaXB0Lmh1bWFuLmxvZwplY2hvICI9PSBoYXNoZXMgPT0iCnNoYTI1NnN1bSBDT05GT1JNQU5DRS1SRUNFSVBULm1kIC90bXAvcmVjZWlwdC5qc29uCmVjaG8gIj09IFJFQ0VJUFQtSlNPTi1CRUdJTiA9PSI7IGNhdCAvdG1wL3JlY2VpcHQuanNvbjsgZWNobyAiPT0gUkVDRUlQVC1KU09OLUVORCA9PSIKZWNobyAiPT0gUkVDRUlQVC1NRC1CRUdJTiA9PSI7IGNhdCBDT05GT1JNQU5DRS1SRUNFSVBULm1kOyBlY2hvICI9PSBSRUNFSVBULU1ELUVORCA9PSIKZXhpdCAkcmMK | base64 -d > /tmp/r2.sh && bash /tmp/r2.sh; echo TASK_EXIT=$?' alloc_timeout=2400 image=default status=started
+nomad-run source mode=committed head=fcdff87a427519fe431590bd84563e18f3c7b5fa archived=fcdff87a427519fe431590bd84563e18f3c7b5fa git=shipped
+--- task stderr ---
+--- task stdout ---
+Get:1 http://deb.debian.org/debian trixie InRelease [140 kB]
+Get:2 http://deb.debian.org/debian trixie-updates InRelease [47.3 kB]
+Get:3 http://deb.debian.org/debian-security trixie-security InRelease [43.4 kB]
+Get:4 http://deb.debian.org/debian trixie/main amd64 Packages [9678 kB]
+Get:5 http://deb.debian.org/debian trixie-updates/main amd64 Packages [4412 B]
+Get:6 http://deb.debian.org/debian-security trixie-security/main amd64 Packages [261 kB]
+Fetched 10.2 MB in 1s (18.4 MB/s)
+Reading package lists...
+Reading package lists...
+Building dependency tree...
+Reading state information...
+git is already the newest version (1:2.47.3-0+deb13u1).
+make is already the newest version (4.4.1-2).
+ca-certificates is already the newest version (20250419).
+g++ is already the newest version (4:14.2.0-1).
+The following additional packages will be installed:
+  bzip2 icu-devtools libcurl3t64-gnutls libcurl4t64 libdpkg-perl
+  libevent-core-2.1-7t64 libicu76 libjemalloc2 libjq1 liblsof0 libonig5
+  libtirpc-common libtirpc3t64 patch xz-utils
+Suggested packages:
+  bzip2-doc debian-keyring debian-tag2upload-keyring bzr icu-doc ed
+  diffutils-doc
+Recommended packages:
+  build-essential fakeroot libalgorithm-merge-perl libfile-fcntllock-perl
+  liblocale-gettext-perl
+The following NEW packages will be installed:
+  bzip2 dpkg-dev icu-devtools jq libdpkg-perl libevent-core-2.1-7t64
+  libicu-dev libicu76 libjemalloc2 libjq1 liblsof0 libonig5 libtirpc-common
+  libtirpc3t64 lsof netcat-openbsd patch tini tmux xz-utils
+The following packages will be upgraded:
+  curl libcurl3t64-gnutls libcurl4t64
+3 upgraded, 20 newly installed, 0 to remove and 31 not upgraded.
+Need to get 26.8 MB of archives.
+After this operation, 102 MB of additional disk space will be used.
+Get:1 http://deb.debian.org/debian trixie/main amd64 bzip2 amd64 1.0.8-6 [40.5 kB]
+Get:2 http://deb.debian.org/debian trixie/main amd64 liblsof0 amd64 4.99.4+dfsg-2 [134 kB]
+Get:3 http://deb.debian.org/debian trixie/main amd64 libtirpc-common all 1.3.6+ds-1 [11.0 kB]
+Get:4 http://deb.debian.org/debian trixie/main amd64 libtirpc3t64 amd64 1.3.6+ds-1 [83.3 kB]
+Get:5 http://deb.debian.org/debian trixie/main amd64 lsof amd64 4.99.4+dfsg-2 [316 kB]
+Get:6 http://deb.debian.org/debian trixie/main amd64 xz-utils amd64 5.8.1-1+deb13u1 [659 kB]
+Get:7 http://deb.debian.org/debian trixie/main amd64 curl amd64 8.14.1-2+deb13u5 [270 kB]
+Get:8 http://deb.debian.org/debian trixie/main amd64 libcurl4t64 amd64 8.14.1-2+deb13u5 [391 kB]
+Get:9 http://deb.debian.org/debian trixie/main amd64 libdpkg-perl all 1.22.22 [651 kB]
+Get:10 http://deb.debian.org/debian trixie/main amd64 patch amd64 2.8-2 [134 kB]
+Get:11 http://deb.debian.org/debian trixie/main amd64 dpkg-dev all 1.22.22 [1337 kB]
+Get:12 http://deb.debian.org/debian trixie/main amd64 libicu76 amd64 76.1-4 [9722 kB]
+Get:13 http://deb.debian.org/debian trixie/main amd64 icu-devtools amd64 76.1-4 [215 kB]
+Get:14 http://deb.debian.org/debian trixie/main amd64 libonig5 amd64 6.9.9-1+b1 [189 kB]
+Get:15 http://deb.debian.org/debian trixie/main amd64 libjq1 amd64 1.7.1-6+deb13u3 [168 kB]
+Get:16 http://deb.debian.org/debian trixie/main amd64 jq amd64 1.7.1-6+deb13u3 [78.8 kB]
+Get:17 http://deb.debian.org/debian trixie/main amd64 libcurl3t64-gnutls amd64 8.14.1-2+deb13u5 [384 kB]
+Get:18 http://deb.debian.org/debian-security trixie-security/main amd64 libevent-core-2.1-7t64 amd64 2.1.13-stable-1~deb13u1 [133 kB]
+Get:19 http://deb.debian.org/debian trixie/main amd64 libicu-dev amd64 76.1-4 [10.8 MB]
+Get:20 http://deb.debian.org/debian trixie/main amd64 libjemalloc2 amd64 5.3.0-3 [274 kB]
+Get:21 http://deb.debian.org/debian trixie/main amd64 netcat-openbsd amd64 1.229-1 [42.5 kB]
+Get:22 http://deb.debian.org/debian trixie/main amd64 tini amd64 0.19.0-3+b8 [280 kB]
+Get:23 http://deb.debian.org/debian trixie/main amd64 tmux amd64 3.5a-3 [490 kB]
+debconf: unable to initialize frontend: Dialog
+debconf: (TERM is not set, so the dialog frontend is not usable.)
+debconf: falling back to frontend: Readline
+debconf: unable to initialize frontend: Readline
+debconf: (This frontend requires a controlling tty.)
+debconf: falling back to frontend: Teletype
+debconf: unable to initialize frontend: Teletype
+debconf: (This frontend requires a controlling tty.)
+debconf: falling back to frontend: Noninteractive
+Fetched 26.8 MB in 0s (128 MB/s)
+Selecting previously unselected package bzip2.
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 16730 files and directories currently installed.)
+Preparing to unpack .../00-bzip2_1.0.8-6_amd64.deb ...
+Unpacking bzip2 (1.0.8-6) ...
+Selecting previously unselected package liblsof0.
+Preparing to unpack .../01-liblsof0_4.99.4+dfsg-2_amd64.deb ...
+Unpacking liblsof0 (4.99.4+dfsg-2) ...
+Selecting previously unselected package libtirpc-common.
+Preparing to unpack .../02-libtirpc-common_1.3.6+ds-1_all.deb ...
+Unpacking libtirpc-common (1.3.6+ds-1) ...
+Selecting previously unselected package libtirpc3t64:amd64.
+Preparing to unpack .../03-libtirpc3t64_1.3.6+ds-1_amd64.deb ...
+Adding 'diversion of /lib/x86_64-linux-gnu/libtirpc.so.3 to /lib/x86_64-linux-gnu/libtirpc.so.3.usr-is-merged by libtirpc3t64'
+Adding 'diversion of /lib/x86_64-linux-gnu/libtirpc.so.3.0.0 to /lib/x86_64-linux-gnu/libtirpc.so.3.0.0.usr-is-merged by libtirpc3t64'
+Unpacking libtirpc3t64:amd64 (1.3.6+ds-1) ...
+Selecting previously unselected package lsof.
+Preparing to unpack .../04-lsof_4.99.4+dfsg-2_amd64.deb ...
+Unpacking lsof (4.99.4+dfsg-2) ...
+Selecting previously unselected package xz-utils.
+Preparing to unpack .../05-xz-utils_5.8.1-1+deb13u1_amd64.deb ...
+Unpacking xz-utils (5.8.1-1+deb13u1) ...
+Preparing to unpack .../06-curl_8.14.1-2+deb13u5_amd64.deb ...
+Unpacking curl (8.14.1-2+deb13u5) over (8.14.1-2+deb13u4) ...
+Preparing to unpack .../07-libcurl4t64_8.14.1-2+deb13u5_amd64.deb ...
+Unpacking libcurl4t64:amd64 (8.14.1-2+deb13u5) over (8.14.1-2+deb13u4) ...
+Selecting previously unselected package libdpkg-perl.
+Preparing to unpack .../08-libdpkg-perl_1.22.22_all.deb ...
+Unpacking libdpkg-perl (1.22.22) ...
+Selecting previously unselected package patch.
+Preparing to unpack .../09-patch_2.8-2_amd64.deb ...
+Unpacking patch (2.8-2) ...
+Selecting previously unselected package dpkg-dev.
+Preparing to unpack .../10-dpkg-dev_1.22.22_all.deb ...
+Unpacking dpkg-dev (1.22.22) ...
+Selecting previously unselected package libicu76:amd64.
+Preparing to unpack .../11-libicu76_76.1-4_amd64.deb ...
+Unpacking libicu76:amd64 (76.1-4) ...
+Selecting previously unselected package icu-devtools.
+Preparing to unpack .../12-icu-devtools_76.1-4_amd64.deb ...
+Unpacking icu-devtools (76.1-4) ...
+Selecting previously unselected package libonig5:amd64.
+Preparing to unpack .../13-libonig5_6.9.9-1+b1_amd64.deb ...
+Unpacking libonig5:amd64 (6.9.9-1+b1) ...
+Selecting previously unselected package libjq1:amd64.
+Preparing to unpack .../14-libjq1_1.7.1-6+deb13u3_amd64.deb ...
+Unpacking libjq1:amd64 (1.7.1-6+deb13u3) ...
+Selecting previously unselected package jq.
+Preparing to unpack .../15-jq_1.7.1-6+deb13u3_amd64.deb ...
+Unpacking jq (1.7.1-6+deb13u3) ...
+Preparing to unpack .../16-libcurl3t64-gnutls_8.14.1-2+deb13u5_amd64.deb ...
+Unpacking libcurl3t64-gnutls:amd64 (8.14.1-2+deb13u5) over (8.14.1-2+deb13u4) ...
+Selecting previously unselected package libevent-core-2.1-7t64:amd64.
+Preparing to unpack .../17-libevent-core-2.1-7t64_2.1.13-stable-1~deb13u1_amd64.deb ...
+Unpacking libevent-core-2.1-7t64:amd64 (2.1.13-stable-1~deb13u1) ...
+Selecting previously unselected package libicu-dev:amd64.
+Preparing to unpack .../18-libicu-dev_76.1-4_amd64.deb ...
+Unpacking libicu-dev:amd64 (76.1-4) ...
+Selecting previously unselected package libjemalloc2:amd64.
+Preparing to unpack .../19-libjemalloc2_5.3.0-3_amd64.deb ...
+Unpacking libjemalloc2:amd64 (5.3.0-3) ...
+Selecting previously unselected package netcat-openbsd.
+Preparing to unpack .../20-netcat-openbsd_1.229-1_amd64.deb ...
+Unpacking netcat-openbsd (1.229-1) ...
+Selecting previously unselected package tini.
+Preparing to unpack .../21-tini_0.19.0-3+b8_amd64.deb ...
+Unpacking tini (0.19.0-3+b8) ...
+Selecting previously unselected package tmux.
+Preparing to unpack .../22-tmux_3.5a-3_amd64.deb ...
+Unpacking tmux (3.5a-3) ...
+Setting up libcurl4t64:amd64 (8.14.1-2+deb13u5) ...
+Setting up liblsof0 (4.99.4+dfsg-2) ...
+Setting up libtirpc-common (1.3.6+ds-1) ...
+Setting up netcat-openbsd (1.229-1) ...
+update-alternatives: using /bin/nc.openbsd to provide /bin/nc (nc) in auto mode
+Setting up libcurl3t64-gnutls:amd64 (8.14.1-2+deb13u5) ...
+Setting up libjemalloc2:amd64 (5.3.0-3) ...
+Setting up bzip2 (1.0.8-6) ...
+Setting up xz-utils (5.8.1-1+deb13u1) ...
+update-alternatives: using /usr/bin/xz to provide /usr/bin/lzma (lzma) in auto mode
+Setting up tini (0.19.0-3+b8) ...
+Setting up patch (2.8-2) ...
+Setting up libdpkg-perl (1.22.22) ...
+Setting up libevent-core-2.1-7t64:amd64 (2.1.13-stable-1~deb13u1) ...
+Setting up curl (8.14.1-2+deb13u5) ...
+Setting up libicu76:amd64 (76.1-4) ...
+Setting up tmux (3.5a-3) ...
+Setting up libonig5:amd64 (6.9.9-1+b1) ...
+Setting up libtirpc3t64:amd64 (1.3.6+ds-1) ...
+Setting up libjq1:amd64 (1.7.1-6+deb13u3) ...
+Setting up dpkg-dev (1.22.22) ...
+Setting up icu-devtools (76.1-4) ...
+Setting up lsof (4.99.4+dfsg-2) ...
+Setting up jq (1.7.1-6+deb13u3) ...
+Setting up libicu-dev:amd64 (76.1-4) ...
+Processing triggers for debianutils (5.23.2) ...
+Processing triggers for libc-bin (2.41-12+deb13u3) ...
+builder repo=/Users/home/westlands/work/gc-runtime-nomad-main rev=fcdff87a427519fe431590bd84563e18f3c7b5fa cpu=6000 mem=8192 artifact_sha256=2cb9eca9e12b6525b6634273466edbee454001bd271a6cc9f527de7243932724 node=haus-ubuntu
+== tree provenance ==
+fcdff87a427519fe431590bd84563e18f3c7b5fa
+fcdff87 feat(receipt): a conformance receipt can cite the log it was captured in
+== gc stage (published pin 75fbc2cf5b) ==
+gc_sha_want=0b9fd8ca11613857d613fefd964d5dc99923da4e5a8a0497bcceaa2294d48d51
+gc_sha_got=0b9fd8ca11613857d613fefd964d5dc99923da4e5a8a0497bcceaa2294d48d51
+== icu74 stage (published gc is built on ubuntu:24.04 ABI; builder image is trixie/icu76) ==
+icu_deb=libicu74_74.2-1ubuntu3_amd64.deb
+== gc identity as the receipt will attribute it ==
+{"commit":"75fbc2cf5b","date":"unknown","long":false,"ok":true,"schema_version":"1","version":"dev"}
+== ladder ==
+LADDER_EXIT=0
+---- human channel tail (400) ----
+receipt: L0-L2 — runtime module (go vet + go test)
+    go: downloading github.com/hashicorp/nomad/api v0.0.0-20260821123358-aa026cc99cfb
+    go: downloading github.com/gorilla/websocket v1.5.3
+    go: downloading github.com/go-viper/mapstructure/v2 v2.5.0
+    go: downloading github.com/hashicorp/cronexpr v1.1.3
+    go: downloading github.com/hashicorp/go-cleanhttp v0.5.2
+    go: downloading github.com/hashicorp/go-rootcerts v1.0.2
+    ok  	github.com/gastownhall/gc-runtime-nomad	15.586s
+receipt: L0-L2 — fakenomad module (go vet + go test)
+    ok  	github.com/gastownhall/gc-runtime-nomad/fakenomad	1.401s
+    ?   	github.com/gastownhall/gc-runtime-nomad/fakenomad/cmd/fakenomad	[no test files]
+receipt: L0-L2 — drills module (go vet + go test)
+    ?   	github.com/gastownhall/gc-runtime-nomad/drills/cmd/reconcilersim-drill	[no test files]
+    ok  	github.com/gastownhall/gc-runtime-nomad/drills/reconcilersim	1.042s
+receipt: module coverage — every go.mod has a leg
+receipt: secrets-grep (canary receipt — zero planted-canary hits)
+    === RUN   TestM3StagingReceiptNoCanaryLeak
+    gc-runtime-nomad: provision/start "sess-canary-cli": Meta binding recovery not used: sidecar binding recovery: no matching child for session "sess-canary-cli" in parent "gc-sessions"
+    gc-runtime-nomad: provision/start "sess-canary-cli": Meta binding recovery not used: sidecar binding recovery: no matching child for session "sess-canary-cli" in parent "gc-sessions"
+    gc-runtime-nomad: staging the argument-named file "/bin/sh" for "sess-canary-cli" failed, so the box will report it missing: tar exited 2: 
+    --- PASS: TestM3StagingReceiptNoCanaryLeak (0.07s)
+    PASS
+    ok  	github.com/gastownhall/gc-runtime-nomad	0.072s
+receipt: env probe (env.workspace staging)
+    === RUN   TestM3StagingReceiptWorkspaceProbe
+    --- PASS: TestM3StagingReceiptWorkspaceProbe (0.03s)
+    PASS
+    ok  	github.com/gastownhall/gc-runtime-nomad	0.029s
+receipt: check + golden suite + retry idempotency (gc runtime check / gc runtime conformance)
+    conformance: building gc-runtime-nomad + fakenomad
+    conformance: starting fake Nomad server
+    conformance: fake Nomad server at http://127.0.0.1:42727
+    warning: session logs will not be shipped (GC_NOMAD_LOG_SINK unset)
+    warning: the agent image "gc-runtime-nomad-conformance-placeholder:0" names no registry, so it can only ever resolve from a node's LOCAL image cache. Nothing can pull it: a bare name resolves against Docker Hub, which will not have a privately built agent image. Every session is therefore pinned to whichever nodes already hold a copy, and that pin is INVISIBLE — the jobspec carries no constraint for it, the scheduler places freely, and the allocation fails to start on any other node. For a cluster that should be able to place a session anywhere, push the image to a registry your clients can reach and reference it by that name; otherwise pre-load it on every eligible node and expect to redo that on every image change.
+    diagnostics: /tmp/tmp.8yGIrTspzi/diagnostics.log (nothing recorded yet)
+    warning: the gc capability gate is disabled (GC_NOMAD_SKIP_GC_CAPABILITY_GATE is set). This pack is NOT checking whether the gc on PATH can claim work from inside an allocation. Correct for an offline harness; in a real deployment it restores the failure the gate exists to prevent — a box that comes up, looks healthy, and drains no_work forever.
+    declared minimum: 6 gc behaviour families are required (docs/PIN-DEPENDENCIES.md Tier 1). There is no version to compare — every build of the required lineage reports the literal string "dev" from `gc version`, so the declaration is a CAPABILITY set.
+      verified present: remote-worker-lifecycle
+      DECLARED BUT NOT VERIFIABLE by this pack (5) — a green check above does NOT mean these are present:
+        - remote-worker-env-city-target          https://github.com/gastownhall/gascity/pull/5864
+          without it: the in-box gc cannot resolve the city it was told to use
+        - remote-worker-claim-dispatch           https://github.com/gastownhall/gascity/pull/6146
+          without it: the remote claim bypasses the conditional fence, so two seats can each believe they hold the same bead and the lost update is silent
+        - remote-worker-session-identity         https://github.com/gastownhall/gascity/pull/6146
+          without it: a typed close of a hook-claimed bead from inside a box is refused
+        - policy-conditional-writer-forwarding   https://github.com/gastownhall/gascity/pull/6146
+          without it: remote claim and heartbeat writes are unfenced
+        - remote-step-accept-list                unfiled
+          without it: a step inside a box cannot stamp its own outcome before closing, so terminal bookkeeping is lost and the work is re-run
+    warning: session boxes will declare no dns stanza and inherit the client host's resolv.conf (GC_NOMAD_DNS_SERVERS unset) — on a systemd-resolved host that stub resolver is unreachable from a bridge alloc
+    conformance: gc runtime check
+    PASS protocol handshake: version 0, capabilities [proc.provision proc.exec]; ignoring unknown capabilities [proc.provision proc.exec]
+    PASS lifecycle: start
+    PASS lifecycle: is-running after start
+    SKIP optional: is-attached: not implemented (exit 2)
+    SKIP optional: get-last-activity: not implemented (exit 2)
+    PASS optional: process-alive
+    PASS optional: nudge
+    SKIP optional: metadata round-trip: set-meta not implemented (exit 2)
+    PASS optional: peek
+    PASS optional: list-running
+    PASS lifecycle: stop
+    PASS lifecycle: is-running after stop
+    PASS lifecycle: stop idempotent
+    PASS optional: interrupt
+    
+    14 checks: 11 passed, 0 failed, 3 skipped
+    conformance: gc runtime conformance
+    PASS RPP-PROTOCOL-001  protocol op returns a well-formed handshake (version >= 0, parseable capabilities) or is absent (exit 2 = v0, no caps) — version 0, capabilities [proc.provision proc.exec]
+    PASS RPP-LIFECYCLE-001  start creates a session that is-running reports true — is-running after start = true
+    PASS RPP-LIFECYCLE-002  start on an already-running session fails (exit 1), never silently succeeds — duplicate start rejected
+    PASS RPP-LIFECYCLE-003  stop makes is-running report false — is-running after stop = false
+    PASS RPP-LIFECYCLE-004  stop on a missing session succeeds (idempotent) — stop idempotent on a missing session
+    PASS RPP-LIFECYCLE-005  is-running on a never-started session reports false — is-running for a never-started session = false
+    PASS RPP-CONN-001  exec runs a command in the box: command on stdin, combined output on stdout, op exit == command exit (absent = SKIP; becomes required when gc drives its own input/observation over exec) — exec runs the command in the box; output and exit code propagate
+    PASS RPP-PROVISION-001  provision creates a reachable box WITHOUT launching the agent: after provision, is-running reports false yet the box is exec-able, so the controller launches the agent over exec (absent = SKIP; a welded start pack launches in one shot) — provision creates a reachable box without launching the agent
+    
+    8 requirements: 8 passed, 0 failed, 0 skipped
+    conformance: provision/start retry idempotency
+    warning: the gc capability gate is disabled (GC_NOMAD_SKIP_GC_CAPABILITY_GATE is set). This pack is NOT checking whether the gc on PATH can claim work from inside an allocation. Correct for an offline harness; in a real deployment it restores the failure the gate exists to prevent — a box that comes up, looks healthy, and drains no_work forever.
+    gc-runtime-nomad: provision/start "gc-rpp-retry-6189": Meta binding recovery not used: sidecar binding recovery: no matching child for session "gc-rpp-retry-6189" in parent "gc-sessions"
+    gc-runtime-nomad: provision/start "gc-rpp-retry-6189": Meta binding recovery not used: sidecar binding recovery: no matching child for session "gc-rpp-retry-6189" in parent "gc-sessions"
+    warning: the gc capability gate is disabled (GC_NOMAD_SKIP_GC_CAPABILITY_GATE is set). This pack is NOT checking whether the gc on PATH can claim work from inside an allocation. Correct for an offline harness; in a real deployment it restores the failure the gate exists to prevent — a box that comes up, looks healthy, and drains no_work forever.
+    gc-runtime-nomad: provision "gc-rpp-retry-6189": path=adopt — binding age 0s within the limit 30m0s and its agent is absent: re-driving this pack's own half against the box it already made
+    warning: the gc capability gate is disabled (GC_NOMAD_SKIP_GC_CAPABILITY_GATE is set). This pack is NOT checking whether the gc on PATH can claim work from inside an allocation. Correct for an offline harness; in a real deployment it restores the failure the gate exists to prevent — a box that comes up, looks healthy, and drains no_work forever.
+    gc-runtime-nomad: start "gc-rpp-retry-6189": path=adopt — binding age 0s within the limit 30m0s and its agent is absent: re-driving this pack's own half against the box it already made
+    retry idempotency: 1 passed, 0 failed, 0 skipped
+
+receipt written to /local/repo/unpacked/CONFORMANCE-RECEIPT.md
+== hashes ==
+8bda74101638c83cc7d9176d344471fce5f0042cbf42c6da0ac877a36527bc93  CONFORMANCE-RECEIPT.md
+a0e8220960ca14095cdb4df321b479ccfe80e29c79bc3eed0a1ad9a104308c1b  /tmp/receipt.json
+== RECEIPT-JSON-BEGIN ==
+{"schema":"/2","generated":"2026-09-14T09:09:32Z","pack_commit":"fcdff87a427519fe431590bd84563e18f3c7b5fa","gc_bin":"/tmp/gc-receipt-75fbc2cf5b","gc_version":"dev","gc_commit":"75fbc2cf5b","gc_sha256":"0b9fd8ca11613857d613fefd964d5dc99923da4e5a8a0497bcceaa2294d48d51","conformance_exit":0,"rows":{"check":{"passed":11,"failed":0,"skipped":3,"status":"PASS"},"golden":{"passed":8,"failed":0,"skipped":0,"status":"PASS"},"retry_idempotency":{"passed":1,"failed":0,"skipped":0,"status":"PASS"},"env_probes":{"passed":1,"failed":0,"skipped":0,"status":"PASS"},"l0l2":{"passed":1,"failed":0,"skipped":0,"status":"PASS"},"secrets_grep":{"passed":1,"failed":0,"skipped":0,"status":"PASS"},"provenance":{"passed":1,"failed":0,"skipped":0,"status":"PASS"}},"status":"PASS"}
+== RECEIPT-JSON-END ==
+== RECEIPT-MD-BEGIN ==
+# Phase-1 conformance receipt
+
+Commit: `fcdff87a427519fe431590bd84563e18f3c7b5fa`
+gc: `/tmp/gc-receipt-75fbc2cf5b` — commit `75fbc2cf5b`, version `dev`, sha256 `0b9fd8ca11613857d613fefd964d5dc99923da4e5a8a0497bcceaa2294d48d51`
+Generated: 2026-09-14T09:09:32Z
+Conformance ladder exit: 0
+Runner log: `toolchain/logs/2026-09-14-fcdff87-clean-machine.log`
+
+Full offline ladder — no live Nomad cluster or network required. A row
+reading FAIL means the ladder is red at this commit; re-run `./receipt.sh`
+after a fix and regenerate this file. Fixing a red ladder step is out of
+scope for this receipt — bounce back to the owning bead.
+
+The rows report what `gc runtime check` / `gc runtime conformance` said
+and what the ladder's own rungs did; `receipt.sh` exits non-zero if any row
+is FAIL **or** the ladder exited non-zero. Regenerate both twins after any
+pin roll or pack release — a receipt whose gc commit no longer matches the
+pin is stale by construction:
+
+```
+GC_BIN=$(command -v gc) ./receipt.sh
+GC_BIN=$(command -v gc) ./receipt.sh --json-stdout > CONFORMANCE-RECEIPT.json
+```
+
+| Ladder step | Result | Evidence |
+|---|---|---|
+| check | PASS | `gc runtime check` — 14 checks: 11 passed, 0 failed, 3 skipped |
+| golden suite | PASS | `gc runtime conformance` — 8 requirements: 8 passed, 0 failed, 0 skipped |
+| retry idempotency | PASS | provision/start re-drive rung — retry idempotency: 1 passed, 0 failed, 0 skipped |
+| env probes | PASS | `go test -run TestM3StagingReceiptWorkspaceProbe ./runtime` |
+| L0-L2 | PASS | `go vet ./... && go test ./...` — runtime + fakenomad + drills modules, plus a check that every go.mod has a leg |
+| secrets-grep | PASS | `go test -run TestM3StagingReceiptNoCanaryLeak ./runtime` |
+| provenance | PASS | `gc version --json` + sha256 of the resolved GC_BIN |
+== RECEIPT-MD-END ==
+TASK_EXIT=0
+nomad-run job=builders/dispatch-1789376947-c29e8433 alloc=777a1df3-536a-0828-ecf1-b27ca0434e51 node=haus-ubuntu exit_code=0 status=observed receipt=/tmp/m2-log-b/20260914T090907Z-builders-dispatch-1789376947-c29e8433.log
