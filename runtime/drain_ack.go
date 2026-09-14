@@ -36,6 +36,51 @@ import (
 // stay interactive between atoms.
 const lifecycleOneShot = "one_shot"
 
+// saveLifecyclePending persists cfg.Lifecycle onto sessionName's binding at
+// stage time — BEFORE any launch — independent of whether a startup prompt
+// is owed. It exists because confirmLaunched's own lifecycleValue
+// parameter (ops.go) is not enough on its own: gc's canonical way to run a
+// pool's SECOND and later atom in the SAME box is opExec's separable
+// transport-launch handshake (markTransportLaunched), which runs with NO
+// stageConfig of its own — gc's transport argv carries only the tmux
+// handshake — and rebuilds one only from binding.PromptPending, which
+// savePromptPending populates from cfg.promptSubset(). That subset is
+// deliberately narrow (Command/Nudge/ProcessNames/ReadyPromptPrefix/
+// ReadyDelayMs — the prompt-delivery fields the transport path exists to
+// re-supply) and does not carry Lifecycle, so a session relaunched through
+// that path alone never had a Lifecycle to hand confirmLaunched — measured
+// live on a one_shot worker-local pool: `gc hook --drain-ack` succeeded,
+// but the binding never carried a "lifecycle" key at all, so
+// reapDrainedOneShot's own gate on it could never fire.
+//
+// gc DOES send the value — TestStageConfigCarriesEveryGcLaunchWireField
+// pins a captured `"lifecycle": "one_shot"` wire body — so the fix is
+// carrying gc's own field forward, not inventing one: every call that
+// stages a session (stageTracked, hit by both provision and start, ahead
+// of every launch shape) records it here, once, so it is already on the
+// binding by the time ANY later launch path — direct or transport — runs.
+// confirmLaunched's own "only overwrite on a non-empty value" rule then
+// preserves it even when a later transport-launch call has nothing to
+// send.
+func (l *lifecycle) saveLifecyclePending(sessionName string, cfg stageConfig) error {
+	lifecycleValue := strings.TrimSpace(cfg.Lifecycle)
+	if lifecycleValue == "" {
+		return nil
+	}
+	b, ok, err := l.sidecar.load(sessionName)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("session %q binding vanished before its lifecycle could be recorded", sessionName)
+	}
+	if b.Lifecycle == lifecycleValue {
+		return nil
+	}
+	b.Lifecycle = lifecycleValue
+	return l.sidecar.save(*b)
+}
+
 // drainAckMarkerEnv lets a deployment override the regex opIsRunning greps
 // the captured pane transcript for. The default matches the claim-free
 // remote ack's own `--json` success shape (a `"drain_ack":true` field —

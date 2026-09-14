@@ -2268,6 +2268,9 @@ func (l *lifecycle) stageTracked(ctx context.Context, sessionName string, cfg st
 	if err := l.savePromptPending(sessionName, cfg); err != nil {
 		return err
 	}
+	if err := l.saveLifecyclePending(sessionName, cfg); err != nil {
+		return err
+	}
 	if !stagesAnything(cfg) && l.agentImage == "" {
 		return l.stage(ctx, sessionName, cfg)
 	}

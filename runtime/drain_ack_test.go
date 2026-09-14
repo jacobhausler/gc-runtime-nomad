@@ -70,6 +70,69 @@ func TestOpIsRunningRetiresOneShotSessionAfterDrainAck(t *testing.T) {
 	}
 }
 
+// TestTransportLaunchCarriesLifecycleFromProvisionedConfig is the red/green
+// for the gap measured live on a worker-local one_shot pool: `gc hook
+// --drain-ack` succeeded in the box, but the binding never carried a
+// "lifecycle" key at all, so reapDrainedOneShot's own gate on it could
+// never fire. Root cause: gc's canonical way to launch a pool session's
+// SECOND and later atom in the SAME box is opExec's separable
+// transport-launch handshake (markTransportLaunched), which runs with NO
+// stageConfig of its own and used to rebuild one only from
+// binding.PromptPending — a subset that deliberately excludes Lifecycle.
+// A session provisioned with a lifecycle but no startup prompt (pool
+// templates need not carry one) therefore never had Lifecycle on its
+// binding by the time this path ran. saveLifecyclePending closes that gap
+// by recording gc's own wire Lifecycle value at stage/provision time,
+// before ANY launch path.
+func TestTransportLaunchCarriesLifecycleFromProvisionedConfig(t *testing.T) {
+	l, _ := newTestLifecycle(t)
+	ctx := context.Background()
+	const session = "sess-transport-lifecycle"
+
+	// Provision with a lifecycle but deliberately NO Nudge/Command — the
+	// exact shape that leaves savePromptPending's own PromptPending a
+	// no-op, so this reproduces the live gap rather than papering over it
+	// with a prompt that would have carried a (still Lifecycle-less)
+	// PromptPending down the transport path anyway.
+	if err := l.opProvisionWithConfig(ctx, session, stageConfig{Lifecycle: lifecycleOneShot}); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+
+	// gc's canonical separable-transport launch argv (the v0 exec wire's
+	// POSIX-quoted tmux command, same shape TestOpExecConfirmsASeparableTransportLaunch
+	// pins) — the ONLY launch this session gets, exactly as a pool
+	// session's later atoms are relaunched in production.
+	launch := []string{"/bin/sh", "-c", `'tmux' 'new-session' '-d' '-s' 'main' '` + testPaneCommand + `'`}
+	if code, out, err := l.opExec(ctx, session, launch); err != nil || code != 0 {
+		t.Fatalf("exec transport launch = (%d, %q, %v), want (0, _, nil)", code, out, err)
+	}
+
+	b, ok, err := l.sidecar.load(session)
+	if err != nil || !ok {
+		t.Fatalf("sidecar.load after transport launch = (%+v, %v, %v)", b, ok, err)
+	}
+	if b.Lifecycle != lifecycleOneShot {
+		t.Fatalf("binding.Lifecycle after a transport-only launch = %q, want %q — gc's own provisioned "+
+			"lifecycle must survive a launch path that carries no stageConfig of its own", b.Lifecycle, lifecycleOneShot)
+	}
+
+	// Full reproduction: the drain-ack retirement this binding exists for
+	// must actually fire down this exact path too, not only through a
+	// direct start() call.
+	allocs, _, err := l.client.listAllocsForJob(ctx, b.ChildJobID, 0, 0)
+	if err != nil || len(allocs) != 1 {
+		t.Fatalf("listAllocsForJob(%q) = (%v, %v), want one allocation", b.ChildJobID, allocs, err)
+	}
+	allocID := allocs[0].ID
+	writeAck := `mkdir -p "$NOMAD_ALLOC_DIR/data" && printf '{"ok":true,"drain_ack":true}\n' >> "$NOMAD_ALLOC_DIR/data/agent.stdout"`
+	if exitCode, out, err := l.client.execAlloc(ctx, allocID, execTaskName, []string{"/bin/sh", "-c", writeAck}); err != nil || exitCode != 0 {
+		t.Fatalf("writing drain-ack fixture: exit=%d output=%q err=%v", exitCode, out, err)
+	}
+	if running, err := l.opIsRunning(ctx, session); err != nil || running {
+		t.Fatalf("is-running after drain-ack via a transport-launched session = (%v, %v), want (false, nil)", running, err)
+	}
+}
+
 // TestOpIsRunningIgnoresDrainAckMarkerForPoolLifecycle proves the mechanism
 // is gated on lifecycle==one_shot and cannot misfire on an ordinary pool
 // session that happens to have printed the same text (a worker discussing
