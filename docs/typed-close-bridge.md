@@ -21,16 +21,15 @@ no seam to add one behind. That is unchanged by anything below.
   one call stamps the typed outcome fields as bead metadata and closes in the
   same request.
 - **The remote worker close handler now enforces the ADR-0009 ancestry
-  gate.** As of upstream follow-up commit `e156d730c` on PR #6146 (gate-0
-  evidence: `ops/receipts/edge/2026-09-14-cr-347546-remote-worker-close-adr0009.md`
-  in the westlands city repo), a remote typed close naming `shipped` with a
-  commit is checked against the bead-owned checkout the same way a local
-  close already was — an unreachable commit is refused (`409`) under
-  `GC_WORK_RECORD_ENFORCE`, and a resolved bead with no hosted checkout closes
-  with an explicit "reachability unverified" log rather than a silent pass.
-  Before that follow-up, the remote path stamped and closed without ever
-  calling the shared ancestry predicate the local gate always ran — a real
-  gap, not a documented deferral, per that receipt's Gate 0 verdict.
+  gate.** As of upstream follow-up commit `e156d730c` on PR #6146, a remote
+  typed close naming `shipped` with a commit is checked against the
+  bead-owned checkout the same way a local close already was — an
+  unreachable commit is refused (`409`) under `GC_WORK_RECORD_ENFORCE`, and a
+  resolved bead with no hosted checkout closes with an explicit "reachability
+  unverified" log rather than a silent pass. Before that follow-up, the
+  remote path stamped and closed without ever calling the shared ancestry
+  predicate the local gate always ran — a real gap, not a documented
+  deferral.
 
 ## What is NOT served remotely today
 
