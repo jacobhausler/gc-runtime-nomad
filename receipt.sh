@@ -31,6 +31,12 @@
 # stamped here from `gc version --json` + the binary digest; a run that cannot
 # name its gc fails the provenance row rather than emitting unattributed rows.
 #
+# RECEIPT_RUNNER_LOG (optional) is a citation and nothing more: when it names
+# the committed path this run's own log lives at -- a CI log file, a builder
+# wrapper's receipt -- the receipt prints that path. It gates no row and
+# changes no result; a run with no citable log reads exactly as it did
+# before. It exists because a ladder run whose log was written somewhere
+# git never sees certifies nothing an adopter can go read.
 # Requires `gc` on PATH (see conformance.sh) and `jq`. Override with GC_BIN.
 set -uo pipefail
 
@@ -308,6 +314,11 @@ out="$here/CONFORMANCE-RECEIPT.md"
   echo "gc: \`${gc_path:-unresolved}\` — commit \`${gc_commit:-unknown}\`, version \`${gc_version:-unknown}\`, sha256 \`${gc_sha256:-unknown}\`"
   echo "Generated: $ts"
   echo "Conformance ladder exit: $conformance_rc"
+  # Citation only (see RECEIPT_RUNNER_LOG in the header): the receipt names a
+  # log an adopter can actually open, or says nothing.
+  if [ -n "${RECEIPT_RUNNER_LOG:-}" ]; then
+    echo "Runner log: \`$RECEIPT_RUNNER_LOG\`"
+  fi
   echo
   echo "Full offline ladder — no live Nomad cluster or network required. A row"
   echo "reading FAIL means the ladder is red at this commit; re-run \`./receipt.sh\`"
