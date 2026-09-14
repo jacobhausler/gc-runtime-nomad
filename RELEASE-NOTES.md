@@ -17,6 +17,62 @@ deployment-owned bootstrap that used to be able to stand in front of it is gone.
   sentences in `toolchain/BUILD-RECEIPT.md` and `toolchain/TOOLCHAIN.lock` name
   a tag to point back at, not a shape to drop into.
 
+## Current with HEAD `abce9e9` (2026-09-14)
+
+Five commits landed after the notes above were cut. None moves the jobspec, the
+start wire, or an environment contract, so the version stays `1.0.7` -- the
+version an installer reads is pinned to this section by
+`TestPackVersionMatchesTheTopReleaseNote`, and a new section here would be a
+claim that the shipped contract moved.
+
+- **The lane-debug skill ships with the pack** (`c0bba37`). `skills/` now
+  carries two: the box-level `gc-nomad-debug`, and the lane-level
+  `gc-nomad-lane-debug` -- the seven-layer walk (queue, demand, seats, boxes,
+  pane, binding, alloc events) that names which layer's evidence is lying
+  before anyone reaches into a box. It arrived as a same-name copy and this
+  repo's own leakage guard rejected it on sight (estate ticket ids, a `tail` of
+  one machine's health log, a deployment-local helper), so it was rewritten as
+  the measurements an adopter can resolve, with the deployment-local step
+  replaced by the native fallback spelled out -- read `gc.routed_to` and the
+  `hold:` labels off the beads. `gc` registers it as
+  `runtime-nomad.gc-nomad-lane-debug`, the pack-qualified name, which is the
+  proof a pack consumer actually receives it.
+- **The one pasteable build recipe stopped producing an image that cannot run
+  the pack** (`0e2b666`). README's Part 2 step 1 was `build --published`, and
+  `--published` builds against the published upstream `gc`, which carries none
+  of the required worker families: a seat built from that image comes up, looks
+  healthy, and drains `no_work` forever. The recipe now uses
+  `--gc-release=<commit>`, equally portable and actually runnable;
+  `build-image.sh` says `CANNOT RUN THIS PACK` where it used to read "may be
+  older than the live pin"; and `TestNoRunnableBlockBuildsWithPublished`
+  asserts the flag never appears on a `build-image.sh` command inside a fenced
+  shell block in `README.md` or `COMPATIBILITY.md` again.
+- **Two config keys a stock `gc` drops in silence are named instead of
+  instructed** (`9343b6d`). `runtime_provider` and `runtime_env` are both
+  pin-only -- zero occurrences of either TOML key at the upstream base -- and
+  TOML decoding drops an unknown key without an error, so an instruction naming
+  one produces the darkest failure this pack has: the config is accepted, the
+  key evaporates, the lane comes up looking configured. The env half is
+  delivered at base by `[providers.<name>.env]`, traced hop by hop in
+  `docs/PIN-DEPENDENCIES.md`; the selection half is a real all-or-nothing
+  limitation of an unpatched `gc`, and it is now stated where an adopter would
+  otherwise discover it.
+- **An artifact that will not fetch names its cause, and whose fix it is**
+  (`185a81f`). Nomad fetches and checksums artifacts before the task runs, so
+  an allocation that died fetching has executed nothing -- no image, no shell,
+  no `gc`, no agent -- and the event read as a start fault, sending operators
+  into the one place where nothing was wrong. The diagnosis now separates the
+  two artifact URLs this pack declares (the image tarball from
+  `GC_NOMAD_AGENT_IMAGE_TAR`, the operator's to fix; the `gc` download, derived
+  from the commit of the `gc` driving the pack, configured nowhere, fixable only
+  on the publishing side for one exact commit) and separates a 404 from a
+  checksum mismatch, because "publish it" is the wrong advice when the bytes
+  arrived and failed verification.
+- **A conformance receipt can cite the log it was captured in** (`fcdff87`), and
+  the offline-ladder twins are regenerated here with that runner log committed
+  in-tree (`abce9e9`), so the receipt's gate can be read out of the shipped
+  artifact instead of out of a machine. Citation only: it gates no row, changes
+  no status, and a run given no log reads as it did before.
 # v1.0.6
 
 - Nomad transport now honors the standard `NOMAD_CACERT`,

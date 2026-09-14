@@ -71,4 +71,10 @@ Token custody is by path: token values live in custody files (mode 0600, owner r
 - Repo: `github.com/jacobhausler/gc-runtime-nomad` (extracted, with history, from the `runtime-nomad/` subtree of the `jacobhausler/gascity-packs` fork on 2026-08-26; self-serve registry publish per `gascity#5606` needs its own repo, not a subtree of a fork).
 - Registry name: `jacobhausler/runtime-nomad`. Co-maintainers: Jacob Hausler (repo owner) and atbrace, per the maintenance-ownership offer accepted upstream in `gascity#5606` Q1 -- offline conformance runs in this repo's own CI against a fake Nomad API; no `gascity-packs` PR.
 - Issue tracker: this repository's issues.
-- The `nomad-runtime-debug` skill, once it exists, is the entry point for debugging the pack and the cluster.
+- Two skills ship in `skills/` and are the entry points for debugging:
+  `gc-nomad-debug` for one box that came up, looks healthy, and does nothing,
+  and `gc-nomad-lane-debug` for a lane that is not being served at all (no
+  seats launching, work routed but unworked, a seat that never answers). `gc`
+  discovers a pack's skills by convention from `<packDir>/skills/`, so both
+  arrive with the installed pack and neither needs a declaration; each names
+  `gc-runtime-nomad check` as the first instruction.

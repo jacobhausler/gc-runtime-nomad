@@ -112,6 +112,7 @@ runtime-nomad/
 ├── pack.toml       # declares [runtimes.nomad] -> gc-runtime-nomad
 ├── install.sh      # installs the executable onto PATH
 ├── conformance.sh  # gc runtime check + gc runtime conformance against an in-memory fake Nomad API
+├── skills/         # pack-shipped diagnostics gc discovers by convention from <packDir>/skills/ (gc-nomad-debug, gc-nomad-lane-debug) — see §Debugging
 ├── toolchain/      # checksum-pinned session-toolchain build input (TOOLCHAIN.lock + Dockerfile + build-image.sh + BUILD-RECEIPT.md) — see §Part 2
 ├── fakenomad/      # nested Go module: in-memory fake of the Nomad API this pack calls
 │   ├── go.mod      # module github.com/gastownhall/gc-runtime-nomad/fakenomad
@@ -606,11 +607,16 @@ alloc the two look identical.
 
 ## Debugging
 
-The pack ships its own diagnostic skill at
-[`skills/gc-nomad-debug/SKILL.md`](skills/gc-nomad-debug/SKILL.md). `gc`
-discovers a pack's skills by convention from `<packDir>/skills/`, so it needs
-no declaration and arrives with the pack — an adopter gets the diagnosis, not
-just the runtime.
+The pack ships its own diagnostic skills:
+[`skills/gc-nomad-debug/SKILL.md`](skills/gc-nomad-debug/SKILL.md) diagnoses one
+box that came up, looks healthy, and does nothing, and
+[`skills/gc-nomad-lane-debug/SKILL.md`](skills/gc-nomad-lane-debug/SKILL.md)
+diagnoses a lane that is not being served at all -- no seats launching, work
+sitting routed but unworked, a seat that never answers -- by walking queue,
+demand, seats, boxes, pane, binding, and alloc events in order and naming the
+layer whose evidence is lying. `gc` discovers a pack's skills by convention from
+`<packDir>/skills/`, so neither needs a declaration and both arrive with the
+pack — an adopter gets the diagnosis, not just the runtime.
 
 It exists because the failure this runtime produces is almost never a crash:
 it is a box that comes up, looks healthy, and does nothing. The first
@@ -649,12 +655,18 @@ GC_BIN=$(command -v gc) ./receipt.sh
 `receipt.sh` runs the full offline ladder in one hermetic pass — `check`
 (`gc runtime check`), the golden suite (`gc runtime conformance`), the
 env probe (`TestM3StagingReceiptWorkspaceProbe`), L0-L2
-(`go vet`/`go test` across the `runtime` and `fakenomad` modules), and
+(`go vet`/`go test` across each module with a `go.mod` — `runtime`, `fakenomad`
+and `drills`, plus a check that no module lacks a leg), and
 secrets-grep (`TestM3StagingReceiptNoCanaryLeak`, zero planted-canary hits)
 — then writes the per-item pass/fail result, linked to the commit it ran
 at, to `CONFORMANCE-RECEIPT.md`. Exits non-zero if any ladder item is red.
 Fixing a red ladder step is out of scope for the receipt itself — bounce it
 back to whoever owns the failing rung.
+
+Set `RECEIPT_RUNNER_LOG=<path>` to have the receipt print the path its own
+runner log was filed at, so a reader can go check the run rather than take the
+table's word for it. That is a citation and nothing more: it gates no row,
+changes no status, and a run given no log reads exactly as it did before.
 
 ## RPP operations
 
