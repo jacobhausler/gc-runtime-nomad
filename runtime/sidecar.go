@@ -129,7 +129,35 @@ type binding struct {
 	// never Env or Files — so this never re-carries a secret past the
 	// channel stage() already routes them through.
 	PromptPending *stageConfig `json:"prompt_pending,omitempty"`
+
+	// Lifecycle is gc's own stageConfig.Lifecycle value ("one_shot", pool,
+	// ...) recorded at launch confirmation. It is the ONLY reason
+	// opIsRunning can tell a one_shot seat apart from every other kind —
+	// gc's wire sends the value on `start`/`provision` already
+	// (stageConfig doc), this pack simply carries it forward instead of
+	// dropping it once launch is confirmed. Empty means either a
+	// pre-lifecycle-field binding or a caller that sent none; either way
+	// the drain-ack retirement path below stays off, which is the correct
+	// (do-nothing) default.
+	Lifecycle string `json:"lifecycle,omitempty"`
+
+	// ExitReason receipts WHY this pack ended a session's incarnation on
+	// its own initiative, for the one case that exists today:
+	// exitReasonDrainAck — a one_shot seat whose captured pane
+	// transcript already shows the claim-free remote drain ack
+	// (`gc hook --drain-ack` / `gc runtime drain-ack --json`) succeeding,
+	// so nothing legitimate is left for it to do. Written just before the
+	// stop this pack itself drives (opIsRunning -> reapDrainedOneShot ->
+	// opStop), so it is visible in the sidecar for the brief window before
+	// opStop's own sidecar.remove() clears the binding, and durably in the
+	// decision log either way (logDecision). Absent means this pack never
+	// self-initiated the session's end — every other stop (an operator, gc
+	// itself) leaves it unset.
+	ExitReason string `json:"exit_reason,omitempty"`
 }
+
+// exitReasonDrainAck is the one ExitReason value this pack writes today.
+const exitReasonDrainAck = "drain_ack"
 
 // sidecar is a file-based KV under a directory: one JSON file per session,
 // written temp+rename (the privatedir contract).

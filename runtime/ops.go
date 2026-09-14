@@ -1123,7 +1123,7 @@ func (l *lifecycle) adoptExisting(ctx context.Context, sessionName string, b bin
 		// re-states what the binding already holds — the recorded provider
 		// command included, so healing the marker cannot drop the command a
 		// later relaunch needs.
-		if err := l.confirmLaunched(ctx, sessionName, b.WorkDir, b.ProviderCommand); err != nil {
+		if err := l.confirmLaunched(ctx, sessionName, b.WorkDir, b.ProviderCommand, b.Lifecycle); err != nil {
 			return false, err
 		}
 		return false, fmt.Errorf("session %q already exists", sessionName)
@@ -2162,7 +2162,7 @@ func (l *lifecycle) markLaunched(ctx context.Context, sessionName string, cfg st
 	if err := l.launch(ctx, sessionName, cfg.Env, workDir, providerCommand); err != nil {
 		return err
 	}
-	if err := l.confirmLaunched(ctx, sessionName, workDir, providerCommand); err != nil {
+	if err := l.confirmLaunched(ctx, sessionName, workDir, providerCommand, cfg.Lifecycle); err != nil {
 		return err
 	}
 	return l.startupPrimeDetached(ctx, sessionName, cfg)
@@ -2195,12 +2195,12 @@ func (l *lifecycle) markTransportLaunched(ctx context.Context, sessionName strin
 	if err := l.launchWithCommand(ctx, sessionName, buildLaunchCommandForTmuxWithPaneCommand(nil, transport[1:5], workDir, transport[5])); err != nil {
 		return err
 	}
-	if err := l.confirmLaunched(ctx, sessionName, workDir, transport[5]); err != nil {
-		return err
-	}
 	cfg := stageConfig{}
 	if pending, ok, err := l.sidecar.load(sessionName); err == nil && ok && pending.PromptPending != nil {
 		cfg = *pending.PromptPending
+	}
+	if err := l.confirmLaunched(ctx, sessionName, workDir, transport[5], cfg.Lifecycle); err != nil {
+		return err
 	}
 	return l.startupPrimeDetached(ctx, sessionName, cfg)
 }
@@ -2208,7 +2208,7 @@ func (l *lifecycle) markTransportLaunched(ctx context.Context, sessionName strin
 // confirmLaunched records a launch that has already succeeded. Its caller
 // holds sessionName's lock: opStart/markLaunched hold it end-to-end, while
 // opExec acquires it only for gc's canonical transport-launch command.
-func (l *lifecycle) confirmLaunched(ctx context.Context, sessionName string, workDir, providerCommand string) error {
+func (l *lifecycle) confirmLaunched(ctx context.Context, sessionName string, workDir, providerCommand, lifecycleValue string) error {
 	// THE PANE MUST BE RUNNING AN AGENT, not merely holding a live pid.
 	//
 	// Measured 2026-09-12: a lane whose provider was not pre-shaped
@@ -2250,6 +2250,9 @@ func (l *lifecycle) confirmLaunched(ctx context.Context, sessionName string, wor
 	}
 	if providerCommand != "" && b.ProviderCommand != providerCommand {
 		b.ProviderCommand = providerCommand
+	}
+	if lifecycleValue != "" && b.Lifecycle != lifecycleValue {
+		b.Lifecycle = lifecycleValue
 	}
 	return l.sidecar.save(*b)
 }
@@ -3099,6 +3102,22 @@ func (l *lifecycle) opIsRunning(ctx context.Context, sessionName string) (bool, 
 	// than repeatedly treating a Codex trust dialog as a live worker.
 	if latest, ok, err := l.sidecar.load(sessionName); err == nil && ok && latest.PromptStatus == promptStatusNotReady {
 		return false, nil
+	}
+	// A one_shot seat that has already told the controller it is done (its
+	// own captured transcript shows the claim-free drain ack succeeding)
+	// but is still sitting here, alive and idle at its prompt, holds its
+	// slot forever otherwise — the reconciler only ever asks
+	// this op whether the session is running, and an interactive agent
+	// process answers "yes" regardless of whether it has anything left to
+	// do. Retiring it here, rather than waiting for a separate sweep, means
+	// the very poll that would have reported alive=true instead reports
+	// the session gone.
+	if alive {
+		if latest, ok, err := l.sidecar.load(sessionName); err == nil && ok {
+			if l.reapDrainedOneShot(ctx, sessionName, latest, allocID) {
+				return false, nil
+			}
+		}
 	}
 	return alive, nil
 }
