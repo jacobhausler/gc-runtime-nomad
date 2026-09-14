@@ -6,6 +6,13 @@ HEAD **and** goes red when one anchor is removed from the code while its doc
 comment stays. Taken 2026-09-14, pack HEAD
 `70ab73e5771384b42f7f7a8ad82f4e961d85dab3` (`fix/t5-t6-liveness-and-placement`).
 
+Redaction: the two `node=` values below, and the node name inside the first capture's
+filename, are replaced by `<builder-node>`. A machine wrote those fields into the runner
+capture on its own and a human copy-quoted them here, which is exactly what
+`TestNoEstateLeakageInShippedFiles` refuses to ship: an adopter reading this receipt is
+sent to a host that does not exist for them. Nothing else in this receipt is altered; the
+alloc ids, timestamps, exit codes and test output are verbatim.
+
 ## Why this receipt exists
 
 651a334 fixed a guard that could not fail: `TestGate4CausesAreEachNamed` read
@@ -30,8 +37,8 @@ PASS
 ok  	github.com/gastownhall/gc-runtime-nomad	0.052s
 ```
 
-`node=rhuidean alloc=32aff5c5-1cca-32f7-5e80-dbe24be0a16f exit_code=0`
-builder log: `ops/state/nomad-run/20260914T101849Z-builders-lane-rhuidean-dispatch-1789381130-a99fd9ab.log`
+`node=<builder-node> alloc=32aff5c5-1cca-32f7-5e80-dbe24be0a16f exit_code=0`
+builder log: `ops/state/nomad-run/20260914T101849Z-builders-lane-<builder-node>-dispatch-1789381130-a99fd9ab.log` (the node name also sits inside that capture's filename, so it is redacted with the field)
 
 ## Red — and red with the comment left in place
 
@@ -59,7 +66,7 @@ FAIL	github.com/gastownhall/gc-runtime-nomad	0.014s
 FAIL
 ```
 
-`node=haus-ubuntu alloc=fe92e54d-309a-e92d-2bee-a0e439b7a510 exit_code=1`
+`node=<builder-node> alloc=fe92e54d-309a-e92d-2bee-a0e439b7a510 exit_code=1`
 builder log: `ops/state/nomad-run/20260914T101937Z-builders-dispatch-1789381177-873d4f61.log`
 
 The failure names the cause it noticed, which is the second half of the point:
