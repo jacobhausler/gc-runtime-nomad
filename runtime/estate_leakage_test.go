@@ -41,9 +41,12 @@ func leakageClasses() []leakageClass {
 		},
 		{
 			"private hostname",
-			regexp.MustCompile(`\b(rhuidean|haus-gpu|gaidin|callindor)\b`),
+			regexp.MustCompile(`\b(rhuidean|haus-gpu|gaidin|callindor|haus-ubuntu)\b`),
 			"a machine on the author's network; naming it in a build receipt or an error " +
-				"tells an adopter to go somewhere that does not exist for them",
+				"tells an adopter to go somewhere that does not exist for them. The " +
+				"`haus-ubuntu` arm was added 2026-09-14 after a shipped runner log carried " +
+				"`node=haus-ubuntu`: this class had every builder node the author had named " +
+				"by hand and not the one a machine wrote into the capture on its own.",
 		},
 		{
 			"private filesystem path",
@@ -90,8 +93,19 @@ func shouldScanForLeakage(path string) bool {
 	if leakageSkipNames[filepath.Base(path)] {
 		return false
 	}
+	// The extension allowlist is a allowlist over FILE TYPES, and it has to be
+	// as wide as the surface that actually ships. It did not cover `.log` until
+	// 2026-09-14, which is how a runner log with the author's checkout path and
+	// builder node in it passed this guard and shipped inside the conformance
+	// receipt's own citation: the pack started shipping captured logs when
+	// RECEIPT_RUNNER_LOG became a receipt field, and nothing widened this
+	// function to follow it. A runner log is the single most estate-shaped
+	// artifact a pack can ship — it is machine-written, so nobody read it before
+	// it was committed — so a `.log` that reaches this walk is read in full, not
+	// skipped for size. Redact a capture (`repo=`, `node=` and friends) BEFORE
+	// it is committed; a log admitted here is a shipped file.
 	switch filepath.Ext(path) {
-	case ".go", ".md", ".sh", ".toml", ".json", ".lock", ".yaml", ".yml":
+	case ".go", ".md", ".sh", ".toml", ".json", ".lock", ".yaml", ".yml", ".log":
 		return true
 	}
 	return filepath.Base(path) == "Dockerfile"
