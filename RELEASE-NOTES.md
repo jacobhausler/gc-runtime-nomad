@@ -76,6 +76,7 @@ claim that the shipped contract moved.
   in-tree (`abce9e9`), so the receipt's gate can be read out of the shipped
   artifact instead of out of a machine. Citation only: it gates no row, changes
   no status, and a run given no log reads as it did before.
+
 # v1.0.6
 
 - Nomad transport now honors the standard `NOMAD_CACERT`,
