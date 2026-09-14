@@ -19,21 +19,24 @@ deployment-owned bootstrap that used to be able to stand in front of it is gone.
 
 ## Current with HEAD `abce9e9` (2026-09-14)
 
+`abce9e9` is the branch head this entry was cut against, and the shas below are the
+delta it stands for — stable refs, not a claim about whatever is checked out now.
+
 Five commits landed after the notes above were cut. None moves the jobspec, the
-start wire, or an environment contract, so the version stays `1.0.7` -- the
+start wire, or an environment contract, so the version stays `1.0.7` — the
 version an installer reads is pinned to this section by
 `TestPackVersionMatchesTheTopReleaseNote`, and a new section here would be a
 claim that the shipped contract moved.
 
 - **The lane-debug skill ships with the pack** (`c0bba37`). `skills/` now
   carries two: the box-level `gc-nomad-debug`, and the lane-level
-  `gc-nomad-lane-debug` -- the seven-layer walk (queue, demand, seats, boxes,
+  `gc-nomad-lane-debug` — the seven-layer walk (queue, demand, seats, boxes,
   pane, binding, alloc events) that names which layer's evidence is lying
   before anyone reaches into a box. It arrived as a same-name copy and this
   repo's own leakage guard rejected it on sight (estate ticket ids, a `tail` of
   one machine's health log, a deployment-local helper), so it was rewritten as
   the measurements an adopter can resolve, with the deployment-local step
-  replaced by the native fallback spelled out -- read `gc.routed_to` and the
+  replaced by the native fallback spelled out — read `gc.routed_to` and the
   `hold:` labels off the beads. `gc` registers it as
   `runtime-nomad.gc-nomad-lane-debug`, the pack-qualified name, which is the
   proof a pack consumer actually receives it.
@@ -49,7 +52,7 @@ claim that the shipped contract moved.
   shell block in `README.md` or `COMPATIBILITY.md` again.
 - **Two config keys a stock `gc` drops in silence are named instead of
   instructed** (`9343b6d`). `runtime_provider` and `runtime_env` are both
-  pin-only -- zero occurrences of either TOML key at the upstream base -- and
+  pin-only — zero occurrences of either TOML key at the upstream base — and
   TOML decoding drops an unknown key without an error, so an instruction naming
   one produces the darkest failure this pack has: the config is accepted, the
   key evaporates, the lane comes up looking configured. The env half is
@@ -59,8 +62,8 @@ claim that the shipped contract moved.
   otherwise discover it.
 - **An artifact that will not fetch names its cause, and whose fix it is**
   (`185a81f`). Nomad fetches and checksums artifacts before the task runs, so
-  an allocation that died fetching has executed nothing -- no image, no shell,
-  no `gc`, no agent -- and the event read as a start fault, sending operators
+  an allocation that died fetching has executed nothing — no image, no shell,
+  no `gc`, no agent — and the event read as a start fault, sending operators
   into the one place where nothing was wrong. The diagnosis now separates the
   two artifact URLs this pack declares (the image tarball from
   `GC_NOMAD_AGENT_IMAGE_TAR`, the operator's to fix; the `gc` download, derived
