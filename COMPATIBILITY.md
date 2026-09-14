@@ -613,6 +613,20 @@ environment.** That is the only form here that keeps a secret out of
 named for PEM material but nothing checks the contents — any credential
 you are willing to read from a file can use it.
 
+**The caveat before you pick a name.** Nothing here keeps a secret secret once
+it has reached a seat: for the life of that box the value is readable by the
+agent and by every process the agent spawns. What crosses into the box is the
+session identity, the city target plus its transport credentials, and exactly
+the keys you named. What does not cross is this pack's own `GC_NOMAD_TOKEN`,
+any key you did not name, and any secret value in a jobspec, in dispatch
+metadata, or on the launch argv. That asymmetry is the recommendation: the pack
+cannot protect a long-lived secret inside an allocation, so **do not put one
+there** — mint a short-lived credential scoped to a single seat or lane at your
+issuer and stage that, so a box you cannot audit is holding something that
+expires without your involvement. A long-lived human or organization credential
+in `GC_NOMAD_EXTRA_SECRET_KEYS` is the shape this section exists to warn
+against, and `_PEM` naming alone does not fix it.
+
 Two ways to supply the value in the first place:
 
 - **Your provider's env map**, if `gc` can interpolate it there.

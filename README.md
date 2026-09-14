@@ -449,6 +449,24 @@ Provider-agnostic: what any deployment of this pack needs.
    credential NAME is the deployer's choice — the runtime has no credential
    vocabulary and none of its own keys to reserve; the box installs what it
    finds there.
+
+   **Residual risk, in the paragraph an adopter reads.** What crosses into the
+   box is the session identity, the city target plus whatever its endpoint needs,
+   and exactly the keys you named. What does not: this pack's own `GC_NOMAD_TOKEN`,
+   which authenticates the API calls and never leaves the orchestrator; any key
+   you did not name; and any secret value in a jobspec, in dispatch metadata, or
+   on the launch argv. What remains is the shape of the channel, not a defect: a
+   staged key whose name does **not** end in `_PEM` arrives as a literal `export`
+   in the sourced `env.sh`, so its value lives in the agent's process environment
+   — readable via `/proc/<pid>/environ` by the agent and every process it spawns,
+   and persisted unscrubbed by the log sink or the egress directory if the agent
+   ever prints its own environment. So stage what a seat actually needs, minted
+   short-lived and scoped to that seat or lane at your issuer rather than a
+   long-lived organization credential, and give the key a `_PEM` name wherever the
+   credential shape tolerates being read from a file. `COMPATIBILITY.md` owns the
+   full disclosure and the rotation runbook (“Getting a credential to a seat”,
+   “Where credentials actually end up”, “Rotating a credential, when one has
+   leaked”).
 9. **Resolvers and placement are configuration, not cosmetics.**
     `GC_NOMAD_DNS_SERVERS` unset means Nomad declares no `dns` stanza, the alloc
     inherits the **client host's** `resolv.conf`, and on a systemd-resolved host
