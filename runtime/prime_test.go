@@ -142,6 +142,74 @@ esac
 	}
 }
 
+func TestPrimeTimeoutFailsClosedAndRecordsPaneTail(t *testing.T) {
+	l, _ := newTestLifecycle(t)
+	ctx := context.Background()
+	const session = "sess-prime-timeout"
+
+	fakeBin := t.TempDir()
+	fakeTmux := filepath.Join(fakeBin, "tmux")
+	if err := os.WriteFile(fakeTmux, []byte(`#!/bin/sh
+case "$1" in
+new-session|has-session) exit 0 ;;
+list-panes) exit 1 ;;
+list-windows) printf 'main\n' ;;
+new-window) exit 0 ;;
+*) exit 1 ;;
+esac
+`), 0o700); err != nil {
+		t.Fatalf("write fake tmux: %v", err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if err := l.opProvisionWithConfig(ctx, session, stageConfig{Nudge: "claim", ReadyPromptPrefix: "› Ask Codex"}); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	launch := []string{"/bin/sh", "-c", `'tmux' 'new-session' '-d' '-s' 'main' 'sleep 60'`}
+	if code, out, err := l.opExec(ctx, session, launch); err != nil || code != 0 {
+		t.Fatalf("exec transport launch = (%d, %q, %v)", code, out, err)
+	}
+
+	const tail = "Do you trust the contents of this directory?\n1. Yes, continue"
+	if code, _, err := l.opExec(ctx, session, []string{"/bin/sh", "-c",
+		`printf 'not_ready' > "$NOMAD_SECRETS_DIR/gc-prime/status" && printf '` + tail + `' > "$NOMAD_SECRETS_DIR/gc-prime/pane_tail"`}); err != nil || code != 0 {
+		t.Fatalf("write timeout evidence: (%d, %v)", code, err)
+	}
+
+	running, err := l.opIsRunning(ctx, session)
+	if err != nil {
+		t.Fatalf("opIsRunning: %v", err)
+	}
+	if running {
+		t.Fatal("opIsRunning reported a session healthy after detached priming timed out")
+	}
+	b, ok, err := l.sidecar.load(session)
+	if err != nil || !ok {
+		t.Fatalf("sidecar.load = (%+v, %v, %v)", b, ok, err)
+	}
+	if b.PromptStatus != promptStatusNotReady {
+		t.Fatalf("prompt_status = %q, want %q", b.PromptStatus, promptStatusNotReady)
+	}
+	if b.PromptPaneTail != tail {
+		t.Fatalf("prompt_pane_tail = %q, want %q", b.PromptPaneTail, tail)
+	}
+}
+
+func TestPrimeReadinessTimeoutCapturesPaneTail(t *testing.T) {
+	script := primeScript
+	notReady := strings.Index(script, "printf 'not_ready\\n' > \"$DIR/status\"")
+	if notReady < 0 {
+		t.Fatal("primeScript has no not_ready timeout branch")
+	}
+	tail := strings.LastIndex(script[:notReady], "capture-pane")
+	if tail < 0 {
+		t.Fatal("primeScript does not capture a pane tail before recording not_ready")
+	}
+	if !strings.Contains(script[tail:notReady], `> "$DIR/pane_tail"`) {
+		t.Fatalf("primeScript does not persist the pane tail before not_ready: %q", script[tail:notReady])
+	}
+}
+
 // extractPaneReadyFunc pulls the pane_ready() shell function verbatim out of
 // the real, shipped primeScript, so a test of "the readiness predicate" is a
 // test of the exact bytes staged into an alloc, not a hand-copied

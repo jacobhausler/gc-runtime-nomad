@@ -49,12 +49,13 @@ const (
 	// into the script because they are PROVIDER facts, not runtime facts: a
 	// different agent family paints a different "still loading" line and a
 	// different busy indicator.
-	primeLoadingFile = "loading_marker.txt"
-	primeBusyFile    = "busy_marker.txt"
-	primeMarkerFile  = "prompted_at"
-	primeStatusFile  = "status"
-	primeReadyBudget = 180 // seconds; mirrors startupReadyBudgetDefault
-	primeInterval    = 2   // seconds; mirrors startupReadyIntervalDefault
+	primeLoadingFile  = "loading_marker.txt"
+	primeBusyFile     = "busy_marker.txt"
+	primeMarkerFile   = "prompted_at"
+	primeStatusFile   = "status"
+	primePaneTailFile = "pane_tail"
+	primeReadyBudget  = 180 // seconds; mirrors startupReadyBudgetDefault
+	primeInterval     = 2   // seconds; mirrors startupReadyIntervalDefault
 
 	// primeDefaultReadyDelayMs is the settle applied AFTER readiness when the
 	// wire carries no ready_delay_ms. This is a different
@@ -270,6 +271,12 @@ if [ "$ready" -eq 1 ]; then
     printf 'submit_unconfirmed\n' > "$DIR/status"
   fi
 else
+  # The readiness budget is a fail-closed startup check, not a silent wait.
+  # Keep the last bounded pane view beside the status so the sidecar can tell
+  # an interactive trust dialog from a slow or dead agent after this window
+  # exits. A tmux capture failure still leaves an empty evidence file and the
+  # not_ready status below, never a false healthy result.
+  tmux capture-pane -p -t main -S -120 2>/dev/null > "$DIR/pane_tail" || :
   printf 'not_ready\n' > "$DIR/status"
 fi
 `
@@ -468,6 +475,12 @@ func (l *lifecycle) syncPromptedMarker(ctx context.Context, sessionName string) 
 	if len(parts) > 1 {
 		status = strings.TrimSpace(parts[1])
 	}
+	tail := ""
+	tailCmd := fmt.Sprintf("cat \"$NOMAD_SECRETS_DIR/%s/%s\" 2>/dev/null", primeDirName, primePaneTailFile)
+	tailCode, tailOut, tailErr := l.client.execAlloc(ctx, allocID, execTaskName, []string{"/bin/sh", "-c", tailCmd})
+	if tailErr == nil && tailCode == 0 {
+		tail = strings.TrimSpace(string(tailOut))
+	}
 	if marker == "" && status == "" {
 		return // still waiting - nothing landed yet
 	}
@@ -489,6 +502,9 @@ func (l *lifecycle) syncPromptedMarker(ctx context.Context, sessionName string) 
 	} else if marker != "" {
 		b.PromptStatus = promptStatusDelivered
 	}
+	// Replace rather than append: a later successful prime must clear stale
+	// timeout evidence left by an earlier bounded attempt.
+	b.PromptPaneTail = tail
 	if err := l.sidecar.save(*b); err != nil {
 		l.logDecision("startup-prime session=%s marker sync could not save: %v", sessionName, err)
 	}

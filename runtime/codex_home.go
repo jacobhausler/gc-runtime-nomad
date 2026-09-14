@@ -42,13 +42,16 @@ package main
 //   - jobspec.go's sessionSecretsMB: reserves the secrets tmpfs a Codex home
 //     lives on (its own comment says so) but writes nothing into it.
 //
+// The pack-created session directory is trusted unconditionally, even when no
+// provider stanza is needed: Codex must not stop at its first-use trust dialog.
+//
 // What stays deployment-owned. The pack invents no lane: the provider stanza is
 // rendered from keys the seat's provider env block stages
 // (GC_CODEX_MODEL_PROVIDER + GC_CODEX_MODEL_PROVIDER_BASE_URL, optionally
 // GC_CODEX_WIRE_API), which is the one per-seat channel gc has. No credential
-// value is interpolated into env.sh, argv, or the job spec, and a seat that
-// names no provider renders no config — it gets only the CODEX_HOME override,
-// which is the one thing that cannot be left to the host.
+// value is interpolated into env.sh, argv, or the job spec. A seat that names
+// no provider still gets the trust-only config and CODEX_HOME override, which
+// are the two image-mode facts that cannot be left to the host.
 
 import (
 	"fmt"
@@ -73,6 +76,13 @@ const (
 	// the value is always the mount point the box reported, never a path this
 	// pack guesses, and never the orchestrator's.
 	codexHomeEnvName = "CODEX_HOME"
+
+	// codexSessionWorkDir is the fallback directory paneCwdPrelude creates
+	// inside every allocation when gc's host-side WorkDir is not present in the
+	// box. It is the image-mode session cwd observed by Codex, so the pack's
+	// owned Codex home trusts it without a deployment opt-in or a first-use
+	// prompt. This fixed in-box path is separate from gc's host-side WorkDir.
+	codexSessionWorkDir = "/alloc/work"
 
 	// codexAuthJSONKey is the staged secret holding the agent's auth JSON. It
 	// arrives through GC_NOMAD_EXTRA_SECRET_KEYS (staging.go's
@@ -150,8 +160,8 @@ func buildCodexHomeEnvLines() []byte {
 // addition to the per-key secret files stage() already emits. A malformed
 // provider declaration is a config error and stops the op — a broken TOML the
 // agent silently falls back from is worse than a launch that names which key
-// was wrong — while an absent declaration is the ordinary no-op every other
-// staging field here already performs.
+// was wrong — while an absent declaration still stages the trust-only config
+// needed by a fresh image-mode Codex home.
 //
 // Secret bytes never enter the rendered config: the auth file is staged from
 // its own already-staged value, the same copy the legacy bootstrap installed
@@ -174,8 +184,9 @@ func buildCodexHomeFiles(secretEnv map[string]string) ([]stageFile, error) {
 }
 
 // renderCodexConfig renders the Codex provider config for a seat from its
-// staged environment, or nothing at all when the seat names no provider (a
-// baked image home, or a lane that needs none, is left alone).
+// staged environment. It always includes trust for the pack-created session
+// directory; when the seat names no provider, that trust-only config is still
+// needed to prevent Codex's interactive first-use dialog.
 //
 // Anything gc renders as a command flag is deliberately NOT written here: the
 // image-mode pane runs gc's rendered command, and its -c flags override this
@@ -184,7 +195,9 @@ func renderCodexConfig(secretEnv map[string]string) ([]byte, error) {
 	provider := strings.TrimSpace(secretEnv[codexModelProviderKey])
 	baseURL := strings.TrimSpace(secretEnv[codexModelProviderBaseURL])
 	if provider == "" && baseURL == "" {
-		return nil, nil
+		var b strings.Builder
+		writeCodexProjectTrust(&b)
+		return []byte(b.String()), nil
 	}
 	if !validCodexProviderName(provider) {
 		return nil, fmt.Errorf("codex provider config: %s is not a plain provider name ([A-Za-z0-9._-] only)", codexModelProviderKey)
@@ -226,7 +239,14 @@ func renderCodexConfig(secretEnv map[string]string) ([]byte, error) {
 	b.WriteString("request_max_retries = 0\n")
 	b.WriteString("stream_max_retries = 0\n")
 	fmt.Fprintf(&b, "stream_idle_timeout_ms = %d\n", codexStreamIdleTimeoutMS)
+	writeCodexProjectTrust(&b)
 	return []byte(b.String()), nil
+}
+
+func writeCodexProjectTrust(b *strings.Builder) {
+	b.WriteByte('\n')
+	fmt.Fprintf(b, "[projects.%s]\n", tomlQuote(codexSessionWorkDir))
+	b.WriteString("trust_level = \"trusted\"\n")
 }
 
 // validCodexProviderName accepts the portable bare-key form of a TOML table

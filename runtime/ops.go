@@ -1738,6 +1738,7 @@ func (l *lifecycle) recoverBinding(ctx context.Context, sessionName string, prio
 		recovered.WorkDir = base.WorkDir
 		recovered.PromptedAt = base.PromptedAt
 		recovered.PromptStatus = base.PromptStatus
+		recovered.PromptPaneTail = base.PromptPaneTail
 		recovered.PromptPending = base.PromptPending
 	}
 	if err := l.sidecar.save(recovered); err != nil {
@@ -2256,14 +2257,15 @@ func (l *lifecycle) confirmLaunched(ctx context.Context, sessionName string, wor
 // stageTracked runs stage under the sidecar's StagePending marker, so a
 // staging failure leaves a binding that records, on its face, that this
 // pack's own staging half never finished against the box it dispatched. A
-// cfg with nothing to materialize skips the marker entirely: stage is a no-op there, so
-// provision/start keep behaving exactly as they did before the marker
-// existed when no config rides the call.
+// legacy cfg with nothing to materialize skips the marker entirely: stage is a
+// no-op there. Image mode is different because stage always materializes the
+// pack-owned Codex home and its trust entry, so it remains under the marker
+// even with an otherwise empty cfg.
 func (l *lifecycle) stageTracked(ctx context.Context, sessionName string, cfg stageConfig) error {
 	if err := l.savePromptPending(sessionName, cfg); err != nil {
 		return err
 	}
-	if !stagesAnything(cfg) {
+	if !stagesAnything(cfg) && l.agentImage == "" {
 		return l.stage(ctx, sessionName, cfg)
 	}
 	if err := l.setStagePending(sessionName, true); err != nil {
@@ -2317,8 +2319,8 @@ func (l *lifecycle) setStagePending(sessionName string, pending bool) error {
 
 // stagesAnything reports whether cfg — plus the process-env extra secret
 // keys stage() merges in (GC_NOMAD_EXTRA_SECRET_KEYS) — has any workspace or
-// secret payload to materialize, i.e. whether stage will make an exec call
-// that can fail partway.
+// secret payload to materialize. Image-mode's unconditional Codex-home
+// staging is lifecycle-owned and is accounted for by stageTracked.
 func stagesAnything(cfg stageConfig) bool {
 	if len(cfg.CopyFiles) > 0 {
 		return true
@@ -2347,8 +2349,8 @@ func stagesAnything(cfg stageConfig) bool {
 // and as a sourceable env.sh contract for the launched process. Neither
 // channel ever touches the job spec, argv, or the sidecar — the only place
 // secret BYTES appear is the alloc-exec WebSocket stream itself (accepted
-// residual). A zero-value cfg is a no-op, so start/provision behave
-// exactly as before staging landed when a caller sends no config.
+// residual). A zero-value cfg remains a no-op for legacy mode; image mode
+// still stages its pack-owned Codex home and trusted session cwd.
 func (l *lifecycle) stage(ctx context.Context, sessionName string, cfg stageConfig) error {
 	workspaceFiles, err := copyFilesToStageFiles(cfg.CopyFiles)
 	if err != nil {
@@ -2417,7 +2419,7 @@ func (l *lifecycle) stage(ctx context.Context, sessionName string, cfg stageConf
 	// already failed closed in newLifecycle, and the launch-script seam that
 	// shape used to reach has been deleted.
 	secretsDir := ""
-	if l.agentImage != "" && len(secretEnv) > 0 {
+	if l.agentImage != "" {
 		resolved, err := l.boxSecretsDir(ctx, sessionName)
 		if err != nil {
 			return fmt.Errorf("staging secrets for %q: %w", sessionName, err)
@@ -2432,7 +2434,11 @@ func (l *lifecycle) stage(ctx context.Context, sessionName string, cfg stageConf
 		}
 		secretFiles = append(secretFiles, stageFile{Path: k, Content: []byte(v), Mode: 0o600})
 	}
-	if len(secretEnv) > 0 {
+	// An image-mode session always gets the pack-owned Codex home, even when
+	// the wire carries no provider env or secret. The home carries the
+	// unconditional trust entry for /alloc/work; gating this block on
+	// len(secretEnv) leaves a fresh image box at Codex's first-use dialog.
+	if len(secretEnv) > 0 || secretsDir != "" {
 		// The image shape has no deployment bootstrap to hand its agent home to
 		// (the launch-script seam is deleted outright), so the pack
 		// stages the Codex home itself. A box staged without an image keeps its
@@ -3087,6 +3093,13 @@ func (l *lifecycle) opIsRunning(ctx context.Context, sessionName string) (bool, 
 	// once PromptedAt is set or no prompt was ever staged, so this costs
 	// nothing on the common path and never affects the liveness answer.
 	l.syncPromptedMarker(ctx, sessionName)
+	// A detached prime that exhausted its readiness budget is not a healthy
+	// agent session. The sidecar status is the bounded startup check's durable
+	// result; return false so gc can apply its ordinary repair/retry path rather
+	// than repeatedly treating a Codex trust dialog as a live worker.
+	if latest, ok, err := l.sidecar.load(sessionName); err == nil && ok && latest.PromptStatus == promptStatusNotReady {
+		return false, nil
+	}
 	return alive, nil
 }
 

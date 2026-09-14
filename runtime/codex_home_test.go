@@ -6,6 +6,41 @@ import (
 	"testing"
 )
 
+func TestRenderCodexConfigTrustsPackWorkDir(t *testing.T) {
+	config, err := renderCodexConfig(map[string]string{
+		codexModelProviderKey:     "haus_qwen38_rtxpro6000",
+		codexModelProviderBaseURL: "http://192.168.0.122:18030/v1",
+	})
+	if err != nil {
+		t.Fatalf("renderCodexConfig: %v", err)
+	}
+	text := string(config)
+	if !strings.Contains(text, "[projects.\"/alloc/work\"]") {
+		t.Fatalf("Codex config does not trust the pack-created work directory:\n%s", text)
+	}
+	if !strings.Contains(text, "trust_level = \"trusted\"") {
+		t.Fatalf("Codex config does not mark the pack-created work directory trusted:\n%s", text)
+	}
+}
+
+func TestImageModeAlwaysStagesCodexWorkDirTrust(t *testing.T) {
+	l, _ := newTestLifecycle(t)
+	l.agentImage = "localhost/gc-agent:test"
+	const session = "sess-image-codex-trust-only"
+
+	if err := l.opProvisionWithConfig(context.Background(), session, stageConfig{}); err != nil {
+		t.Fatalf("image-mode provision: %v", err)
+	}
+	config, err := l.opExec2(context.Background(), session, "cat \"$NOMAD_SECRETS_DIR/"+codexHomeRelConfigPath+"\"")
+	if err != nil {
+		t.Fatalf("read staged trust-only config: %v", err)
+	}
+	if !strings.Contains(config, "[projects.\"/alloc/work\"]") ||
+		!strings.Contains(config, "trust_level = \"trusted\"") {
+		t.Fatalf("trust-only image config = %q, want trusted /alloc/work project", config)
+	}
+}
+
 // TestImageModeStagesCodexHomeOverridingProviderEnv is the RED/GREEN pair
 // for a measured failure. Proof runs 5-7 killed every image-mode box at
 // launch: the box inherited the orchestrator's CODEX_HOME (the provider env
@@ -83,6 +118,8 @@ func TestImageModeStagesCodexHomeOverridingProviderEnv(t *testing.T) {
 		`model_reasoning_effort = "medium"`,
 		"model_auto_compact_token_limit = 131072",
 		"[model_providers.haus_qwen38_rtxpro6000]",
+		"[projects.\"/alloc/work\"]",
+		"trust_level = \"trusted\"",
 		`base_url = "http://192.168.0.122:18030/v1"`,
 		`wire_api = "responses"`,
 	} {
@@ -169,17 +206,22 @@ func TestCodexHomeOwnedOnlyWhenTheBoxHasNoHome(t *testing.T) {
 	}
 }
 
-// TestRenderCodexConfigNoOpAndConfigErrors: an unnamed provider is the
-// ordinary no-op every other staging field performs (a baked image home is left
-// alone); a named-but-malformed one is a config error that stops the launch,
-// and the error names the key rather than the value it rejected.
-func TestRenderCodexConfigNoOpAndConfigErrors(t *testing.T) {
-	if got, err := renderCodexConfig(map[string]string{"GC_SESSION": "plain"}); err != nil || got != nil {
-		t.Fatalf("renderCodexConfig with no provider named = (%q, %v), want (nil, nil)", got, err)
+// TestRenderCodexConfigTrustOnlyAndConfigErrors: an unnamed provider still
+// receives the pack-created workdir trust entry; a named-but-malformed one is
+// a config error that stops the launch, and the error names the key rather than
+// the value it rejected.
+func TestRenderCodexConfigTrustOnlyAndConfigErrors(t *testing.T) {
+	got, err := renderCodexConfig(map[string]string{"GC_SESSION": "plain"})
+	if err != nil {
+		t.Fatalf("renderCodexConfig with no provider named: %v", err)
+	}
+	if text := string(got); !strings.Contains(text, "[projects.\"/alloc/work\"]") ||
+		!strings.Contains(text, "trust_level = \"trusted\"") {
+		t.Fatalf("renderCodexConfig with no provider named = %q, want trust-only config", got)
 	}
 
 	const badName = `haus"; drop = "x`
-	got, err := renderCodexConfig(map[string]string{
+	got, err = renderCodexConfig(map[string]string{
 		codexModelProviderKey:     badName,
 		codexModelProviderBaseURL: "http://192.168.0.122:18030/v1",
 	})

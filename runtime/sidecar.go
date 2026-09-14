@@ -111,6 +111,11 @@ type binding struct {
 	// prompt.
 	PromptStatus string `json:"prompt_status,omitempty"`
 
+	// PromptPaneTail is the bounded tmux capture taken when detached startup
+	// priming exhausts its readiness budget. It makes a fail-closed not_ready
+	// result actionable without claiming that the box reached Codex's prompt.
+	PromptPaneTail string `json:"prompt_pane_tail,omitempty"`
+
 	// PromptPending carries the startup-prompt/priming subset of the
 	// stageConfig gc sent at provision/start time forward to whichever launch
 	// path actually runs. It exists because gc's
