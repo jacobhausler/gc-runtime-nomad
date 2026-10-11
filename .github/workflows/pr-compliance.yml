@@ -24,7 +24,18 @@ jobs:
         run: |
           set -uo pipefail
           if ls docs/pr-diagrams/*.png >/dev/null 2>&1; then
-            echo "compliant: archify explainer on branch"; exit 0
+            # C8 composition law (v0.3, owner directive 2026-10-11 msg
+            # 1558848147726278728): a diagram-carrying PR must lead its
+            # body with a Problem / User-story prose section — the digest
+            # and the reviewer read it first. Machine checks PRESENCE;
+            # whether prose+canvas actually deliver 90/90 is the reviewer's
+            # call (three Qs: what breaks today / what never again / what
+            # touches what), same split as the C2 token's two claims.
+            if printf '%s' "$BODY" | grep -qiE '^#{1,3}[[:space:]]*(Problem|User[ -]?Story|Story|Why|Context)([:.][[:space:]]|.*)?$|^[[:space:]]*\*\*[: ]?(Problem|User[ -]?Story|Story|Why|Context)'; then
+              echo "compliant: archify explainer on branch + prose header in body (C1/C8)"; exit 0
+            fi
+            echo "::error::diagram present but body lacks a leading '## Problem' or '## User story' prose section (v0.3 C8: reviewers must get the what/why before the canvas — haus-docs rules/pr-diagram-standard.md)"
+            exit 1
           fi
           if printf '%s' "$BODY" | grep -qE '^pr-diagram:[[:space:]]*exempt.*\..*\.'; then
             echo "compliant: two-claim exemption token (C2)"; exit 0
