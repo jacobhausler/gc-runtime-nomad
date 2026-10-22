@@ -1,4 +1,9 @@
 name: Runtime Nomad Conformance
+# ci-contract: estate-ci@v1
+# P1 observe (NEXTGEN-CI (e)): this file declares the pin the P2 cutover PR will
+# call (tests/budget.json at the interim (b) numbers). The `uses:` of the reusable
+# arrives with the cutover (with the GC_REF-sha binary cache and the ruleset flip),
+# at which point preflight verifies this line agrees with the reusable ref, per law.
 
 on:
   push:
