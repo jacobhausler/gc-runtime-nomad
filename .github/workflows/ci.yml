@@ -41,19 +41,19 @@ env:
 jobs:
   receipt:
     name: Phase-1 conformance receipt (full offline ladder)
-    # Self-hosted labels come from a repository variable so this file names no
-    # private machine, and so a FORK works without editing CI. A fork has no
-    # CI_RUNNER_LABELS set, falls through to ubuntu-latest, and its first push
-    # gets a real run instead of a job queued forever against a runner that
-    # does not exist for it.
+    # Hardcoded runner labels (gen-4 CI audit P0, NEXTGEN-CI (e)). This used to
+    # read the repository variable CI_RUNNER_LABELS, but the repository carries
+    # ZERO Actions variables (actions/variables total_count=0, verified
+    # 2026-10-21), so the expression always evaluated to ubuntu-latest — on
+    # push events too — and every run's job labels are ["ubuntu-latest"],
+    # including the last green run (33706101837, push@main 2026-09-03). The
+    # indirection was dead: deleting it is zero-delta.
     #
     # ubuntu-latest is not a degraded path here: this job is the OFFLINE
-    # conformance ladder, and the pull_request leg has always run it on
-    # ubuntu-latest. Nothing in it needs the self-hosted host.
-    #
-    # To use your own runner: set the repository variable CI_RUNNER_LABELS to a
-    # JSON array, e.g. ["self-hosted","linux","my-label"].
-    runs-on: ${{ (github.event_name == 'push' && vars.CI_RUNNER_LABELS != '') && fromJSON(vars.CI_RUNNER_LABELS) || 'ubuntu-latest' }}
+    # conformance ladder, and every leg has always run on ubuntu-latest.
+    # Nothing in it needs a self-hosted host, and a fork needs no CI edit —
+    # the label is GitHub-hosted for everyone.
+    runs-on: ubuntu-latest
     timeout-minutes: 20
 
     steps:
