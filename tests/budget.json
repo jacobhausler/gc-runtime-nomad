@@ -1,0 +1,8 @@
+{
+  "schema": "estate-ci/budget-v0",
+  "mode": "observe",
+  "pr_gate_wall_s": 330,
+  "runner_min_per_pr": 3,
+  "runner_min_wk": 10,
+  "basis": "NEXTGEN-CI (b) row gc-runtime-nomad, cut-time interim: wall-min budget 5.5 (330 s), re-cut to 4.0 (240 s) at the P2 GC_REF-sha binary cache cutover; measured 4.47 wall, 89% of it was go install. runner-min/PR budget 3 (measured 4.6, target ~1.8); weekly 10 per the D18/D17 table (dormant four ~10/wk). Re-cut from the P1 observe week per budget basis law (S5): budget = measured p95 x 1.15 per component (provisioning p95 + suite p95)."
+}
